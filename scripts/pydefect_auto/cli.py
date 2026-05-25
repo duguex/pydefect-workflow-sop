@@ -1,5 +1,4 @@
 import argparse
-import asyncio
 import json
 import logging
 import os
@@ -97,7 +96,7 @@ def cmd_run(args):
 
 def cmd_watch(args):
     from .watcher import loop_run
-    asyncio.run(loop_run())
+    loop_run()
 
 
 def cmd_stage(args):

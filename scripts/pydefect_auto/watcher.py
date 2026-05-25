@@ -1,30 +1,32 @@
-import asyncio
-import json
-import os
+import time
 from pathlib import Path
 
 from .utils import logger, log_setup
+from .config import load_plan
+from .pipeline import single_run
+
+WATCH_INTERVAL = 600
 
 
-async def loop_run(interval=600):
+def loop_run(interval=None):
+    interval = interval or WATCH_INTERVAL
     log_setup()
-    logger.info("Watcher started (interval=%ds). Watching for info.json in subdirectories...", interval)
+    logger.info("Watcher started (interval=%ds). Watching for plan.yaml in subdirs...", interval)
 
     while True:
         for entry in sorted(Path(".").iterdir()):
             if not entry.is_dir():
                 continue
-            info_path = entry / "info.json"
-            if not info_path.exists():
+            plan_path = entry / "plan.yaml"
+            if not plan_path.exists():
                 continue
 
             logger.info("Found project: %s", entry.name)
             try:
-                from .pipeline import single_run
-                from .config import load_info
-                info = load_info(str(info_path))
-                await asyncio.to_thread(single_run, str(entry.resolve()), info, auto=True)
+                info, raw = load_plan(str(entry.resolve()))
+                stages_cfg = raw.get("stages", {}) if raw else {}
+                single_run(str(entry.resolve()), info, auto=True, stage_config=stages_cfg)
             except Exception as e:
                 logger.error("Error processing %s: %s", entry.name, e)
 
-        await asyncio.sleep(interval)
+        time.sleep(interval)

@@ -24,7 +24,7 @@ def run(project_root, info, auto=False):
 
     dopant = info.get("dopant_element", [])
     if not dopant:
-        logger.error("No dopant_element specified in info.json")
+        logger.error("No dopant_element specified in plan.yaml")
         return False
 
     # Only process the dopant that's new — assume at least one is new
