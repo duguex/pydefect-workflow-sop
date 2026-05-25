@@ -18,7 +18,6 @@ DEFAULT_PLAN = {
         "obj": "",
         "dopant_elements": [],
         "poscar_src": "",
-        "poscar": "unitcell/structure_opt/POSCAR",
     },
     "parameters": {
         "functional": "pbesol",
@@ -85,8 +84,6 @@ def generate_plan(project_dir, obj, dopant_elements=None, poscar_src=None,
                         chosen["mpid"], chosen["spg"], chosen["energy"])
         else:
             logger.warning("MP download failed. Place POSCAR manually at %s", poscar_dst)
-
-    plan["project"]["poscar"] = "unitcell/structure_opt/POSCAR"
 
     # ② ENCUT
     encut = kwargs.get("encut")
