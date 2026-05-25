@@ -117,7 +117,7 @@ def generate_plan(project_dir, obj, dopant_elements=None, poscar_src=None,
             sub_list.append({"impurity": d, "site": host})
     plan["defects"]["substitutionals"] = sub_list
 
-    # ⑤ Query available POTCAR variants
+    # ⑤ Query available POTCAR variants and set defaults
     if poscar_dst.exists():
         try:
             from pymatgen.core import SETTINGS
@@ -126,14 +126,21 @@ def generate_plan(project_dir, obj, dopant_elements=None, poscar_src=None,
             if potcar_dir.is_dir():
                 all_elements = set(_extract_elements(obj)) | set(dopants)
                 variants = {}
+                defaults = []
                 for el in sorted(all_elements):
                     import re
                     matches = [d.name for d in potcar_dir.iterdir()
                                if d.is_dir()
                                and re.match(rf'^{re.escape(el)}(_|$)', d.name, re.IGNORECASE)]
                     if matches:
-                        variants[el] = sorted(matches)
+                        sorted_matches = sorted(matches)
+                        variants[el] = sorted_matches
+                        # Default = base name (no suffix)
+                        base = next((m for m in sorted_matches if m == el), sorted_matches[0])
+                        defaults.append(base)
                 plan["_potcar_variants"] = variants
+                if not kwargs.get("pp"):
+                    plan["parameters"]["pp"] = defaults
         except Exception as e:
             logger.debug("POTCAR variant query failed: %s", e)
 
