@@ -86,7 +86,7 @@ def generate_plan(project_dir, obj, dopant_elements=None, poscar_src=None,
         else:
             logger.warning("MP download failed. Place POSCAR manually at %s", poscar_dst)
 
-    plan["project"]["poscar"] = str(poscar_dst)
+    plan["project"]["poscar"] = "unitcell/structure_opt/POSCAR"
 
     # ② ENCUT
     encut = kwargs.get("encut")
@@ -277,18 +277,39 @@ def write_plan(project_dir, plan, available_phases=None):
     path = Path(project_dir) / PLAN_FILENAME
     yaml_str = yaml.dump(plan, default_flow_style=None, sort_keys=False,
                          allow_unicode=True)
+
+    if available_phases:
+        # Insert phase list as comment right after poscar_src line
+        comment_lines = ["# Available phases from MP:\n"]
+        for i, p in enumerate(available_phases):
+            default = " (default)" if i == 0 else ""
+            energy_str = f"E_form={p['energy']:.3f} eV/atom" if p['energy'] < 990 else "energy=N/A"
+            comment_lines.append(
+                f"# - mp-{p['mpid']}: {p['spg']}, {energy_str}, "
+                f"a={p['a']:.3f} b={p['b']:.3f} c={p['c']:.3f}{default}\n"
+            )
+        comment_lines.append("# To use a different phase, change poscar_src:\n")
+        comment_lines.append('#   poscar_src: "MP mp-xxx"  (use MP phase)\n')
+        comment_lines.append('#   poscar_src: "./path/to/POSCAR"  (use local file)\n')
+
+        # Find the poscar_src line and its indentation
+        lines = yaml_str.splitlines(keepends=True)
+        insert_at = None
+        indent = ""
+        for i, line in enumerate(lines):
+            if line.strip().startswith("poscar_src:"):
+                insert_at = i + 1
+                indent = line[:len(line) - len(line.lstrip())]
+                break
+        # Indent comment to match the project block
+        comment_lines = [indent + cl if not cl.startswith(indent) else cl for cl in comment_lines]
+        if insert_at is not None:
+            for cl in reversed(comment_lines):
+                lines.insert(insert_at, cl)
+        yaml_str = "".join(lines)
+
     with open(path, "w") as f:
         f.write(yaml_str)
-        if available_phases:
-            f.write("# Available phases from MP:\n")
-            for i, p in enumerate(available_phases):
-                default = " (default)" if i == 0 else ""
-                energy_str = f"E_form={p['energy']:.3f} eV/atom" if p['energy'] < 990 else "energy=N/A"
-                f.write(                f"# - mp-{p['mpid']}: {p['spg']}, {energy_str}, "
-                        f"a={p['a']:.3f} b={p['b']:.3f} c={p['c']:.3f}{default}\n")
-            f.write("# To use a different phase, change poscar_src:\n")
-            f.write("#   poscar_src: \"MP mp-xxx\"  (use MP phase)\n")
-            f.write("#   poscar_src: \"./path/to/POSCAR\"  (use local file)\n")
     return path
 
 
