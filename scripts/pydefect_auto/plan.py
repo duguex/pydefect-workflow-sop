@@ -65,6 +65,8 @@ def generate_plan(project_dir, obj, dopant_elements=None, poscar_src=None,
     poscar_dst = root / "unitcell" / "structure_opt" / "POSCAR"
     poscar_dst.parent.mkdir(parents=True, exist_ok=True)
 
+    available_phases = []
+
     if poscar_src:
         src = Path(poscar_src)
         if not src.exists():
@@ -73,11 +75,14 @@ def generate_plan(project_dir, obj, dopant_elements=None, poscar_src=None,
         plan["project"]["poscar_src"] = f"local: {src.resolve()}"
         _report_poscar(poscar_dst)
     else:
-        logger.info("Downloading primitive cell from MP...")
-        poscar_tmp = _download_from_mp(obj, poscar_dst)
-        if poscar_tmp and poscar_tmp.exists():
-            plan["project"]["poscar_src"] = f"MP {obj}"
+        logger.info("Querying MP for %s phases...", obj)
+        available_phases = _query_mp_phases(obj, root, poscar_dst)
+        if available_phases:
+            chosen = available_phases[0]
+            plan["project"]["poscar_src"] = f"MP mp-{chosen['mpid']}"
             _report_poscar(poscar_dst)
+            logger.info("Default: %s (%s, E_form=%.3f eV/atom)",
+                        chosen["mpid"], chosen["spg"], chosen["energy"])
         else:
             logger.warning("MP download failed. Place POSCAR manually at %s", poscar_dst)
 
@@ -115,13 +120,13 @@ def generate_plan(project_dir, obj, dopant_elements=None, poscar_src=None,
             sub_list.append({"impurity": d, "site": host})
     plan["defects"]["substitutionals"] = sub_list
 
-    # ④ Apply overrides from kwargs
+    # ⑤ Apply overrides from kwargs
     for k, v in kwargs.items():
         if k in ("encut",):
             continue
         _set_nested(plan, k, v)
 
-    return plan
+    return plan, available_phases
 
 
 def _report_poscar(poscar_path):
@@ -133,26 +138,87 @@ def _report_poscar(poscar_path):
                 s.num_sites, s.get_space_group_info()[0])
 
 
-def _download_from_mp(obj, dst_path):
-    """Download target cell from MP, copy to dst_path. Returns dst_path on success."""
+def _query_mp_phases(obj, root, dst_path):
+    """Download all MP phases matching obj, return sorted list of phase info dicts."""
     dst_path = Path(dst_path)
     dst_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_root = dst_path.parent / ".mp_download"
-    tmp_root.mkdir(exist_ok=True)
+    tmp_root = Path(tempfile.mkdtemp(dir=str(root)))
+
     try:
         cmd = f"pydefect_vasp mp -e {_obj_to_elements(obj)} --e_above_hull 0.0005"
         result = _run_cmd(cmd, cwd=str(tmp_root))
         if result != 0:
-            return None
-        for p in tmp_root.iterdir():
-            if p.is_dir() and obj in p.name:
-                poscars = list(p.glob("POSCAR*")) + list(p.glob("CONTCAR*"))
-                if poscars:
-                    shutil.copy2(str(poscars[0]), str(dst_path))
-                    return dst_path
+            return []
+
+        from pymatgen.core import Structure
+        phases = []
+        for p in sorted(tmp_root.iterdir()):
+            if not p.is_dir():
+                continue
+            name = p.name
+            if "_mp-" not in name:
+                continue
+            mpid = name.split("_mp-", 1)[1]
+
+            poscar_path = None
+            for candidate in list(p.glob("POSCAR*")) + list(p.glob("CONTCAR*")):
+                poscar_path = candidate
+                break
+            if not poscar_path:
+                continue
+
+            try:
+                s = Structure.from_file(str(poscar_path))
+                spg = s.get_space_group_info()[0]
+                formula = s.composition.reduced_formula
+            except Exception:
+                continue
+
+            from pymatgen.core import Composition
+            if Composition(formula).reduced_composition != Composition(obj).reduced_composition:
+                continue
+
+            phases.append({
+                "mpid": mpid,
+                "spg": spg,
+                "formula": formula,
+                "energy": 999.0,
+                "poscar": str(poscar_path),
+                "n_atoms": s.num_sites,
+                "a": round(s.lattice.a, 3),
+                "b": round(s.lattice.b, 3),
+                "c": round(s.lattice.c, 3),
+            })
+
+        if not phases:
+            return []
+
+        # Try to get formation energies from MP API
+        mpids = [p["mpid"] for p in phases]
+        if mpids:
+            try:
+                from mp_api.client import MPRester
+                with MPRester() as mpr:
+                    docs = mpr.summary.search(
+                        material_ids=[f"mp-{m}" for m in mpids],
+                        fields=["material_id", "formation_energy_per_atom"],
+                    )
+                    energy_map = {d.material_id.replace("mp-", ""): d.formation_energy_per_atom for d in docs}
+                    for p in phases:
+                        if p["mpid"] in energy_map:
+                            p["energy"] = round(energy_map[p["mpid"]], 4)
+            except Exception:
+                logger.debug("MPRester query failed: energies not available")
+
+        phases.sort(key=lambda p: p["energy"])
+        shutil.copy2(phases[0]["poscar"], str(dst_path))
+        return phases
+
     finally:
         shutil.rmtree(str(tmp_root), ignore_errors=True)
-    return None
+
+
+
 
 
 def _obj_to_elements(obj):
@@ -207,11 +273,22 @@ def _run_cmd(cmd, cwd=None):
     return r.returncode
 
 
-def write_plan(project_dir, plan):
+def write_plan(project_dir, plan, available_phases=None):
     path = Path(project_dir) / PLAN_FILENAME
+    yaml_str = yaml.dump(plan, default_flow_style=None, sort_keys=False,
+                         allow_unicode=True)
     with open(path, "w") as f:
-        yaml.dump(plan, f, default_flow_style=None, sort_keys=False,
-                  allow_unicode=True)
+        f.write(yaml_str)
+        if available_phases:
+            f.write("# Available phases from MP:\n")
+            for i, p in enumerate(available_phases):
+                default = " (default)" if i == 0 else ""
+                energy_str = f"E_form={p['energy']:.3f} eV/atom" if p['energy'] < 990 else "energy=N/A"
+                f.write(                f"# - mp-{p['mpid']}: {p['spg']}, {energy_str}, "
+                        f"a={p['a']:.3f} b={p['b']:.3f} c={p['c']:.3f}{default}\n")
+            f.write("# To use a different phase, change poscar_src:\n")
+            f.write("#   poscar_src: \"MP mp-xxx\"  (use MP phase)\n")
+            f.write("#   poscar_src: \"./path/to/POSCAR\"  (use local file)\n")
     return path
 
 
@@ -287,7 +364,6 @@ def _deep_copy(d):
 
 
 def _set_nested(d, key, value):
-    """Set a nested key like 'crisp.cluster' in a dict."""
     parts = key.split(".")
     for p in parts[:-1]:
         if p not in d:

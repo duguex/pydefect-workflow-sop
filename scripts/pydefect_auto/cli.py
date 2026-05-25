@@ -31,15 +31,15 @@ def cmd_plan(args):
     dopant = args.dopant or []
     poscar = args.poscar or None
 
-    plan = generate_plan(root, args.obj, dopant_elements=dopant,
-                          poscar_src=poscar, functional=args.functional,
-                          encut=args.encut)
+    plan, phases = generate_plan(root, args.obj, dopant_elements=dopant,
+                                   poscar_src=poscar, functional=args.functional,
+                                   encut=args.encut)
 
     # Print summary
     print(print_summary(plan))
 
     # Write plan.yaml
-    write_plan(root, plan)
+    write_plan(root, plan, available_phases=phases)
     print(f"plan.yaml written to {plan_path}")
     print("Review and edit plan.yaml, then run: pydefect-run run")
 
