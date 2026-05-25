@@ -277,42 +277,42 @@ def write_plan(project_dir, plan, available_phases=None):
 
     lines = yaml_str.splitlines(keepends=True)
 
-    # Find poscar_src indentation
+    # Find insertion points
+    pp_line = None
+    poscar_line = None
     indent = ""
-    insert_at = None
     for i, line in enumerate(lines):
         if line.strip().startswith("poscar_src:"):
-            insert_at = i + 1
+            poscar_line = i
             indent = line[:len(line) - len(line.lstrip())]
-            break
+        if line.strip().startswith("pp:"):
+            pp_line = i
 
-    comments = []
-
-    # Phase listing
-    if available_phases:
-        comments.append("# Available phases from MP:\n")
+    if available_phases and poscar_line is not None:
+        phase_comment = [f"{indent}# Available phases from MP:\n"]
         for i, p in enumerate(available_phases):
             default = " (default)" if i == 0 else ""
             energy_str = f"E_form={p['energy']:.3f} eV/atom" if p['energy'] < 990 else "energy=N/A"
-            comments.append(
-                f"# - mp-{p['mpid']}: {p['spg']}, {energy_str}, "
+            phase_comment.append(
+                f"{indent}# - mp-{p['mpid']}: {p['spg']}, {energy_str}, "
                 f"a={p['a']:.3f} b={p['b']:.3f} c={p['c']:.3f}{default}\n"
             )
-        comments.append("# To use a different phase, change poscar_src:\n")
-        comments.append('#   poscar_src: "MP mp-xxx"  (use MP phase)\n')
-        comments.append('#   poscar_src: "./path/to/POSCAR"  (use local file)\n')
+        phase_comment.append(f"{indent}# To use a different phase, change poscar_src:\n")
+        phase_comment.append(f'{indent}#   poscar_src: "MP mp-xxx"  (use MP phase)\n')
+        phase_comment.append(f'{indent}#   poscar_src: "./path/to/POSCAR"  (use local file)\n')
+        for c in reversed(phase_comment):
+            lines.insert(poscar_line + 1, c)
+        # Adjust pp_line for the inserted lines
+        if pp_line is not None:
+            pp_line += len(phase_comment)
 
-    # POTCAR variants
-    if potcar_variants:
-        comments.append("# Available POTCAR variants:\n")
+    if potcar_variants and pp_line is not None:
+        pp_indent = lines[pp_line][:len(lines[pp_line]) - len(lines[pp_line].lstrip())]
+        potcar_comment = [f"{pp_indent}# Available POTCAR variants:\n"]
         for el, variants in potcar_variants.items():
-            comments.append(f"#   {el}: {', '.join(variants)}\n")
-        comments.append("# To override, set pp list in parameters section.\n")
-
-    if comments and insert_at is not None:
-        indented = [indent + c for c in comments]
-        for c in reversed(indented):
-            lines.insert(insert_at, c)
+            potcar_comment.append(f"{pp_indent}#   {el}: {', '.join(variants)}\n")
+        for c in reversed(potcar_comment):
+            lines.insert(pp_line + 1, c)
 
     with open(path, "w") as f:
         f.write("".join(lines))
