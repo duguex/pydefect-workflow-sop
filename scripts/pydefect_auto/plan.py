@@ -117,7 +117,27 @@ def generate_plan(project_dir, obj, dopant_elements=None, poscar_src=None,
             sub_list.append({"impurity": d, "site": host})
     plan["defects"]["substitutionals"] = sub_list
 
-    # ⑤ Apply overrides from kwargs
+    # ⑤ Query available POTCAR variants
+    if poscar_dst.exists():
+        try:
+            from pymatgen.core import SETTINGS
+            from pathlib import Path as PPath
+            potcar_dir = PPath(SETTINGS.get("PMG_VASP_PSP_DIR", "")) / "POT_GGA_PAW_PBE_54"
+            if potcar_dir.is_dir():
+                all_elements = set(_extract_elements(obj)) | set(dopants)
+                variants = {}
+                for el in sorted(all_elements):
+                    import re
+                    matches = [d.name for d in potcar_dir.iterdir()
+                               if d.is_dir()
+                               and re.match(rf'^{re.escape(el)}(_|$)', d.name, re.IGNORECASE)]
+                    if matches:
+                        variants[el] = sorted(matches)
+                plan["_potcar_variants"] = variants
+        except Exception as e:
+            logger.debug("POTCAR variant query failed: %s", e)
+
+    # ⑥ Apply overrides from kwargs
     for k, v in kwargs.items():
         if k in ("encut",):
             continue
@@ -244,41 +264,58 @@ def _run_cmd(cmd, cwd=None):
 
 def write_plan(project_dir, plan, available_phases=None):
     path = Path(project_dir) / PLAN_FILENAME
+
+    # Extract internal fields before YAML dump
+    potcar_variants = plan.pop("_potcar_variants", {})
     yaml_str = yaml.dump(plan, default_flow_style=None, sort_keys=False,
                          allow_unicode=True)
 
+    if not available_phases and not potcar_variants:
+        with open(path, "w") as f:
+            f.write(yaml_str)
+        return path
+
+    lines = yaml_str.splitlines(keepends=True)
+
+    # Find poscar_src indentation
+    indent = ""
+    insert_at = None
+    for i, line in enumerate(lines):
+        if line.strip().startswith("poscar_src:"):
+            insert_at = i + 1
+            indent = line[:len(line) - len(line.lstrip())]
+            break
+
+    comments = []
+
+    # Phase listing
     if available_phases:
-        # Insert phase list as comment right after poscar_src line
-        comment_lines = ["# Available phases from MP:\n"]
+        comments.append("# Available phases from MP:\n")
         for i, p in enumerate(available_phases):
             default = " (default)" if i == 0 else ""
             energy_str = f"E_form={p['energy']:.3f} eV/atom" if p['energy'] < 990 else "energy=N/A"
-            comment_lines.append(
+            comments.append(
                 f"# - mp-{p['mpid']}: {p['spg']}, {energy_str}, "
                 f"a={p['a']:.3f} b={p['b']:.3f} c={p['c']:.3f}{default}\n"
             )
-        comment_lines.append("# To use a different phase, change poscar_src:\n")
-        comment_lines.append('#   poscar_src: "MP mp-xxx"  (use MP phase)\n')
-        comment_lines.append('#   poscar_src: "./path/to/POSCAR"  (use local file)\n')
+        comments.append("# To use a different phase, change poscar_src:\n")
+        comments.append('#   poscar_src: "MP mp-xxx"  (use MP phase)\n')
+        comments.append('#   poscar_src: "./path/to/POSCAR"  (use local file)\n')
 
-        # Find the poscar_src line and its indentation
-        lines = yaml_str.splitlines(keepends=True)
-        insert_at = None
-        indent = ""
-        for i, line in enumerate(lines):
-            if line.strip().startswith("poscar_src:"):
-                insert_at = i + 1
-                indent = line[:len(line) - len(line.lstrip())]
-                break
-        # Indent comment to match the project block
-        comment_lines = [indent + cl if not cl.startswith(indent) else cl for cl in comment_lines]
-        if insert_at is not None:
-            for cl in reversed(comment_lines):
-                lines.insert(insert_at, cl)
-        yaml_str = "".join(lines)
+    # POTCAR variants
+    if potcar_variants:
+        comments.append("# Available POTCAR variants:\n")
+        for el, variants in potcar_variants.items():
+            comments.append(f"#   {el}: {', '.join(variants)}\n")
+        comments.append("# To override, set pp list in parameters section.\n")
+
+    if comments and insert_at is not None:
+        indented = [indent + c for c in comments]
+        for c in reversed(indented):
+            lines.insert(insert_at, c)
 
     with open(path, "w") as f:
-        f.write(yaml_str)
+        f.write("".join(lines))
     return path
 
 
