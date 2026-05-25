@@ -124,23 +124,38 @@ def generate_plan(project_dir, obj, dopant_elements=None, poscar_src=None,
             from pathlib import Path as PPath
             potcar_dir = PPath(SETTINGS.get("PMG_VASP_PSP_DIR", "")) / "POT_GGA_PAW_PBE_54"
             if potcar_dir.is_dir():
+                # Read vise's default POTCAR mapping (normal preset)
+                potcar_set = {}
+                try:
+                    import vise.input_set.datasets.potcar_set as _ps
+                    potcar_set_path = PPath(_ps.__file__).with_suffix(".yaml")
+                except Exception:
+                    potcar_set_path = None
+                if potcar_set_path.exists():
+                    import yaml as _yaml
+                    with open(potcar_set_path) as _f:
+                        raw = _yaml.safe_load(_f.read())
+                    potcar_set = raw or {}
+                    # Extract normal preset (first column before "---")
+                    for k, v in potcar_set.items():
+                        if isinstance(v, str) and "---" in v:
+                            potcar_set[k] = v.split("---")[0].strip()
+
                 all_elements = set(_extract_elements(obj)) | set(dopants)
                 variants = {}
-                defaults = []
+                used_pp = []
                 for el in sorted(all_elements):
                     import re
                     matches = [d.name for d in potcar_dir.iterdir()
                                if d.is_dir()
                                and re.match(rf'^{re.escape(el)}(_|$)', d.name, re.IGNORECASE)]
                     if matches:
-                        sorted_matches = sorted(matches)
-                        variants[el] = sorted_matches
-                        # Default = base name (no suffix)
-                        base = next((m for m in sorted_matches if m == el), sorted_matches[0])
-                        defaults.append(base)
+                        variants[el] = sorted(matches)
+                        default = potcar_set.get(el, el)
+                        used_pp.append(default)
                 plan["_potcar_variants"] = variants
                 if not kwargs.get("pp"):
-                    plan["parameters"]["pp"] = defaults
+                    plan["parameters"]["pp"] = used_pp
         except Exception as e:
             logger.debug("POTCAR variant query failed: %s", e)
 
