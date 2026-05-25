@@ -91,7 +91,21 @@ def generate_plan(project_dir, obj, dopant_elements=None, poscar_src=None,
                                plan["parameters"]["pp"])
     plan["parameters"]["encut"] = encut
 
-    # ③ Infer defects
+    # ③ Auto-detect DFT+U
+    if poscar_dst.exists() and not plan["parameters"]["hubbard_u"]:
+        try:
+            from vise.input_set.datasets.dataset_util import LDAU
+            from pymatgen.core import Structure
+            symbols = [s.species_string for s in Structure.from_file(str(poscar_dst))]
+            if LDAU(symbols).is_ldau_needed:
+                plan["parameters"]["hubbard_u"] = True
+                logger.info("DFT+U auto-enabled (elements: %s)", ", ".join(symbols))
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.warning("DFT+U detection failed: %s", e)
+
+    # ④ Infer defects
     intrinsic = _extract_elements(obj)
     dopants = plan["project"]["dopant_elements"]
     plan["defects"]["vacancies"] = intrinsic
