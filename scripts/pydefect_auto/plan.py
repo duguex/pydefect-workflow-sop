@@ -1,0 +1,282 @@
+"""plan.yaml 生成、校验、读写"""
+
+import logging
+import os
+import re
+import shutil
+import tempfile
+from pathlib import Path
+
+import yaml
+
+logger = logging.getLogger("pydefect_auto")
+
+PLAN_FILENAME = "plan.yaml"
+
+DEFAULT_PLAN = {
+    "project": {
+        "obj": "",
+        "dopant_elements": [],
+        "poscar_src": "",
+        "poscar": "unitcell/structure_opt/POSCAR",
+    },
+    "parameters": {
+        "functional": "pbesol",
+        "encut": None,
+        "hubbard_u": False,
+        "pp": [],
+    },
+    "supercell": {"max_atoms": 600, "min_atoms": 200},
+    "defects": {
+        "vacancies": [],
+        "substitutionals": [],
+        "interstitials": False,
+        "iindex": [],
+        "charge_states": [-2, -1, 0, 1, 2],
+        "complex_n": 1,
+        "max_remote": 5.0,
+    },
+    "cpd": {
+        "gas_corrections": {"O2": 1.374, "Cl2": 1.228, "F2": 0.924},
+    },
+    "crisp": {"cluster": None},
+    "stages": {
+        "unitcell": True,
+        "cpd": True,
+        "defect_gen": True,
+        "submit": True,
+        "postproc": True,
+        "doping": False,
+        "complex": False,
+    },
+}
+
+
+def generate_plan(project_dir, obj, dopant_elements=None, poscar_src=None,
+                   functional="pbesol", **kwargs):
+    root = Path(project_dir)
+    plan = _deep_copy(DEFAULT_PLAN)
+
+    plan["project"]["obj"] = obj
+    plan["project"]["dopant_elements"] = dopant_elements or []
+    plan["parameters"]["functional"] = functional
+
+    # ① POSCAR
+    poscar_dst = root / "unitcell" / "structure_opt" / "POSCAR"
+    poscar_dst.parent.mkdir(parents=True, exist_ok=True)
+
+    if poscar_src:
+        src = Path(poscar_src)
+        if not src.exists():
+            raise FileNotFoundError(f"POSCAR not found: {poscar_src}")
+        shutil.copy2(str(src), str(poscar_dst))
+        plan["project"]["poscar_src"] = f"local: {src.resolve()}"
+        _report_poscar(poscar_dst)
+    else:
+        logger.info("Downloading primitive cell from MP...")
+        poscar_tmp = _download_from_mp(obj, poscar_dst)
+        if poscar_tmp and poscar_tmp.exists():
+            plan["project"]["poscar_src"] = f"MP {obj}"
+            _report_poscar(poscar_dst)
+        else:
+            logger.warning("MP download failed. Place POSCAR manually at %s", poscar_dst)
+
+    plan["project"]["poscar"] = str(poscar_dst)
+
+    # ② ENCUT
+    encut = kwargs.get("encut")
+    if not encut and poscar_dst.exists():
+        encut = _detect_encut(poscar_dst, plan["parameters"]["functional"],
+                               plan["parameters"]["hubbard_u"],
+                               plan["parameters"]["pp"])
+    plan["parameters"]["encut"] = encut
+
+    # ③ Infer defects
+    intrinsic = _extract_elements(obj)
+    dopants = plan["project"]["dopant_elements"]
+    plan["defects"]["vacancies"] = intrinsic
+    sub_list = []
+    for d in dopants:
+        for host in intrinsic:
+            sub_list.append({"impurity": d, "site": host})
+    plan["defects"]["substitutionals"] = sub_list
+
+    # ④ Apply overrides from kwargs
+    for k, v in kwargs.items():
+        if k in ("encut",):
+            continue
+        _set_nested(plan, k, v)
+
+    return plan
+
+
+def _report_poscar(poscar_path):
+    from pymatgen.core import Structure
+    s = Structure.from_file(str(poscar_path))
+    logger.info("POSCAR: %s (%.3f %.3f %.3f, %d atoms, %s)",
+                s.composition.reduced_formula,
+                s.lattice.a, s.lattice.b, s.lattice.c,
+                s.num_sites, s.get_space_group_info()[0])
+
+
+def _download_from_mp(obj, dst_path):
+    """Download target cell from MP, copy to dst_path. Returns dst_path on success."""
+    dst_path = Path(dst_path)
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_root = dst_path.parent / ".mp_download"
+    tmp_root.mkdir(exist_ok=True)
+    try:
+        cmd = f"pydefect_vasp mp -e {_obj_to_elements(obj)} --e_above_hull 0.0005"
+        result = _run_cmd(cmd, cwd=str(tmp_root))
+        if result != 0:
+            return None
+        for p in tmp_root.iterdir():
+            if p.is_dir() and obj in p.name:
+                poscars = list(p.glob("POSCAR*")) + list(p.glob("CONTCAR*"))
+                if poscars:
+                    shutil.copy2(str(poscars[0]), str(dst_path))
+                    return dst_path
+    finally:
+        shutil.rmtree(str(tmp_root), ignore_errors=True)
+    return None
+
+
+def _obj_to_elements(obj):
+    return " ".join(_extract_elements(obj))
+
+
+def _extract_elements(formula):
+    return re.findall(r'[A-Z][a-z]?', formula)
+
+
+def _detect_encut(poscar_path, functional, hubbard_u, pp):
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpd = Path(tmp)
+        shutil.copy(str(poscar_path), str(tmpd / "POSCAR"))
+        cmd = f"vise vasp_set -x {functional}"
+        if hubbard_u:
+            cmd += " --options set_hubbard_u True"
+        if pp:
+            cmd += " " + " ".join(f"--potcar {p}" for p in pp)
+        r = _run_cmd(cmd, cwd=str(tmpd))
+        if r != 0:
+            return None
+        potcar_path = tmpd / "POTCAR"
+        if not potcar_path.exists():
+            return None
+        enmax = _read_enmax(str(potcar_path))
+        if enmax:
+            encut = 1.3 * enmax
+            logger.info("ENCUT = 1.3 × max(ENMAX) = 1.3 × %.1f = %.0f", enmax, encut)
+            return round(encut)
+    return None
+
+
+def _read_enmax(potcar_path):
+    max_enmax = 0.0
+    with open(potcar_path) as f:
+        for line in f:
+            if "ENMAX" in line:
+                for part in line.strip().split(";"):
+                    if "ENMAX" in part:
+                        val = float(part.split("=")[-1].strip())
+                        max_enmax = max(max_enmax, val)
+    return max_enmax if max_enmax > 0 else None
+
+
+def _run_cmd(cmd, cwd=None):
+    import subprocess
+    r = subprocess.run(cmd, shell=True, cwd=cwd,
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        logger.warning("Command failed: %s\n%s", cmd, r.stderr[:200])
+    return r.returncode
+
+
+def write_plan(project_dir, plan):
+    path = Path(project_dir) / PLAN_FILENAME
+    with open(path, "w") as f:
+        yaml.dump(plan, f, default_flow_style=None, sort_keys=False,
+                  allow_unicode=True)
+    return path
+
+
+def read_plan(project_dir):
+    path = Path(project_dir) / PLAN_FILENAME
+    if not path.exists():
+        raise FileNotFoundError(f"{PLAN_FILENAME} not found in {project_dir}")
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+def print_summary(plan):
+    lines = []
+    lines.append("")
+    lines.append(f"  材料: {plan['project']['obj']}")
+    lines.append(f"  掺杂: {', '.join(plan['project']['dopant_elements']) or '无'}")
+    lines.append(f"  POSCAR: {plan['project'].get('poscar_src', '未指定')}")
+    lines.append("")
+    p = plan["parameters"]
+    lines.append("  计算参数:")
+    lines.append(f"    泛函: {p['functional']}")
+    lines.append(f"    ENCUT: {p['encut'] or '自动检测'} eV")
+    lines.append(f"    DFT+U: {'开启' if p['hubbard_u'] else '关闭'}")
+    if p["pp"]:
+        lines.append(f"    额外 POTCAR: {' '.join(p['pp'])}")
+    lines.append("")
+    d = plan["defects"]
+    lines.append("  缺陷:")
+    if d["vacancies"]:
+        lines.append(f"    空位: {', '.join('V_' + v for v in d['vacancies'])}")
+    for s in d["substitutionals"]:
+        lines.append(f"    替代: {s['impurity']}_{s['site']}")
+    lines.append(f"    电荷态: {d['charge_states']}")
+    lines.append(f"    间隙位: {'是' if d['interstitials'] else '否'}")
+    lines.append(f"    复合缺陷 N_max: {d['complex_n']}")
+    lines.append("")
+    lines.append("  各阶段:")
+    stage_names = {
+        "unitcell": "1 完美晶胞", "cpd": "2 竞争相",
+        "defect_gen": "3 缺陷生成", "submit": "4 VASP 提交",
+        "postproc": "5 后处理", "doping": "6 增量掺杂",
+        "complex": "7 复合缺陷",
+    }
+    for key, label in stage_names.items():
+        enabled = plan["stages"].get(key, True)
+        lines.append(f"    {label}: {'✓' if enabled else '—'}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def validate(plan):
+    errors = []
+    if not plan.get("project", {}).get("obj"):
+        errors.append("project.obj: 必填")
+    p = plan.get("parameters", {})
+    if p.get("encut") and (not isinstance(p["encut"], (int, float)) or p["encut"] <= 0):
+        errors.append("parameters.encut: 必须为正数")
+    d = plan.get("defects", {})
+    cs = d.get("charge_states", [])
+    if not isinstance(cs, list) or any(not isinstance(c, int) for c in cs):
+        errors.append("defects.charge_states: 必须为整数列表")
+    stages = plan.get("stages", {})
+    valid_stages = {"unitcell", "cpd", "defect_gen", "submit", "postproc", "doping", "complex"}
+    for k in stages:
+        if k not in valid_stages:
+            errors.append(f"stages.{k}: 未知的阶段名称")
+    return errors
+
+
+def _deep_copy(d):
+    import copy
+    return copy.deepcopy(d)
+
+
+def _set_nested(d, key, value):
+    """Set a nested key like 'crisp.cluster' in a dict."""
+    parts = key.split(".")
+    for p in parts[:-1]:
+        if p not in d:
+            d[p] = {}
+        d = d[p]
+    d[parts[-1]] = value

@@ -1,58 +1,55 @@
-import json
+"""plan.yaml 读取 → stage 兼容的 flat dict"""
+
 import os
+from pathlib import Path
 
-DEFAULT_INFO = {
-    "obj": "",
-    "dopant_element": [],
-    "interstitial": False,
-    "iindex": [],
-    "complex_defect": 1,
-    "remote": 5,
-    "pp": [],
-    "encut": None,
-    "supercell": {"max_atoms": 600, "min_atoms": 200},
-    "hubbard_u": False,
-    "gas_corrections": {"O2": 1.374, "Cl2": 1.228, "F2": 0.924},
-}
+import yaml
 
-SCHEMA = {
-    "obj": {"type": str, "required": True, "desc": "Target chemical formula, e.g. GaN"},
-    "dopant_element": {"type": list, "required": False, "desc": "Dopant elements for defect_set"},
-    "interstitial": {"type": bool, "required": False, "desc": "Enable interstitial analysis"},
-    "iindex": {"type": list, "required": False, "desc": "Interstitial site indices"},
-    "complex_defect": {"type": int, "required": False, "desc": "Max N for complex defects (1=single only)"},
-    "remote": {"type": (int, float), "required": False, "desc": "Remote cutoff distance (Å)"},
-    "pp": {"type": list, "required": False, "desc": "Extra POTCAR options, e.g. ['Cr_sv_GW']"},
-    "encut": {"type": (int, float), "required": False, "desc": "ENCUT override (auto if None)"},
-    "supercell": {"type": dict, "required": False, "desc": "Supercell constraints"},
-    "hubbard_u": {"type": bool, "required": False, "desc": "Enable DFT+U via --options set_hubbard_u True"},
-    "gas_corrections": {"type": dict, "required": False, "desc": "Gas molecule energy corrections (eV/molecule)"},
-}
+PLAN_FILENAME = "plan.yaml"
 
 
-def validate(info):
-    for key, spec in SCHEMA.items():
-        if spec.get("required") and key not in info:
-            raise ValueError(f"Missing required field: {key} ({spec['desc']})")
-        val = info.get(key, spec.get("default"))
-        if val is not None and not isinstance(val, spec["type"]):
-            raise TypeError(f"Field '{key}' expects {spec['type']}, got {type(val)}")
+def load_plan(project_dir):
+    """读取 plan.yaml，返回 (flat_dict, raw_dict)
 
-
-def load_info(path):
+    flat_dict 兼容旧 info.json 接口，stage 模块直接使用。
+    """
+    path = Path(project_dir) / PLAN_FILENAME
+    if not path.exists():
+        raise FileNotFoundError(f"{PLAN_FILENAME} not found in {project_dir}")
     with open(path) as f:
-        info = json.load(f)
-    validate(info)
-    for k, v in DEFAULT_INFO.items():
-        info.setdefault(k, v)
-    return info
+        raw = yaml.safe_load(f)
+
+    flat = _flatten(raw)
+    return flat, raw
 
 
-def init_info(path, obj, **overrides):
-    info = dict(DEFAULT_INFO)
-    info["obj"] = obj
-    info.update(overrides)
-    validate(info)
-    with open(path, "w") as f:
-        json.dump(info, f, indent=2)
-    return info
+def _flatten(raw):
+    p = raw.get("project", {})
+    prm = raw.get("parameters", {})
+    sc = raw.get("supercell", {})
+    d = raw.get("defects", {})
+    cpd = raw.get("cpd", {})
+    crp = raw.get("crisp", {})
+
+    flat = {
+        "obj": p.get("obj", ""),
+        "dopant_element": p.get("dopant_elements", []),
+        "encut": prm.get("encut"),
+        "hubbard_u": prm.get("hubbard_u", False),
+        "pp": prm.get("pp", []),
+        "functional": prm.get("functional", "pbesol"),
+        "supercell": {
+            "max_atoms": sc.get("max_atoms", 600),
+            "min_atoms": sc.get("min_atoms", 200),
+        },
+        "interstitial": d.get("interstitials", False),
+        "iindex": d.get("iindex", []),
+        "complex_defect": d.get("complex_n", 1),
+        "remote": d.get("max_remote", 5.0),
+        "charge_states": d.get("charge_states", [-2, -1, 0, 1, 2]),
+        "gas_corrections": cpd.get("gas_corrections", {}),
+        "cluster": crp.get("cluster"),
+        "stages": raw.get("stages", {}),
+        "_raw": raw,
+    }
+    return flat
