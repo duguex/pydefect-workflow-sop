@@ -68,6 +68,8 @@ vise vasp_set -x pbesol -t structure_opt
 ```
 pydefect-workflow-sop/
 ├── SKILL.md                 # Complete SOP in Hermes Agent skill format
+├── AGENTS.md                # Generic agent instructions (Claude Code, Codex, Cursor, etc.)
+├── CLAUDE.md                # Claude Code-specific instructions with commands
 ├── README.md                # This file
 ├── LICENSE
 ├── references/              # Deep-dive reference docs
@@ -80,10 +82,19 @@ pydefect-workflow-sop/
 │   ├── doped-comparison.md          # Comparison with doped toolkit
 │   ├── interstitial-workflow.md     # Interstitial defect workflow
 │   └── official-dos-command.md      # DOS command reference
-├── docs/                   # Supplementary guides (coming soon)
 └── scripts/
     └── verify-installation.sh  # Environment verification script
 ```
+
+### Agent Support
+
+This SOP is available in multiple agent-instruction formats:
+
+| File | Readers |
+|------|---------|
+| `SKILL.md` | [Hermes Agent](https://github.com/NousResearch/hermes-agent) |
+| `AGENTS.md` | Generic: Claude Code, Codex CLI, Cursor, Copilot, Windsurf, etc. |
+| `CLAUDE.md` | [Claude Code](https://docs.anthropic.com/en/docs/claude-code/) — includes specific commands and recovery patterns |
 
 ## Environment
 
