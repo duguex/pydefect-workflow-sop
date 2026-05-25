@@ -139,83 +139,55 @@ def _report_poscar(poscar_path):
 
 
 def _query_mp_phases(obj, root, dst_path):
-    """Download all MP phases matching obj, return sorted list of phase info dicts."""
+    """Query all MP phases matching obj. Download only the default POSCAR."""
     dst_path = Path(dst_path)
     dst_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_root = Path(tempfile.mkdtemp(dir=str(root)))
 
+    from mp_api.client import MPRester
+    with MPRester() as mpr:
+        docs = mpr.materials.summary.search(
+            formula=obj,
+            fields=["material_id", "formation_energy_per_atom", "symmetry",
+                    "structure", "energy_above_hull"],
+        )
+
+    phases = []
+    for d in docs:
+        spg = d.symmetry.symbol if d.symmetry else "?"
+        s = d.structure
+        phases.append({
+            "mpid": d.material_id.replace("mp-", ""),
+            "spg": spg,
+            "formula": s.composition.reduced_formula,
+            "energy": round(d.formation_energy_per_atom, 4) if d.formation_energy_per_atom else 999.0,
+            "poscar": None,
+            "n_atoms": s.num_sites,
+            "a": round(s.lattice.a, 3),
+            "b": round(s.lattice.b, 3),
+            "c": round(s.lattice.c, 3),
+        })
+
+    if not phases:
+        logger.warning("No phases found for %s on MP", obj)
+        return []
+
+    phases.sort(key=lambda p: p["energy"])
+
+    # Download the most stable phase's POSCAR via pydefect_vasp mp
+    chosen = phases[0]
+    tmp_root = Path(tempfile.mkdtemp(dir=str(root)))
     try:
         cmd = f"pydefect_vasp mp -e {_obj_to_elements(obj)} --e_above_hull 0.0005"
-        result = _run_cmd(cmd, cwd=str(tmp_root))
-        if result != 0:
-            return []
-
-        from pymatgen.core import Structure
-        phases = []
-        for p in sorted(tmp_root.iterdir()):
-            if not p.is_dir():
-                continue
-            name = p.name
-            if "_mp-" not in name:
-                continue
-            mpid = name.split("_mp-", 1)[1]
-
-            poscar_path = None
-            for candidate in list(p.glob("POSCAR*")) + list(p.glob("CONTCAR*")):
-                poscar_path = candidate
-                break
-            if not poscar_path:
-                continue
-
-            try:
-                s = Structure.from_file(str(poscar_path))
-                spg = s.get_space_group_info()[0]
-                formula = s.composition.reduced_formula
-            except Exception:
-                continue
-
-            from pymatgen.core import Composition
-            if Composition(formula).reduced_composition != Composition(obj).reduced_composition:
-                continue
-
-            phases.append({
-                "mpid": mpid,
-                "spg": spg,
-                "formula": formula,
-                "energy": 999.0,
-                "poscar": str(poscar_path),
-                "n_atoms": s.num_sites,
-                "a": round(s.lattice.a, 3),
-                "b": round(s.lattice.b, 3),
-                "c": round(s.lattice.c, 3),
-            })
-
-        if not phases:
-            return []
-
-        # Try to get formation energies from MP API
-        mpids = [p["mpid"] for p in phases]
-        if mpids:
-            try:
-                from mp_api.client import MPRester
-                with MPRester() as mpr:
-                    docs = mpr.summary.search(
-                        material_ids=[f"mp-{m}" for m in mpids],
-                        fields=["material_id", "formation_energy_per_atom"],
-                    )
-                    energy_map = {d.material_id.replace("mp-", ""): d.formation_energy_per_atom for d in docs}
-                    for p in phases:
-                        if p["mpid"] in energy_map:
-                            p["energy"] = round(energy_map[p["mpid"]], 4)
-            except Exception:
-                logger.debug("MPRester query failed: energies not available")
-
-        phases.sort(key=lambda p: p["energy"])
-        shutil.copy2(phases[0]["poscar"], str(dst_path))
-        return phases
-
+        _run_cmd(cmd, cwd=str(tmp_root))
+        for p in tmp_root.iterdir():
+            if p.is_dir() and chosen["mpid"] in p.name:
+                for f in list(p.glob("POSCAR*")) + list(p.glob("CONTCAR*")):
+                    shutil.copy2(str(f), str(dst_path))
+                    break
     finally:
         shutil.rmtree(str(tmp_root), ignore_errors=True)
+
+    return phases
 
 
 
