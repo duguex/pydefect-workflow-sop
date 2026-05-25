@@ -30,8 +30,6 @@ DEFAULT_PLAN = {
         "vacancies": [],
         "substitutionals": [],
         "interstitials": False,
-        "iindex": [],
-        "charge_states": [-2, -1, 0, 1, 2],
         "complex_n": 1,
         "max_remote": 5.0,
     },
@@ -370,7 +368,7 @@ def print_summary(plan):
         lines.append(f"    空位: {', '.join('V_' + v for v in d['vacancies'])}")
     for s in d["substitutionals"]:
         lines.append(f"    替代: {s['impurity']}_{s['site']}")
-    lines.append(f"    电荷态: {d['charge_states']}")
+    lines.append(f"    电荷态: (自动检测)")
     lines.append(f"    间隙位: {'是' if d['interstitials'] else '否'}")
     lines.append(f"    复合缺陷 N_max: {d['complex_n']}")
     lines.append("")
