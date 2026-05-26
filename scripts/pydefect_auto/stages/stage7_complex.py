@@ -61,7 +61,9 @@ def _generate_complex(def_dir, si_path, dopants, charges, complex_n, info):
 
     maker = ComplexDefectMaker.from_supercell_info(
         str(si_path), dopants=dopants,
-        max_distance=info.get("remote", 5.0), charges=charges,
+        max_distance=info.get("max_distance", 3.0),
+        min_distance=info.get("min_distance", 0.3),
+        charges=charges,
     )
 
     for n in range(2, complex_n + 1):

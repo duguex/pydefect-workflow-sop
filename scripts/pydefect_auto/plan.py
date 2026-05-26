@@ -31,7 +31,8 @@ DEFAULT_PLAN = {
         "substitutionals": [],
         "interstitials": False,
         "complex_n": 1,
-        "max_remote": 5.0,
+        "max_distance": 3.0,
+        "min_distance": 0.3,
     },
     "cpd": {
         "gas_corrections": {"O2": 1.374, "Cl2": 1.228, "F2": 0.924},
