@@ -455,18 +455,21 @@ pip install -e ~/pydefect-complex
 maker = ComplexDefectMaker.from_supercell_info(...)
 maker.make_all_n_body(n)                        # 几何枚举
 entries = maker.generate_entries(n_or_geometries=n)  # 组分分配 + 结构生成 + dedup
-entries = [e for e in entries if e.point_group != 'C1']   # 物理过滤
-entries = [e for e in entries if sum(1 for a in e.complex_defect.in_elements if a) <= 2]
-maker.write(entries, 'defect', merge=True)      # 写入 POSCAR
+entries = ComplexDefectMaker.filter_entries(entries)  # C1 + max-dopant 过滤
+maker.write(entries, '/absolute/path/defect', merge=True)
 ```
 
-**🚫 禁止行为（全部已验证是错误的）**：
-- ❌ `from pydefect_complex.enumerate import generate_all_entries` → 不走 Maker API，缺少 dedup，同名 entry 全部写进同一个目录互相覆盖
-- ❌ `from pydefect_complex.io import write_all` → 同上，`write_all()` 不做 dedup，N=4 的 317 个条目全写进同一个 `2Va_C1+2O_C1_0/` 目录
-- ❌ monkey-patch `ComplexDefectEnumerator._compute_orientations` → 跳过 orient 则 `point_group` 为空，后续 C1 过滤失效，导致 5616 个无过滤条目
-- ❌ 手工调用 `assign_compositions` + `generate_structure` → 缺少 `ComplexDefectEntry` 的标准初始化，distances/site_path/defect_coords 缺失或错误
-- ❌ 几何 JSON 缓存 → 加载后 `_cache` 可设但 `_compute_orientations` 需重跑；绕过比直接用 Maker 更复杂
-- ❌ `maker.write(entries, 'defect')` 用相对路径 → 写到 `cwd/defect/` 而非项目 `defect/` 目录。**必须用绝对路径**：`maker.write(entries, '/absolute/path/defect', merge=True)`
+**⚠️ 注意事项（pydefect-complex >= 已硬化版本）**：
+
+旧版 pydefect-complex（0.x）需要避免以下坑。新版（commit `8f9349c` 之后）已经把危险 API 私有化，留 deprecation shim：
+
+- ⚠️ 旧版 `from pydefect_complex.enumerate import generate_all_entries` 不做 dedup → 新版**默认 dedup=True**；旧版裸调仍可走 shim
+- ⚠️ 旧版 `from pydefect_complex.io import write_all` 接受任意 entries 互相覆盖 → 新版**改名为 `_write_all`**，shim 警告
+- ⚠️ 旧版 `from pydefect_complex.io import write_entry` → 同上
+- ⚠️ 旧版 `from pydefect_complex.enumerate import assign_compositions` → 新版**改名为 `_assign_compositions`**
+- ⚠️ 旧版 `from pydefect_complex.enumerate import generate_structure` 公开 wrapper → 新版**删除**，只能走内部 `_generate_structure`（不推荐）或 Maker API
+- ⚠️ 旧版 `maker.write(entries, 'defect')` 用相对路径 → 新版**自动 warn + resolve 到绝对路径**（不再静默踩坑）
+- ⚠️ 旧版手写 `if e.point_group != 'C1'` 过滤 → 新版**统一封装为 `ComplexDefectMaker.filter_entries(entries)`**（必须 main 进程调用，不能放在 parallel worker 里——spglib 在 pickle 跨进程时非确定性，会让 parallel/serial 结果不一致）
 
 **▶️ 正确流程（分阶，先小后大）**：
 
@@ -476,8 +479,7 @@ maker.write(entries, 'defect', merge=True)      # 写入 POSCAR
 # N=2 first (fast: ~1s)
 maker.make_all_n_body(2)
 entries = maker.generate_entries(n_or_geometries=2)
-entries = [e for e in entries if e.point_group != 'C1']
-entries = [e for e in entries if sum(1 for a in e.complex_defect.in_elements if a) <= 2]
+entries = ComplexDefectMaker.filter_entries(entries)  # 默认 C1 + max 2 dopants
 maker.write(entries, '/absolute/path/to/defect', merge=True)
 
 # After N=2 submitted and confirmed, continue N=3, then N=4 similarly
