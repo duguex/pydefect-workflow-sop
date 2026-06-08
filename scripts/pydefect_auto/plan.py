@@ -30,6 +30,8 @@ DEFAULT_PLAN = {
         "vacancies": [],
         "substitutionals": [],
         "interstitials": False,
+        "iindex": [],
+        "charges": [0],
         "complex_n": 1,
         "max_distance": 3.0,
         "min_distance": 0.3,
@@ -52,18 +54,68 @@ DEFAULT_PLAN = {
 
 def generate_plan(project_dir, obj, dopant_elements=None, poscar_src=None,
                    functional="pbesol", **kwargs):
+    """Compose plan.yaml from a chain of independent inference steps.
+
+    Each step is a pure function on (plan, ctx) → side effect on plan.
+    Splitting them keeps this function as a readable orchestrator and makes
+    each step independently testable.
+    """
     root = Path(project_dir)
     plan = _deep_copy(DEFAULT_PLAN)
+    ctx = {"obj": obj, "dopants": dopant_elements or [], "kwargs": kwargs}
 
     plan["project"]["obj"] = obj
-    plan["project"]["dopant_elements"] = dopant_elements or []
+    plan["project"]["dopant_elements"] = list(ctx["dopants"])
     plan["parameters"]["functional"] = functional
 
-    # ① POSCAR
+    # ① POSCAR: local copy or MP query
+    poscar_dst, available_phases = _acquire_poscar(root, obj, poscar_src, plan)
+    ctx["poscar_dst"] = poscar_dst
+
+    # ② ENCUT: explicit override, else 1.3×max(ENMAX) of POTCARs
+    if not kwargs.get("encut") and poscar_dst.exists():
+        plan["parameters"]["encut"] = _detect_encut(
+            poscar_dst,
+            plan["parameters"]["functional"],
+            plan["parameters"]["hubbard_u"],
+            plan["parameters"]["pp"],
+        )
+    elif kwargs.get("encut"):
+        plan["parameters"]["encut"] = kwargs["encut"]
+
+    # ③ DFT+U: detect transition-metal/rare-earth species in POSCAR
+    if poscar_dst.exists() and not plan["parameters"]["hubbard_u"]:
+        if _infer_dft_u(poscar_dst):
+            plan["parameters"]["hubbard_u"] = True
+
+    # ④ Defects: vacancies (intrinsic) + substitutionals (dopant × host)
+    plan["defects"]["vacancies"], plan["defects"]["substitutionals"] = \
+        _infer_defects(obj, ctx["dopants"])
+
+    # ⑤ POTCAR variants: enumerate available PAW_PBE variants, pick default
+    variants = _query_potcar_variants(poscar_dst, obj, ctx["dopants"])
+    if variants:
+        plan["_potcar_variants"] = variants
+        if not kwargs.get("pp"):
+            plan["parameters"]["pp"] = [variants[el][0] if isinstance(variants[el], list)
+                                        else variants[el]
+                                        for el in sorted(variants)]
+
+    # ⑥ Apply arbitrary overrides from kwargs (e.g. --max-atoms 400)
+    for k, v in kwargs.items():
+        if k == "encut":
+            continue
+        _set_nested(plan, k, v)
+
+    return plan, available_phases
+
+
+# ---------- Step ①: POSCAR acquisition ----------
+
+def _acquire_poscar(root, obj, poscar_src, plan):
+    """Copy a local POSCAR or query MP. Returns (poscar_path, available_phases)."""
     poscar_dst = root / "unitcell" / "structure_opt" / "POSCAR"
     poscar_dst.parent.mkdir(parents=True, exist_ok=True)
-
-    available_phases = []
 
     if poscar_src:
         src = Path(poscar_src)
@@ -72,99 +124,129 @@ def generate_plan(project_dir, obj, dopant_elements=None, poscar_src=None,
         shutil.copy2(str(src), str(poscar_dst))
         plan["project"]["poscar_src"] = f"local: {src.resolve()}"
         _report_poscar(poscar_dst)
+        return poscar_dst, []
+
+    logger.info("Querying MP for %s phases...", obj)
+    available_phases = _query_mp_phases(obj, root, poscar_dst)
+    if available_phases:
+        chosen = available_phases[0]
+        plan["project"]["poscar_src"] = f"MP mp-{chosen['mpid']}"
+        _report_poscar(poscar_dst)
+        logger.info("Default: %s (%s, E_form=%.3f eV/atom)",
+                    chosen["mpid"], chosen["spg"], chosen["energy"])
     else:
-        logger.info("Querying MP for %s phases...", obj)
-        available_phases = _query_mp_phases(obj, root, poscar_dst)
-        if available_phases:
-            chosen = available_phases[0]
-            plan["project"]["poscar_src"] = f"MP mp-{chosen['mpid']}"
-            _report_poscar(poscar_dst)
-            logger.info("Default: %s (%s, E_form=%.3f eV/atom)",
-                        chosen["mpid"], chosen["spg"], chosen["energy"])
-        else:
-            logger.warning("MP download failed. Place POSCAR manually at %s", poscar_dst)
+        logger.warning("MP download failed. Place POSCAR manually at %s", poscar_dst)
+    return poscar_dst, available_phases
 
-    # ② ENCUT
-    encut = kwargs.get("encut")
-    if not encut and poscar_dst.exists():
-        encut = _detect_encut(poscar_dst, plan["parameters"]["functional"],
-                               plan["parameters"]["hubbard_u"],
-                               plan["parameters"]["pp"])
-    plan["parameters"]["encut"] = encut
 
-    # ③ Auto-detect DFT+U
-    if poscar_dst.exists() and not plan["parameters"]["hubbard_u"]:
+# ---------- Step ③: DFT+U inference ----------
+
+def _infer_dft_u(poscar_path):
+    """Return True if any species in POSCAR needs DFT+U (transition metal / f-electron).
+
+    Uses vise.LDAU.is_ldau_needed if available, else falls back to a hard-coded
+    element set (d-block + lanthanides/actinides).
+    """
+    if not poscar_path.exists():
+        return False
+    try:
+        from vise.input_set.datasets.dataset_util import LDAU
+        from pymatgen.core import Structure
+        symbols = [s.species_string for s in Structure.from_file(str(poscar_path))]
+        if LDAU(symbols).is_ldau_needed:
+            logger.info("DFT+U auto-enabled (elements: %s)", ", ".join(symbols))
+            return True
+    except ImportError:
+        # Fall back to built-in element set
+        from pymatgen.core import Structure
         try:
-            from vise.input_set.datasets.dataset_util import LDAU
-            from pymatgen.core import Structure
-            symbols = [s.species_string for s in Structure.from_file(str(poscar_dst))]
-            if LDAU(symbols).is_ldau_needed:
-                plan["parameters"]["hubbard_u"] = True
-                logger.info("DFT+U auto-enabled (elements: %s)", ", ".join(symbols))
-        except ImportError:
-            pass
+            symbols = [s.species_string for s in Structure.from_file(str(poscar_path))]
         except Exception as e:
             logger.warning("DFT+U detection failed: %s", e)
+            return False
+        if any(s in _DFTU_FALLBACK for s in symbols):
+            logger.info("DFT+U auto-enabled via fallback set (elements: %s)",
+                        ", ".join(s for s in symbols if s in _DFTU_FALLBACK))
+            return True
+    except Exception as e:
+        logger.warning("DFT+U detection failed: %s", e)
+    return False
 
-    # ④ Infer defects
+
+# Hard-coded fallback: d-block + f-block. Use when vise isn't importable.
+_DFTU_FALLBACK = frozenset({
+    "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
+    "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd",
+    "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg",
+    "La", "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy",
+    "Ho", "Er", "Tm", "Yb", "Lu",
+    "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm",
+})
+
+
+# ---------- Step ④: Defect inference ----------
+
+def _infer_defects(obj, dopants):
+    """Infer vacancy and substitutional defect sets from formula + dopants.
+
+    Returns:
+        vacancies:      [element, ...]              # intrinsic Va_X
+        substitutionals: [{"impurity": e, "site": h}, ...]
+    """
     intrinsic = _extract_elements(obj)
-    dopants = plan["project"]["dopant_elements"]
-    plan["defects"]["vacancies"] = intrinsic
-    sub_list = []
+    vacancies = list(intrinsic)
+    substitutionals = []
     for d in dopants:
         for host in intrinsic:
-            sub_list.append({"impurity": d, "site": host})
-    plan["defects"]["substitutionals"] = sub_list
+            substitutionals.append({"impurity": d, "site": host})
+    return vacancies, substitutionals
 
-    # ⑤ Query available POTCAR variants and set defaults
-    if poscar_dst.exists():
-        try:
-            from pymatgen.core import SETTINGS
-            from pathlib import Path as PPath
-            potcar_dir = PPath(SETTINGS.get("PMG_VASP_PSP_DIR", "")) / "POT_GGA_PAW_PBE_54"
-            if potcar_dir.is_dir():
-                # Read vise's default POTCAR mapping (normal preset)
-                potcar_set = {}
-                try:
-                    import vise.input_set.datasets.potcar_set as _ps
-                    potcar_set_path = PPath(_ps.__file__).with_suffix(".yaml")
-                except Exception:
-                    potcar_set_path = None
-                if potcar_set_path.exists():
-                    import yaml as _yaml
-                    with open(potcar_set_path) as _f:
-                        raw = _yaml.safe_load(_f.read())
-                    potcar_set = raw or {}
-                    # Extract normal preset (first column before "---")
-                    for k, v in potcar_set.items():
-                        if isinstance(v, str) and "---" in v:
-                            potcar_set[k] = v.split("---")[0].strip()
 
-                all_elements = set(_extract_elements(obj)) | set(dopants)
-                variants = {}
-                used_pp = []
-                for el in sorted(all_elements):
-                    import re
-                    matches = [d.name for d in potcar_dir.iterdir()
-                               if d.is_dir()
-                               and re.match(rf'^{re.escape(el)}(_|$)', d.name, re.IGNORECASE)]
-                    if matches:
-                        variants[el] = sorted(matches)
-                        default = potcar_set.get(el, el)
-                        used_pp.append(default)
-                plan["_potcar_variants"] = variants
-                if not kwargs.get("pp"):
-                    plan["parameters"]["pp"] = used_pp
-        except Exception as e:
-            logger.debug("POTCAR variant query failed: %s", e)
+# ---------- Step ⑤: POTCAR variant query ----------
 
-    # ⑥ Apply overrides from kwargs
-    for k, v in kwargs.items():
-        if k in ("encut",):
-            continue
-        _set_nested(plan, k, v)
+def _query_potcar_variants(poscar_path, obj, dopants):
+    """Enumerate available PAW_PBE POTCAR variants per element.
 
-    return plan, available_phases
+    Returns {element: [variant_name, ...]} or {} if POSCAR/potcar dir missing.
+    """
+    import re
+    from pymatgen.core import SETTINGS
+    from pathlib import Path as PPath
+
+    if not poscar_path.exists():
+        return {}
+    potcar_dir = PPath(SETTINGS.get("PMG_VASP_PSP_DIR", "")) / "POT_GGA_PAW_PBE_54"
+    if not potcar_dir.is_dir():
+        return {}
+
+    # Read vise's default mapping (normal preset = first "---"-delimited column)
+    potcar_set = {}
+    try:
+        import vise.input_set.datasets.potcar_set as _ps
+        potcar_set_path = PPath(_ps.__file__).with_suffix(".yaml")
+        if potcar_set_path.exists():
+            import yaml as _yaml
+            raw = _yaml.safe_load(potcar_set_path.read_text()) or {}
+            for k, v in raw.items():
+                if isinstance(v, str) and "---" in v:
+                    potcar_set[k] = v.split("---")[0].strip()
+                else:
+                    potcar_set[k] = v
+    except Exception as e:
+        logger.debug("Failed to read vise potcar_set.yaml: %s", e)
+
+    all_elements = set(_extract_elements(obj)) | set(dopants)
+    variants = {}
+    for el in sorted(all_elements):
+        matches = [d.name for d in potcar_dir.iterdir()
+                   if d.is_dir()
+                   and re.match(rf'^{re.escape(el)}(_|$)', d.name, re.IGNORECASE)]
+        if matches:
+            # Sort: put vise's default first, then alphabetical
+            default = potcar_set.get(el, el)
+            ordered = sorted(matches, key=lambda n: (n != default, n))
+            variants[el] = ordered
+    return variants
 
 
 def _report_poscar(poscar_path):
@@ -212,16 +294,17 @@ def _query_mp_phases(obj, root, dst_path):
     phases.sort(key=lambda p: p["energy"])
 
     # Download the most stable phase's POSCAR via pydefect_vasp mp
-    chosen = phases[0]
     tmp_root = Path(tempfile.mkdtemp(dir=str(root)))
     try:
         cmd = f"pydefect_vasp mp -e {_obj_to_elements(obj)} --e_above_hull 0.0005"
         _run_cmd(cmd, cwd=str(tmp_root))
-        for p in tmp_root.iterdir():
-            if p.is_dir() and chosen["mpid"] in p.name:
-                for f in list(p.glob("POSCAR*")) + list(p.glob("CONTCAR*")):
-                    shutil.copy2(str(f), str(dst_path))
-                    break
+        for p in sorted(tmp_root.iterdir()):
+            if not p.is_dir():
+                continue
+            poscars = list(p.glob("POSCAR*")) + list(p.glob("CONTCAR*"))
+            if poscars:
+                shutil.copy2(str(poscars[0]), str(dst_path))
+                break
     finally:
         shutil.rmtree(str(tmp_root), ignore_errors=True)
 
@@ -395,9 +478,36 @@ def validate(plan):
     if p.get("encut") and (not isinstance(p["encut"], (int, float)) or p["encut"] <= 0):
         errors.append("parameters.encut: 必须为正数")
     d = plan.get("defects", {})
-    cs = d.get("charge_states", [])
-    if not isinstance(cs, list) or any(not isinstance(c, int) for c in cs):
-        errors.append("defects.charge_states: 必须为整数列表")
+
+    # charges: list[int] (consumed by stage7 via info["charges"])
+    if "charges" not in d:
+        errors.append("defects.charges: 缺失 (使用默认值 [0] 或显式指定 e.g. [-2,-1,0,1,2])")
+    else:
+        charges = d["charges"]
+        if not isinstance(charges, list) or any(not isinstance(c, int) for c in charges):
+            errors.append("defects.charges: 必须为整数列表 (e.g. [-2,-1,0,1,2])")
+
+    # iindex: list[int] (consumed by stage3 when interstitials=True)
+    if "iindex" not in d:
+        errors.append("defects.iindex: 缺失 (使用默认值 [] 或显式指定 e.g. [0, 1, 2])")
+    else:
+        iindex = d["iindex"]
+        if not isinstance(iindex, list) or any(not isinstance(i, int) for i in iindex):
+            errors.append("defects.iindex: 必须为整数列表 (e.g. [0, 1, 2])")
+
+    # substitutionals: list[{"impurity": str, "site": str}]
+    for s in d.get("substitutionals", []):
+        if not (isinstance(s, dict) and "impurity" in s and "site" in s):
+            errors.append("defects.substitutionals: 每项须含 impurity/site")
+            break
+
+    # supercell
+    sc = plan.get("supercell", {})
+    if sc.get("max_atoms") and not isinstance(sc["max_atoms"], int):
+        errors.append("supercell.max_atoms: 必须为正整数")
+    if sc.get("min_atoms") and not isinstance(sc["min_atoms"], int):
+        errors.append("supercell.min_atoms: 必须为正整数")
+
     stages = plan.get("stages", {})
     valid_stages = {"unitcell", "cpd", "defect_gen", "submit", "postproc", "doping", "complex"}
     for k in stages:

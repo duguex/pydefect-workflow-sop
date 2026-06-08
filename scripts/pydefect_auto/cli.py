@@ -90,6 +90,15 @@ def cmd_run(args):
     except FileNotFoundError:
         print("plan.yaml not found. Run: pydefect-run plan --obj ...")
         return
+    errors = validate_plan(raw)
+    if errors:
+        print("plan.yaml 校验失败 (请用 `pydefect-run plan --validate` 查看详情):")
+        for e in errors:
+            print(f"  ✗ {e}")
+        if not getattr(args, "force", False):
+            print("Run with --force to ignore validation errors.")
+            return
+        print("--force set, continuing despite errors.")
     stages_cfg = raw.get("stages", {}) if raw else {}
     single_run(args.dir, info, auto=args.auto, stage_config=stages_cfg)
 
@@ -104,6 +113,13 @@ def cmd_stage(args):
         info, raw = load_plan(args.dir)
     except FileNotFoundError:
         print("plan.yaml not found. Run: pydefect-run plan --obj ...")
+        return
+
+    errors = validate_plan(raw)
+    if errors:
+        print("plan.yaml 校验失败:")
+        for e in errors:
+            print(f"  ✗ {e}")
         return
 
     stage_map = {
@@ -158,6 +174,8 @@ def main():
     p_run = sub.add_parser("run", help="Run full pipeline")
     p_run.add_argument("dir", nargs="?", default=".", help="Project directory")
     p_run.add_argument("--auto", action="store_true", help="Non-interactive mode")
+    p_run.add_argument("--force", action="store_true",
+                       help="Run even if plan.yaml validation fails")
 
     p_stage = sub.add_parser("stage", help="Run a single stage")
     p_stage.add_argument("stage", help="Stage number (1-7)")
