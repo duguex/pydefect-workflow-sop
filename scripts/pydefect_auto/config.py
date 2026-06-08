@@ -43,6 +43,8 @@ def _flatten(raw):
             "min_atoms": sc.get("min_atoms", 200),
         },
         "interstitial": d.get("interstitials", False),
+        "iindex": d.get("iindex", []),
+        "charges": d.get("charges", [0]),
         "complex_defect": d.get("complex_n", 1),
         "max_distance": d.get("max_distance", 3.0),
         "min_distance": d.get("min_distance", 0.3),

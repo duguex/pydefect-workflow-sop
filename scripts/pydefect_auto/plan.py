@@ -471,49 +471,14 @@ def print_summary(plan):
 
 
 def validate(plan):
-    errors = []
-    if not plan.get("project", {}).get("obj"):
-        errors.append("project.obj: 必填")
-    p = plan.get("parameters", {})
-    if p.get("encut") and (not isinstance(p["encut"], (int, float)) or p["encut"] <= 0):
-        errors.append("parameters.encut: 必须为正数")
-    d = plan.get("defects", {})
+    """Thin wrapper delegating to schema.validate().
 
-    # charges: list[int] (consumed by stage7 via info["charges"])
-    if "charges" not in d:
-        errors.append("defects.charges: 缺失 (使用默认值 [0] 或显式指定 e.g. [-2,-1,0,1,2])")
-    else:
-        charges = d["charges"]
-        if not isinstance(charges, list) or any(not isinstance(c, int) for c in charges):
-            errors.append("defects.charges: 必须为整数列表 (e.g. [-2,-1,0,1,2])")
-
-    # iindex: list[int] (consumed by stage3 when interstitials=True)
-    if "iindex" not in d:
-        errors.append("defects.iindex: 缺失 (使用默认值 [] 或显式指定 e.g. [0, 1, 2])")
-    else:
-        iindex = d["iindex"]
-        if not isinstance(iindex, list) or any(not isinstance(i, int) for i in iindex):
-            errors.append("defects.iindex: 必须为整数列表 (e.g. [0, 1, 2])")
-
-    # substitutionals: list[{"impurity": str, "site": str}]
-    for s in d.get("substitutionals", []):
-        if not (isinstance(s, dict) and "impurity" in s and "site" in s):
-            errors.append("defects.substitutionals: 每项须含 impurity/site")
-            break
-
-    # supercell
-    sc = plan.get("supercell", {})
-    if sc.get("max_atoms") and not isinstance(sc["max_atoms"], int):
-        errors.append("supercell.max_atoms: 必须为正整数")
-    if sc.get("min_atoms") and not isinstance(sc["min_atoms"], int):
-        errors.append("supercell.min_atoms: 必须为正整数")
-
-    stages = plan.get("stages", {})
-    valid_stages = {"unitcell", "cpd", "defect_gen", "submit", "postproc", "doping", "complex"}
-    for k in stages:
-        if k not in valid_stages:
-            errors.append(f"stages.{k}: 未知的阶段名称")
-    return errors
+    Kept here for backward compatibility with existing imports; the actual
+    schema lives in ``pydefect_auto.schema``. Add new fields by editing
+    schema.SCHEMA — the validator picks them up automatically.
+    """
+    from .schema import validate as _schema_validate
+    return _schema_validate(plan)
 
 
 def _deep_copy(d):
