@@ -14,3 +14,6 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Cloned external libraries (do not commit; see PROJECT.md §6)
+libs/
