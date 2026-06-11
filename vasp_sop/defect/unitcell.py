@@ -97,6 +97,7 @@ def run_unitcell(
 
         cmd = _VISE_TASKS[task_name] + pp_suffix
         if not _vasp_input_ready(task_dir):
+            run_local(cmd, cwd=task_dir, timeout=300)
         logger.info("Unitcell: submitting %s", task_name)
         uc_jobs.append(submit_vasp(task_dir.resolve(), nproc=64))
 
