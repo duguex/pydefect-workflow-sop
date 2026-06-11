@@ -265,26 +265,25 @@ def generate_config(
     from vasp_sop.core.jobs import run_local
     import re
 
-    # ① Download all competing phases (same path/layout CPD expects)
+    # ① Download all competing phases (skip if mp_flag exists = cached)
     cpd_root = root / "cpd"
     cpd_root.mkdir(parents=True, exist_ok=True)
     mp_flag = cpd_root / "mp_flag"
 
-    elements = re.findall(r"[A-Z][a-z]?", formula)
-    elements += dopant_elements or []
-    run_local(
-        f"pydefect_vasp mp -e {' '.join(elements)} --e_above_hull 0.0005",
-        cwd=cpd_root, timeout=120,
-    )
-
-    # pydefect creates dirs like GaN_mp-804/ — replace parens for shell safety
-    for child in list(cpd_root.iterdir()):
-        if child.is_dir() and ("(" in child.name or ")" in child.name):
-            child.rename(child.with_name(
-                child.name.replace("(", "[").replace(")", "]")
-            ))
-
-    mp_flag.touch()
+    if not mp_flag.is_file():
+        elements = re.findall(r"[A-Z][a-z]?", formula)
+        elements += dopant_elements or []
+        run_local(
+            f"pydefect_vasp mp -e {' '.join(elements)} --e_above_hull 0.0005",
+            cwd=cpd_root, timeout=120,
+        )
+        # Replace parens for shell safety
+        for child in list(cpd_root.iterdir()):
+            if child.is_dir() and ("(" in child.name or ")" in child.name):
+                child.rename(child.with_name(
+                    child.name.replace("(", "[").replace(")", "]")
+                ))
+        mp_flag.touch()
 
     # ② Parse phase info for YAML annotations and POSCAR for inference
     phases: list[dict] = []
@@ -360,11 +359,12 @@ def generate_config(
             for el in sorted(variants)
         ]
 
-    # ⑥ Submit structure_opt VASP ahead of pipeline
-    if target_dir and _crisp_available() and not _structure_opt_done(target_dir):
+    # ⑥ Submit structure_opt VASP ahead of pipeline (skip if already submitted)
+    pre_submit_file = cpd_root / ".target_submit.json"
+    already_submitted = pre_submit_file.is_file()
+    if target_dir and _crisp_available() and not _structure_opt_done(target_dir) and not already_submitted:
         from vasp_sop.core.jobs import submit_vasp, _vasp_input_ready
 
-        # Ensure INCAR/KPOINTS exist (vise vs generates them)
         if not _vasp_input_ready(target_dir):
             run_local(
                 f"vise vs -x {functional} -k 2 "
@@ -372,12 +372,8 @@ def generate_config(
                 cwd=target_dir, timeout=300,
             )
         job = submit_vasp(target_dir)
-        submit_info = {
-            "task_name": job.task_name,
-            "work_dir": str(target_dir),
-        }
-        with open(cpd_root / ".target_submit.json", "w") as f:
-            json.dump(submit_info, f)
+        with open(pre_submit_file, "w") as f:
+            json.dump({"task_name": job.task_name, "work_dir": str(target_dir)}, f)
         logger.info(
             "Structure optimisation pre-submitted: crisp task %s",
             job.task_name,
