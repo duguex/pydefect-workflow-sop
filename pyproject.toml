@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vasp-sop"
+version = "0.1.0"
+description = "Structural-optimization pipelines for VASP defect calculations"
+requires-python = ">=3.10"
+dependencies = [
+    "pymatgen>=2023.0",
+    "pydefect>=0.1",
+    "vise>=0.1",
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+    "pandas>=2.0",
+]
+
+[project.scripts]
+vasp-sop = "vasp_sop.cli.main:main"
+
+[tool.setuptools.packages.find]
+include = ["vasp_sop*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
