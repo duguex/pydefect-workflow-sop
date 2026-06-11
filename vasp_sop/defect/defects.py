@@ -248,9 +248,9 @@ def _construct_complex_defects(defect_root: Path, config: PipelineConfig) -> Non
 
     complex_flag.touch()
     logger.info("Complex defects constructed.")
-
 def _vasp_completed(path: Path) -> bool:
-    return (path / "OUTCAR").is_file()
+    """Check OUTCAR in the work directory or crisp's output/ subdir."""
+    return (path / "OUTCAR").is_file() or (path / "output" / "OUTCAR").is_file()
 
 
 def _run_vasp_calculations(defect_root: Path) -> None:
@@ -288,6 +288,11 @@ def _run_vasp_calculations(defect_root: Path) -> None:
         wait_all(jobs)
         for j in jobs:
             move_crisp_outputs(j.work_dir)
+
+    # Move crisp outputs for directories that were already completed
+    for d in list(defect_root.iterdir()):
+        if d.is_dir() and (d / "output").is_dir():
+            move_crisp_outputs(d)
 
 
 def _run_post_processing(
