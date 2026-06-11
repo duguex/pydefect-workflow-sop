@@ -39,6 +39,34 @@ _VISE_TASKS: dict[str, str] = {
 }
 
 
+def _prepare_all_inputs(uc_root: Path, target_dir: Path, config: PipelineConfig) -> None:
+    """Create band/dos/dielectric dirs and generate VASP inputs."""
+    uc_root.mkdir(parents=True, exist_ok=True)
+    structure_opt_dir = uc_root / _STRUCTURE_OPT
+
+    _prepare_vasp_input(structure_opt_dir, config)
+
+    pp_opt = (
+        f"--potcar {' '.join(config.potcar_overrides)}"
+        if config.potcar_overrides else ""
+    )
+    pp_suffix = f" --options set_hubbard_u True {pp_opt}"
+
+    for task_name in _VISE_TASKS:
+        task_dir = uc_root / task_name
+        task_dir.mkdir(exist_ok=True)
+        if not _vasp_input_ready(task_dir):
+            _copy_input_from_opt(structure_opt_dir, task_dir)
+        cmd = _VISE_TASKS[task_name] + pp_suffix
+        if not _vasp_input_ready(task_dir):
+            run_local(cmd, cwd=task_dir, timeout=300)
+
+
+def _get_task_dirs(uc_root: Path, config: PipelineConfig) -> list[Path]:
+    """Return [band_dir, dos_dir, dielectric_dir] for submission."""
+    return [uc_root / t for t in _VISE_TASKS]
+
+
 def run_unitcell(
     config: PipelineConfig,
     state: PipelineState,

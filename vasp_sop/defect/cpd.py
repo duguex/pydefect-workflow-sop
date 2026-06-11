@@ -40,6 +40,61 @@ _STANDARD_ENERGIES = "standard_energies.yaml"
 _CHEM_POT_DIAG = "chem_pot_diag.json"
 
 
+
+def _get_intrinsic_elements(formula: str) -> list[str]:
+    from pymatgen.core import Composition
+    return list(Composition(formula).as_dict().keys())
+
+
+def _get_target_composition(formula: str):
+    from pymatgen.core import Composition
+    return Composition(formula)
+
+
+def _get_cpd_info(cpd_root: Path, intrinsic_elements: list[str]) -> dict[str, dict]:
+    return _build_cpd_info(cpd_root, intrinsic_elements)
+
+
+def _split_target(
+    cpd_root: Path,
+    cpd_info: dict[str, dict],
+    formula: str,
+) -> tuple[Path, list[Path]]:
+    """Return (target_dir, other_dirs)."""
+    from pymatgen.core import Composition
+    target_comp = Composition(formula)
+    target: Path | None = None
+    others: list[Path] = []
+    for dirname, info in cpd_info.items():
+        p = (cpd_root / dirname).resolve()
+        if Composition(info["formula"]) == target_comp:
+            target = p
+        else:
+            others.append(p)
+    if target is None:
+        raise ValueError(f"Target {formula} not found in CPD dirs: {list(cpd_info)}")
+    return target, others
+
+
+def _submit_remaining(
+    cpd_root: Path,
+    dirs: list[Path],
+    config: PipelineConfig,
+) -> list[VaspJob]:
+    """Submit VASP for competing phases (not target — already submitted)."""
+    jobs: list[VaspJob] = []
+    for d in dirs:
+        if _vasp_completed(d):
+            logger.info("Skipping %s: OUTCAR exists", d.name)
+            continue
+        logger.info("CPD: submitting VASP for %s", d.name)
+        jobs.append(submit_vasp(d))
+    return jobs
+
+
+def _vasp_completed(path: Path) -> bool:
+    return (path / "OUTCAR").is_file() or (path / "output" / "OUTCAR").is_file()
+
 def run_cpd(
     config: PipelineConfig,
     state: PipelineState,

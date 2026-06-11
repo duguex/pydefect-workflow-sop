@@ -37,6 +37,40 @@ _DOS_EXTREMA = "../unitcell/dos/volumetric_data_local_extrema.json"
 _CHEM_POT_PATH = "../cpd/target_vertices.yaml"
 
 
+
+
+def _prepare_all_inputs(
+    defect_root: Path,
+    target_dir: Path,
+    config: PipelineConfig,
+) -> None:
+    """Build supercell, enumerate defects, generate VASP inputs (all local)."""
+    defect_root.mkdir(parents=True, exist_ok=True)
+
+    uc_contcar = target_dir / "CONTCAR"
+    if not uc_contcar.is_file():
+        raise FileNotFoundError(f"Target CONTCAR not found at {uc_contcar}.")
+
+    _build_supercell(defect_root, uc_contcar, config)
+    _handle_interstitials(defect_root, config)
+    _generate_defect_list(defect_root, config)
+    _generate_structures(defect_root)
+    _generate_vasp_inputs(defect_root, config)
+
+    if config.complex_defect_order >= 2:
+        _construct_complex_defects(defect_root, config)
+
+
+def _get_calc_dirs(defect_root: Path) -> list[Path]:
+    """Return [perfect, Va_Si1_0, Va_Si1_-1, ...] for VASP submission."""
+    dirs: list[Path] = []
+    perfect_dir = defect_root / "perfect"
+    if perfect_dir.is_dir():
+        dirs.append(perfect_dir)
+    for child in sorted(defect_root.iterdir()):
+        if child.is_dir() and child.name != "perfect" and _vasp_input_ready(child):
+            dirs.append(child)
+    return dirs
 def run_defect(
     config: PipelineConfig,
     state: PipelineState,
