@@ -10,10 +10,12 @@ Wave 3: wait for all → post-process everything
 from __future__ import annotations
 
 import logging
+import json
 from pathlib import Path
 
 from vasp_sop.core.config import PipelineConfig
 from vasp_sop.core.jobs import (
+    CrispVaspJob,
     VaspJob,
     move_crisp_outputs,
     submit_vasp,
@@ -40,6 +42,23 @@ _UC_DIR = "unitcell"
 _DF_DIR = "defect"
 
 
+def _resolve_target_job(target_dir: Path) -> VaspJob | None:
+    """Check for pre-submitted structure_opt (from init)."""
+    import json
+    submit_file = target_dir.parent / ".target_submit.json"
+    if not submit_file.is_file():
+        return None
+    try:
+        with open(submit_file) as f:
+            info = json.load(f)
+        task_name = info.get("task_name")
+        if not task_name:
+            return None
+        return CrispVaspJob(Path(info.get("work_dir", str(target_dir))), task_name)
+    except Exception:
+        return None
+
+
 def run_point_defect_pipeline(
     config: PipelineConfig,
 ) -> PipelineState:
@@ -55,8 +74,8 @@ def run_point_defect_pipeline(
     df_root = root / _DF_DIR
 
     # ═══════════════════════════════════════════════════════════════════
-    # Wave 1 — Submit structure_opt (=CPD target phase)
-    #           + generate ALL other VASP inputs locally while it runs
+    # Wave 1 — structure_opt (=CPD target phase)
+    #           generate ALL other VASP inputs locally while it runs
     # ═══════════════════════════════════════════════════════════════════
 
     if state.cpd_status == StepStatus.DONE and state.cpd_result is not None:
@@ -74,37 +93,35 @@ def run_point_defect_pipeline(
         target_dir, other_dirs = _cpd._split_target(
             cpd_root, cpd_info, config.formula)
 
-        # --- Wave 1a: submit structure_opt (CPD target phase) ---
-        _cpd._prepare_vasp_input(target_dir, config)
-        opt_job = submit_vasp(target_dir.resolve())
+        # --- Check pre-submitted structure_opt ---
+        opt_job = _resolve_target_job(target_dir)
 
-        # --- Wave 1b: generate ALL other VASP inputs (local) ---
-        # Competing phases (CPD)
+        if opt_job is None:
+            # Not pre-submitted — submit now
+            _cpd._prepare_vasp_input(target_dir, config)
+            opt_job = submit_vasp(target_dir.resolve())
+        elif opt_job.done and opt_job.poll() == 0:
+            logger.info("Structure_opt already finished (pre-submitted).")
+        else:
+            logger.info("Structure_opt pre-submitted (task %s), waiting ...",
+                        opt_job.task_name)
+
+        # --- Generate ALL other VASP inputs locally (while opt_job runs) ---
         for d in other_dirs:
             _cpd._prepare_vasp_input(d, config)
-        # Unitcell: band / dos / dielectric
         _uc._prepare_all_inputs(uc_root, target_dir, config)
-        # Defect: supercell + defect enumeration + VASP inputs
         _df._prepare_all_inputs(df_root, target_dir, config)
 
-        # --- Wave 1c: submit competing phases too (they're independent) ---
+        # --- Submit competing phases (independent) ---
         comp_jobs = _cpd._submit_remaining(cpd_root, other_dirs, config)
 
-        # --- Wave 1d: wait for structure_opt ---
-        logger.info("Waiting for structure_opt ...")
-        wait_all([opt_job])
-        move_crisp_outputs(target_dir)
-        logger.info("Structure optimisation complete.")
-
-        # Create CPD result (other phases may still run in background)
-        # For post-proc we still need to wait for all competing phases
-        if comp_jobs:
-            logger.info("Waiting for %d competing-phase jobs ...", len(comp_jobs))
-            wait_all(comp_jobs)
-            for j in comp_jobs:
-                move_crisp_outputs(j.work_dir)
-
-        # CPD post-processing
+        # --- Wait for structure_opt ---
+        if not (opt_job and opt_job.done and opt_job.poll() == 0):
+            logger.info("Waiting for structure_opt ...")
+            if opt_job:
+                wait_all([opt_job])
+            move_crisp_outputs(target_dir)
+            logger.info("Structure optimisation complete.")
         target_composition = _cpd._get_target_composition(config.formula)
         _cpd._run_post_processing(cpd_root, config, target_composition)
 

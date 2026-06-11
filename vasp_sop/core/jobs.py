@@ -40,6 +40,10 @@ class VaspJob:
     def done(self) -> bool:
         return self._returncode is not None
 
+    @property
+    def task_name(self) -> str | None:
+        return None
+
     def poll(self) -> Optional[int]:
         """Non‑blocking status check.  Returns exit code or ``None``."""
         raise NotImplementedError
@@ -86,6 +90,10 @@ class CrispVaspJob(VaspJob):
     def __init__(self, work_dir: Path, task_name: str):
         super().__init__(work_dir)
         self._task_name = task_name
+
+    @property
+    def task_name(self) -> str | None:
+        return self._task_name
 
     def poll(self) -> Optional[int]:
         if self._returncode is not None:

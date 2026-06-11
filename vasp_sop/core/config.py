@@ -360,6 +360,29 @@ def generate_config(
             for el in sorted(variants)
         ]
 
+    # ⑥ Submit structure_opt VASP ahead of pipeline
+    if target_dir and _crisp_available() and not _structure_opt_done(target_dir):
+        from vasp_sop.core.jobs import submit_vasp, _vasp_input_ready
+
+        # Ensure INCAR/KPOINTS exist (vise vs generates them)
+        if not _vasp_input_ready(target_dir):
+            run_local(
+                f"vise vs -x {functional} -k 2 "
+                f"--options set_hubbard_u True -uis NSW 50",
+                cwd=target_dir, timeout=300,
+            )
+        job = submit_vasp(target_dir)
+        submit_info = {
+            "task_name": job.task_name,
+            "work_dir": str(target_dir),
+        }
+        with open(cpd_root / ".target_submit.json", "w") as f:
+            json.dump(submit_info, f)
+        logger.info(
+            "Structure optimisation pre-submitted: crisp task %s",
+            job.task_name,
+        )
+
     # ⑥ kwargs overrides
     for k, v in kwargs.items():
         _set_nested(plan, k, v)
@@ -552,3 +575,14 @@ def read_plan(project_dir: str | Path) -> dict:
         raise FileNotFoundError(f"{PLAN_FILENAME} not found in {project_dir}")
     with open(path) as f:
         return yaml.safe_load(f)
+
+
+def _crisp_available() -> bool:
+    """Check if crisp CLI is on PATH (cached)."""
+    from vasp_sop.core.jobs import _crisp_available as _ca
+    return _ca()
+
+
+def _structure_opt_done(target_dir: Path) -> bool:
+    """Return True if target VASP already ran (OUTCAR exists)."""
+    return (target_dir / "OUTCAR").is_file() or (target_dir / "output" / "OUTCAR").is_file()
