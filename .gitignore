@@ -13,3 +13,4 @@ venv/
 
 # Cloned external libraries
 libs/
+unitcell/
