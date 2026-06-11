@@ -1,19 +1,21 @@
 """VASP job submission and batch orchestration.
 
-``vasp_sop`` does **not** interact with cluster schedulers directly.
-It provides a two-phase interface:
+Provides :func:`submit_vasp` and :func:`wait_all` for pipeline stages.
 
-1. :func:`submit_vasp` — launch VASP and return a :class:`VaspJob` handle.
-2. :func:`wait_all` — block until every job in a batch finishes.
+Two backends:
+- **local** — ``subprocess.Popen``, returns immediately.
+- **crisp** — ``crisp submit``, returns immediately with a task_name.
 
-Pipeline stages submit independent calculations in parallel,
-then wait at dependency boundaries.
+The backend is selected automatically: crisp takes precedence when
+the ``crisp`` CLI is available on ``PATH``.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -21,42 +23,119 @@ logger = logging.getLogger(__name__)
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# VaspJob — handle for a running / submitted VASP calculation
+# VaspJob hierarchy
 # ══════════════════════════════════════════════════════════════════════════
 
 
 class VaspJob:
-    """Handle for a submitted VASP calculation.
-
-    Use :func:`wait_all` to block until a set of jobs finishes.
-    """
+    """Handle for a submitted VASP calculation.  Subclass defines ``poll``."""
 
     work_dir: Path
-    _process: Optional[subprocess.Popen]
-    _returncode: Optional[int]
+    _returncode: Optional[int] = None
 
-    def __init__(self, work_dir: Path, process: Optional[subprocess.Popen] = None):
+    def __init__(self, work_dir: Path):
         self.work_dir = work_dir
-        self._process = process
-        self._returncode = None
 
     @property
     def done(self) -> bool:
         return self._returncode is not None
 
     def poll(self) -> Optional[int]:
+        """Non‑blocking status check.  Returns exit code or ``None``."""
+        raise NotImplementedError
+
+    def wait(self, poll_interval: int = 60) -> int:
+        """Block until done."""
+        while self._returncode is None:
+            self.poll()
+            if self._returncode is None:
+                time.sleep(poll_interval)
+        return self._returncode
+
+
+class LocalVaspJob(VaspJob):
+    """Wraps a ``subprocess.Popen``."""
+
+    _proc: subprocess.Popen
+
+    def __init__(self, work_dir: Path, proc: subprocess.Popen):
+        super().__init__(work_dir)
+        self._proc = proc
+
+    def poll(self) -> Optional[int]:
         if self._returncode is not None:
             return self._returncode
-        if self._process is None:
-            return None
-        rc = self._process.poll()
+        rc = self._proc.poll()
         if rc is not None:
             self._returncode = rc
         return rc
 
 
+class CrispVaspJob(VaspJob):
+    """Wraps a crisp task."""
+
+    _task_name: str
+    _poll_attempts: int = 0
+
+    _STATUS_MAP = {
+        "completed": 0,
+        "failed": 1,
+        "cancelled": 1,
+    }
+
+    def __init__(self, work_dir: Path, task_name: str):
+        super().__init__(work_dir)
+        self._task_name = task_name
+
+    def poll(self) -> Optional[int]:
+        if self._returncode is not None:
+            return self._returncode
+        self._poll_attempts += 1
+        try:
+            result = subprocess.run(
+                ["crisp", "jobs", "-n", self._task_name, "--refresh"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode != 0:
+                return None
+            payload = json.loads(result.stdout)
+            status = (payload.get("job") or {}).get("status", "")
+            if status in self._STATUS_MAP:
+                self._returncode = self._STATUS_MAP[status]
+                logger.info(
+                    "crisp job %s finished: %s (exit %d)",
+                    self._task_name, status, self._returncode,
+                )
+            return self._returncode
+        except Exception:
+            return None
+
+
 # ══════════════════════════════════════════════════════════════════════════
-# Submission & batch wait
+# Backend detection
+# ══════════════════════════════════════════════════════════════════════════
+
+_CRISP_AVAILABLE: Optional[bool] = None
+
+
+def _crisp_available() -> bool:
+    global _CRISP_AVAILABLE
+    if _CRISP_AVAILABLE is None:
+        try:
+            subprocess.run(
+                ["crisp", "--version"],
+                capture_output=True, text=True, timeout=10,
+            )
+            _CRISP_AVAILABLE = True
+            logger.info("crisp detected — using cluster submission.")
+        except FileNotFoundError:
+            _CRISP_AVAILABLE = False
+            logger.info("crisp not found — using local subprocess.")
+    return _CRISP_AVAILABLE
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Submission
 # ══════════════════════════════════════════════════════════════════════════
 
 
@@ -65,29 +144,58 @@ def submit_vasp(
     nproc: int = 4,
     vasp_cmd: str = "mpirun -np {nproc} vasp_std",
 ) -> VaspJob:
-    """Launch VASP in *work_dir* asynchronously.
+    """Launch VASP in *work_dir* and return a handle.
 
-    Returns a :class:`VaspJob` handle immediately.
-    Call :func:`wait_all` to block on a batch.
+    Backend: crisp (if available) or local ``Popen``.
     """
     if not _vasp_input_ready(work_dir):
-        raise RuntimeError(
-            f"VASP input files not complete in {work_dir}."
-        )
+        raise RuntimeError(f"VASP input files not complete in {work_dir}.")
 
+    if _crisp_available():
+        return _crisp_submit(work_dir)
+    return _local_submit(work_dir, nproc, vasp_cmd)
+
+
+def _local_submit(
+    work_dir: Path, nproc: int, vasp_cmd: str,
+) -> LocalVaspJob:
     cmd = vasp_cmd.format(nproc=nproc)
-    logger.info("Submit VASP in %s: %s", work_dir, cmd)
-
+    logger.info("Submit local VASP in %s: %s", work_dir, cmd)
     proc = subprocess.Popen(
         cmd.split(),
         cwd=str(work_dir),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    return VaspJob(work_dir=work_dir, process=proc)
+    return LocalVaspJob(work_dir, proc)
 
 
-def wait_all(jobs: list[VaspJob]) -> None:
+def _crisp_submit(work_dir: Path) -> CrispVaspJob:
+    logger.info("Submit crisp VASP in %s", work_dir)
+    result = subprocess.run(
+        ["crisp", "submit"],
+        cwd=str(work_dir),
+        capture_output=True, text=True, timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"crisp submit failed in {work_dir}:\n{result.stderr.strip()}"
+        )
+    payload = json.loads(result.stdout)
+    data = payload.get("data") or {}
+    task_name = data.get("task_name") or payload.get("task_name")
+    if not task_name:
+        raise RuntimeError(f"crisp submit missing task_name: {payload}")
+    logger.info("crisp task %s submitted for %s", task_name, work_dir.name)
+    return CrispVaspJob(work_dir, task_name)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Batch wait
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def wait_all(jobs: list[VaspJob], poll_interval: int = 60) -> None:
     """Wait for all jobs to finish.  Raises RuntimeError on any failure."""
     pending = list(jobs)
     while pending:
@@ -95,14 +203,20 @@ def wait_all(jobs: list[VaspJob]) -> None:
             rc = j.poll()
             if rc is not None:
                 pending.remove(j)
+                logger.info(
+                    "Job %s done (exit %d), %d remaining",
+                    j.work_dir.name, rc, len(pending),
+                )
                 if rc != 0:
                     raise RuntimeError(
                         f"VASP failed in {j.work_dir} (exit code {rc})."
                     )
+        if pending:
+            time.sleep(poll_interval)
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# Local CLI helper (pydefect, vise, …)
+# CLI helper
 # ══════════════════════════════════════════════════════════════════════════
 
 
@@ -140,5 +254,4 @@ def run_local(
 
 
 def _vasp_input_ready(path: Path) -> bool:
-    """Check that all four required VASP input files exist."""
     return all((path / f).is_file() for f in ("INCAR", "POSCAR", "POTCAR", "KPOINTS"))
