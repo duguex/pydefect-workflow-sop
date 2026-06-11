@@ -12,6 +12,7 @@ from pathlib import Path
 
 from vasp_sop.core.config import PipelineConfig
 from vasp_sop.core.jobs import (
+    VaspJob,
     move_crisp_outputs,
     submit_vasp,
     wait_all,
@@ -70,10 +71,14 @@ def run_unitcell(
 
     # ── 2. Structure optimisation ─────────────────────────────────────
     _prepare_vasp_input(structure_opt_dir, config)
-    logger.info("Unitcell: submitting structure optimisation")
-    opt_job = submit_vasp(structure_opt_dir.resolve(), nproc=64)
-    wait_all([opt_job])
-    move_crisp_outputs(opt_job.work_dir)
+    outcar = structure_opt_dir / "OUTCAR"
+    if outcar.is_file():
+        logger.info("Skipping structure_opt: OUTCAR exists")
+    else:
+        logger.info("Unitcell: submitting structure optimisation")
+        opt_job = submit_vasp(structure_opt_dir.resolve(), nproc=64)
+        wait_all([opt_job])
+        move_crisp_outputs(opt_job.work_dir)
 
     # Copy CONTCAR → POSCAR for subsequent calculations
     contcar = structure_opt_dir / "CONTCAR"
@@ -87,24 +92,29 @@ def run_unitcell(
     )
     pp_suffix = f" --options set_hubbard_u True {pp_opt}"
 
-    uc_jobs = []
+    uc_jobs: list[VaspJob] = []
     for task_name in _VISE_TASKS:
         task_dir = uc_root / task_name
         task_dir.mkdir(exist_ok=True)
-
         if not _vasp_input_ready(task_dir):
             _copy_input_from_opt(structure_opt_dir, task_dir)
 
         cmd = _VISE_TASKS[task_name] + pp_suffix
         if not _vasp_input_ready(task_dir):
             run_local(cmd, cwd=task_dir, timeout=300)
+
+        outcar = task_dir / "OUTCAR"
+        if outcar.is_file():
+            logger.info("Skipping %s: OUTCAR exists", task_name)
+            continue
         logger.info("Unitcell: submitting %s", task_name)
         uc_jobs.append(submit_vasp(task_dir.resolve(), nproc=64))
 
-    logger.info("Unitcell: waiting for band/dos/dielectric")
-    wait_all(uc_jobs)
-    for j in uc_jobs:
-        move_crisp_outputs(j.work_dir)
+    if uc_jobs:
+        logger.info("Unitcell: waiting for band/dos/dielectric")
+        wait_all(uc_jobs)
+        for j in uc_jobs:
+            move_crisp_outputs(j.work_dir)
 
     # ── 4. Post-processing ───────────────────────────────────────────
     _run_post_processing(uc_root, config)

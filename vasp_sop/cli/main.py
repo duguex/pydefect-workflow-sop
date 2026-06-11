@@ -155,15 +155,17 @@ def _do_resume(args: argparse.Namespace) -> None:
     root = args.root.resolve()
     state = StateStore.load(root)
 
-    # Try to load config from the project root
-    config_path = root / "config.yaml"
+    # Try plan.yaml (new format) then config.yaml (legacy)
+    from vasp_sop.core.config import PLAN_FILENAME
+    config_path = root / PLAN_FILENAME
+    if not config_path.is_file():
+        config_path = root / "config.yaml"
     if config_path.is_file():
         config = PipelineConfig.from_yaml(config_path, root=root)
     else:
-        # Minimal config from state — formula may be needed for unitcell
         logger.error(
-            "No config.yaml found in %s. Cannot resume without configuration.",
-            root,
+            "No %s or config.yaml found in %s. Cannot resume.",
+            PLAN_FILENAME, root,
         )
         sys.exit(1)
 
@@ -171,7 +173,6 @@ def _do_resume(args: argparse.Namespace) -> None:
         logger.info("Pipeline already complete. Nothing to resume.")
         return
 
-    _run_pipeline(config)
 
 
 def _run_pipeline(config: PipelineConfig) -> None:

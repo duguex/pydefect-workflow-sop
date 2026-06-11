@@ -16,6 +16,7 @@ import yaml
 
 from vasp_sop.core.config import PipelineConfig
 from vasp_sop.core.jobs import (
+    VaspJob,
     move_crisp_outputs,
     submit_vasp,
     wait_all,
@@ -248,12 +249,14 @@ def _construct_complex_defects(defect_root: Path, config: PipelineConfig) -> Non
     complex_flag.touch()
     logger.info("Complex defects constructed.")
 
+def _vasp_completed(path: Path) -> bool:
+    return (path / "OUTCAR").is_file()
+
 
 def _run_vasp_calculations(defect_root: Path) -> None:
     """Submit perfect + all defect VASP jobs in one batch.
 
-    Perfect and defects have no cross-dependency for the VASP run itself;
-    all are submitted simultaneously.
+    Skips directories where OUTCAR already exists (resume safety).
     """
     perfect_dir = defect_root / "perfect"
     if not perfect_dir.is_dir():
@@ -261,7 +264,15 @@ def _run_vasp_calculations(defect_root: Path) -> None:
             f"Perfect supercell directory not found at {perfect_dir}."
         )
 
-    jobs = [submit_vasp(perfect_dir.resolve())]
+    jobs: list[VaspJob] = []
+
+    def _maybe_submit(d: Path) -> None:
+        if _vasp_completed(d):
+            logger.info("Skipping %s: OUTCAR exists", d.name)
+        else:
+            jobs.append(submit_vasp(d.resolve()))
+
+    _maybe_submit(perfect_dir)
 
     for child in sorted(defect_root.iterdir()):
         if not child.is_dir() or child.name == "perfect":
@@ -270,12 +281,13 @@ def _run_vasp_calculations(defect_root: Path) -> None:
             logger.warning("Skipping %s: VASP inputs not ready", child.name)
             continue
         logger.info("Defect: submitting VASP for %s", child.name)
-        jobs.append(submit_vasp(child.resolve()))
+        _maybe_submit(child)
 
-    logger.info("Defect: waiting for %d VASP jobs", len(jobs))
-    wait_all(jobs)
-    for j in jobs:
-        move_crisp_outputs(j.work_dir)
+    if jobs:
+        logger.info("Defect: waiting for %d VASP jobs", len(jobs))
+        wait_all(jobs)
+        for j in jobs:
+            move_crisp_outputs(j.work_dir)
 
 
 def _run_post_processing(

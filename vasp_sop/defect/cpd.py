@@ -15,6 +15,7 @@ import yaml
 from pymatgen.core import Composition
 
 from vasp_sop.core.jobs import (
+    VaspJob,
     move_crisp_outputs,
     submit_vasp,
     wait_all,
@@ -85,18 +86,13 @@ def run_cpd(
 
     to_be_calculated = list(cpd_info.keys())
     logger.info("CPD: %d phases to calculate", len(to_be_calculated))
-
     # ── 2. Generate VASP inputs and run calculations (parallel) ──────
-    jobs = []
-    for dirname in to_be_calculated:
-        work_dir = cpd_root / dirname
-        _prepare_vasp_input(work_dir, config)
-        logger.info("CPD: submitting VASP for %s", dirname)
-        jobs.append(submit_vasp(work_dir.resolve()))
-    logger.info("CPD: waiting for %d VASP jobs", len(jobs))
-    wait_all(jobs)
-    for j in jobs:
-        move_crisp_outputs(j.work_dir)
+    jobs = _submit_cpd_batch(cpd_root, to_be_calculated, config)
+    if jobs:
+        logger.info("CPD: waiting for %d VASP jobs", len(jobs))
+        wait_all(jobs)
+        for j in jobs:
+            move_crisp_outputs(j.work_dir)
 
     # ── 3. Post-processing: composition energies + corrections ───────
     _run_post_processing(cpd_root, config, target_composition)
@@ -119,6 +115,28 @@ def run_cpd(
 # Internal helpers
 # ══════════════════════════════════════════════════════════════════════════
 
+
+
+def _submit_cpd_batch(
+    cpd_root: Path,
+    dirnames: list[str],
+    config: PipelineConfig,
+) -> list[VaspJob]:
+    """Generate VASP inputs and submit all CPD phases as a parallel batch.
+
+    Skips directories where OUTCAR already exists (resume safety).
+    """
+    jobs: list[VaspJob] = []
+    for d in dirnames:
+        work_dir = cpd_root / d
+        _prepare_vasp_input(work_dir, config)
+        outcar = work_dir / "OUTCAR"
+        if outcar.is_file():
+            logger.info("Skipping %s: OUTCAR exists", d)
+            continue
+        logger.info("CPD: submitting VASP for %s", d)
+        jobs.append(submit_vasp(work_dir.resolve()))
+    return jobs
 
 def _fetch_elements(
     cpd_root: Path,
