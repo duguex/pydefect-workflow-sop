@@ -12,6 +12,7 @@ from pathlib import Path
 
 from vasp_sop.core.config import PipelineConfig
 from vasp_sop.core.jobs import (
+    move_crisp_outputs,
     submit_vasp,
     wait_all,
     run_local,
@@ -70,7 +71,9 @@ def run_unitcell(
     # ── 2. Structure optimisation ─────────────────────────────────────
     _prepare_vasp_input(structure_opt_dir, config)
     logger.info("Unitcell: submitting structure optimisation")
-    wait_all([submit_vasp(structure_opt_dir.resolve(), nproc=64)])
+    opt_job = submit_vasp(structure_opt_dir.resolve(), nproc=64)
+    wait_all([opt_job])
+    move_crisp_outputs(opt_job.work_dir)
 
     # Copy CONTCAR → POSCAR for subsequent calculations
     contcar = structure_opt_dir / "CONTCAR"
@@ -94,13 +97,13 @@ def run_unitcell(
 
         cmd = _VISE_TASKS[task_name] + pp_suffix
         if not _vasp_input_ready(task_dir):
-            run_local(cmd, cwd=task_dir, timeout=300)
-
         logger.info("Unitcell: submitting %s", task_name)
         uc_jobs.append(submit_vasp(task_dir.resolve(), nproc=64))
 
     logger.info("Unitcell: waiting for band/dos/dielectric")
     wait_all(uc_jobs)
+    for j in uc_jobs:
+        move_crisp_outputs(j.work_dir)
 
     # ── 4. Post-processing ───────────────────────────────────────────
     _run_post_processing(uc_root, config)

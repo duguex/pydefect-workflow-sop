@@ -215,6 +215,24 @@ def wait_all(jobs: list[VaspJob], poll_interval: int = 60) -> None:
             time.sleep(poll_interval)
 
 
+def move_crisp_outputs(work_dir: Path) -> None:
+    """Move VASP results from crisp's ``output/`` dir up one level."""
+    output_dir = work_dir / "output"
+    if not output_dir.is_dir():
+        return
+    import shutil
+    for f in list(output_dir.iterdir()):
+        dest = work_dir / f.name
+        if f.is_dir():
+            shutil.copytree(str(f), str(dest), dirs_exist_ok=True)
+            shutil.rmtree(str(f))
+        elif not dest.exists():
+            shutil.move(str(f), str(dest))
+        else:
+            f.unlink()
+    shutil.rmtree(str(output_dir))
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # CLI helper
 # ══════════════════════════════════════════════════════════════════════════

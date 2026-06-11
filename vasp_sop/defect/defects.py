@@ -16,6 +16,7 @@ import yaml
 
 from vasp_sop.core.config import PipelineConfig
 from vasp_sop.core.jobs import (
+    move_crisp_outputs,
     submit_vasp,
     wait_all,
     run_local,
@@ -273,6 +274,8 @@ def _run_vasp_calculations(defect_root: Path) -> None:
 
     logger.info("Defect: waiting for %d VASP jobs", len(jobs))
     wait_all(jobs)
+    for j in jobs:
+        move_crisp_outputs(j.work_dir)
 
 
 def _run_post_processing(

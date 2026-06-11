@@ -15,6 +15,7 @@ import yaml
 from pymatgen.core import Composition
 
 from vasp_sop.core.jobs import (
+    move_crisp_outputs,
     submit_vasp,
     wait_all,
     run_local,
@@ -94,6 +95,8 @@ def run_cpd(
         jobs.append(submit_vasp(work_dir.resolve()))
     logger.info("CPD: waiting for %d VASP jobs", len(jobs))
     wait_all(jobs)
+    for j in jobs:
+        move_crisp_outputs(j.work_dir)
 
     # ── 3. Post-processing: composition energies + corrections ───────
     _run_post_processing(cpd_root, config, target_composition)
