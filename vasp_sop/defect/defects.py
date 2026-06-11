@@ -38,18 +38,23 @@ _CHEM_POT_PATH = "../cpd/target_vertices.yaml"
 
 
 
-
 def _prepare_all_inputs(
     defect_root: Path,
     target_dir: Path,
     config: PipelineConfig,
 ) -> None:
-    """Build supercell, enumerate defects, generate VASP inputs (all local)."""
+    """Build supercell, enumerate defects, generate VASP inputs (all local).
+
+    Uses POSCAR (not CONTCAR) from *target_dir* — VASP hasn't run yet
+    at this point in the pipeline.  The unrelaxed lattice is fine for
+    supercell sizing; the defect VASP calculations will relax the atoms.
+    """
     defect_root.mkdir(parents=True, exist_ok=True)
 
-    uc_contcar = target_dir / "CONTCAR"
-    if not uc_contcar.is_file():
-        raise FileNotFoundError(f"Target CONTCAR not found at {uc_contcar}.")
+    poscar = target_dir / "POSCAR"
+    if not poscar.is_file():
+        raise FileNotFoundError(f"Target POSCAR not found at {poscar}.")
+    uc_contcar = poscar  # use POSCAR as stand-in for CONTCAR
 
     _build_supercell(defect_root, uc_contcar, config)
     _handle_interstitials(defect_root, config)
@@ -57,8 +62,6 @@ def _prepare_all_inputs(
     _generate_structures(defect_root)
     _generate_vasp_inputs(defect_root, config)
 
-    if config.complex_defect_order >= 2:
-        _construct_complex_defects(defect_root, config)
 
 
 def _get_calc_dirs(defect_root: Path) -> list[Path]:

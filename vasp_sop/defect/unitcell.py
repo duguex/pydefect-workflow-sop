@@ -40,12 +40,17 @@ _VISE_TASKS: dict[str, str] = {
 
 
 def _prepare_all_inputs(uc_root: Path, target_dir: Path, config: PipelineConfig) -> None:
-    """Create band/dos/dielectric dirs and generate VASP inputs."""
+    """Create unitcell dirs and generate VASP inputs (no VASP needed)."""
     uc_root.mkdir(parents=True, exist_ok=True)
     structure_opt_dir = uc_root / _STRUCTURE_OPT
 
-    _prepare_vasp_input(structure_opt_dir, config)
+    # Copy POSCAR from CPD target dir (CONTCAR doesn't exist yet — VASP hasn't run)
+    poscar_src = target_dir / "POSCAR"
+    structure_opt_dir.mkdir(parents=True, exist_ok=True)
+    if poscar_src.exists() and not (structure_opt_dir / "POSCAR").exists():
+        shutil.copy2(str(poscar_src), str(structure_opt_dir / "POSCAR"))
 
+    _prepare_vasp_input(structure_opt_dir, config)
     pp_opt = (
         f"--potcar {' '.join(config.potcar_overrides)}"
         if config.potcar_overrides else ""
