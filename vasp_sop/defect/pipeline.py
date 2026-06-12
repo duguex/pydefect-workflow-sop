@@ -197,32 +197,35 @@ def run_point_defect_pipeline(
     if state.defect_status == StepStatus.DONE and state.defect_result is not None:
         logger.info("Defect already done, skipping.")
         return state
-
+    # Move any crisp outputs that might be in output/ subdirs (resume safety)
+    for d in ([uc_root] if uc_root.is_dir() else []) + ([df_root] if df_root.is_dir() else []):
+        for child in list(d.iterdir()):
+            if child.is_dir():
+                move_crisp_outputs(child)
     # Collect all remaining VASP directories
     remaining_jobs: list[VaspJob] = []
 
-    # Unitcell: band / dos / dielectric
-    uc_tasks = _uc._get_task_dirs(uc_root, config)
-    for d in uc_tasks:
-        if _vasp_input_ready(d):
-            logger.info("Queueing VASP: %s", d.name)
-            remaining_jobs.append(submit_vasp(d.resolve(), nproc=64))
-        else:
+    def _should_submit(d: Path) -> bool:
+        """Skip if OUTCAR exists (already computed)."""
+        if (d / "OUTCAR").is_file():
+            logger.info("Skipping %s: already computed", d.name)
+            return False
+        if not _vasp_input_ready(d):
             logger.warning("Inputs not ready for %s, skipping.", d.name)
+            return False
+        return True
 
-    # Defect: perfect + all charge states
-    df_dirs = _df._get_calc_dirs(df_root)
-    for d in df_dirs:
-        if _vasp_input_ready(d):
-            logger.info("Queueing VASP: %s", d.name)
+    for d in _uc._get_task_dirs(uc_root, config):
+        if _should_submit(d):
+            remaining_jobs.append(submit_vasp(d.resolve(), nproc=64))
+
+    for d in _df._get_calc_dirs(df_root):
+        if _should_submit(d):
             remaining_jobs.append(submit_vasp(d.resolve()))
-        else:
-            logger.warning("Inputs not ready for %s, skipping.", d.name)
 
     if remaining_jobs:
         state.defect_status = StepStatus.RUNNING
         StateStore.save(state)
-
         logger.info("Submitting %d remaining VASP jobs ...", len(remaining_jobs))
         wait_all(remaining_jobs)
         for j in remaining_jobs:
