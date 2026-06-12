@@ -262,46 +262,26 @@ def generate_config(
     from vasp_sop.core.jobs import run_local
     import re
 
-    # ① Load/download competing phases (with global MP cache)
+    # ① Load competing phases (rely on pydefect_vasp mp — it's fast and
+    #    handles molecule phases like mol_N2 that the MP cache misses)
     cpd_root = root / "cpd"
     cpd_root.mkdir(parents=True, exist_ok=True)
     mp_flag = cpd_root / "mp_flag"
 
-    from vasp_sop.core.cache import mp_phases_get, mp_phases_put, mp_poscar_get, mp_poscar_put
-
     if not mp_flag.is_file():
-        # Check global MP cache first
-        cached_phases = mp_phases_get(formula)
-        if cached_phases:
-            logger.info("MP cache hit for %s (%d phases)", formula, len(cached_phases))
-            phases = cached_phases
-            # Copy cached POSCARs to cpd dirs
-            for p in phases:
-                mpid = p["mpid"]
-                poscar_src = mp_poscar_get(mpid)
-                if poscar_src:
-                    dst = cpd_root / f"{p['formula']}_mp-{mpid}"
-                    dst.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(str(poscar_src), str(dst / "POSCAR"))
-                    potcar = poscar_src.parent / "POTCAR"
-                    if potcar.is_file():
-                        shutil.copy2(str(potcar), str(dst / "POTCAR"))
-            mp_flag.touch()
-        else:
-            # Cache miss — query MP
-            elements = re.findall(r"[A-Z][a-z]?", formula)
-            elements += dopant_elements or []
-            run_local(
-                f"pydefect_vasp mp -e {' '.join(elements)} --e_above_hull 0.0005",
-                cwd=cpd_root, timeout=120,
-            )
-            # Replace parens for shell safety
-            for child in list(cpd_root.iterdir()):
-                if child.is_dir() and ("(" in child.name or ")" in child.name):
-                    child.rename(child.with_name(
-                        child.name.replace("(", "[").replace(")", "]")
-                    ))
-            mp_flag.touch()
+        elements = re.findall(r"[A-Z][a-z]?", formula)
+        elements += dopant_elements or []
+        run_local(
+            f"pydefect_vasp mp -e {' '.join(elements)} --e_above_hull 0.0005",
+            cwd=cpd_root, timeout=120,
+        )
+        # Replace parens for shell safety
+        for child in list(cpd_root.iterdir()):
+            if child.is_dir() and ("(" in child.name or ")" in child.name):
+                child.rename(child.with_name(
+                    child.name.replace("(", "[").replace(")", "]")
+                ))
+        mp_flag.touch()
 
     # ② Parse phase info for YAML annotations and POSCAR for inference
     phases: list[dict] = []
