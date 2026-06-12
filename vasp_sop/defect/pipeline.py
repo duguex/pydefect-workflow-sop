@@ -136,7 +136,7 @@ def run_point_defect_pipeline(
         target_dir, other_dirs = _cpd._split_target(
             cpd_root, cpd_info, config.formula)
 
-        # --- Check global calc cache (skip VASP entirely if cached) ---
+        # --- Check global calc cache (skip structure_opt VASP if cached) ---
         cache_hit = _check_calc_cache(target_dir)
 
         if not cache_hit:
@@ -144,13 +144,10 @@ def run_point_defect_pipeline(
             opt_job = _resolve_target_job(target_dir)
 
             if opt_job is None:
-                # Not pre-submitted — submit now
                 _cpd._prepare_vasp_input(target_dir, config)
                 opt_job = submit_vasp(target_dir.resolve())
             elif opt_job.done and opt_job.poll() != 0:
-                # Pre-submitted but FAILED — re-submit
                 logger.warning("Pre-submitted structure_opt failed; re-submitting.")
-                opt_job = None
                 _cpd._prepare_vasp_input(target_dir, config)
                 opt_job = submit_vasp(target_dir.resolve())
             elif opt_job.done and opt_job.poll() == 0:
@@ -159,22 +156,23 @@ def run_point_defect_pipeline(
                 logger.info("Structure_opt pre-submitted (task %s), waiting ...",
                             opt_job.task_name)
 
-            # --- Generate ALL other VASP inputs locally while opt_job runs ---
-            for d in other_dirs:
-                _cpd._prepare_vasp_input(d, config)
-            _uc._prepare_all_inputs(uc_root, target_dir, config)
-            _df._prepare_all_inputs(df_root, target_dir, config)
+        # Generate ALL non-target VASP inputs (always — even if cache hit)
+        for d in other_dirs:
+            _cpd._prepare_vasp_input(d, config)
+        _uc._prepare_all_inputs(uc_root, target_dir, config)
+        _df._prepare_all_inputs(df_root, target_dir, config)
 
-            # --- Submit competing phases (independent) ---
+        # --- Submit competing phases + wait for structure_opt ---
+        comp_jobs: list = []
+        if not cache_hit:
             comp_jobs = _cpd._submit_remaining(cpd_root, other_dirs, config)
-
-            # --- Wait for structure_opt ---
             if not (opt_job and opt_job.done and opt_job.poll() == 0):
                 logger.info("Waiting for structure_opt ...")
                 if opt_job:
                     wait_all([opt_job])
                 move_crisp_outputs(target_dir)
 
+        # CPD post-processing (same for cache hit or miss)
         target_composition = _cpd._get_target_composition(config.formula)
         _cpd._run_post_processing(cpd_root, config, target_composition)
 
