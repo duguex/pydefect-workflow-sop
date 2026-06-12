@@ -174,8 +174,8 @@ def run_point_defect_pipeline(
             if comp_jobs:
                 logger.info("Waiting for %d competing-phase VASP jobs ...", len(comp_jobs))
                 wait_all(comp_jobs)
-                for j in comp_jobs:
-                    move_crisp_outputs(j.work_dir)
+            for d in other_dirs:
+                move_crisp_outputs(d)
 
         # CPD post-processing (same for cache hit or miss)
         target_composition = _cpd._get_target_composition(config.formula)
