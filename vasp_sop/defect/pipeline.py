@@ -162,7 +162,7 @@ def run_point_defect_pipeline(
         _uc._prepare_all_inputs(uc_root, target_dir, config)
         _df._prepare_all_inputs(df_root, target_dir, config)
 
-        # --- Submit competing phases + wait for structure_opt ---
+        # --- Submit competing phases + wait for ALL wave-1 VASP ---
         comp_jobs: list = []
         if not cache_hit:
             comp_jobs = _cpd._submit_remaining(cpd_root, other_dirs, config)
@@ -171,6 +171,11 @@ def run_point_defect_pipeline(
                 if opt_job:
                     wait_all([opt_job])
                 move_crisp_outputs(target_dir)
+            if comp_jobs:
+                logger.info("Waiting for %d competing-phase VASP jobs ...", len(comp_jobs))
+                wait_all(comp_jobs)
+                for j in comp_jobs:
+                    move_crisp_outputs(j.work_dir)
 
         # CPD post-processing (same for cache hit or miss)
         target_composition = _cpd._get_target_composition(config.formula)
