@@ -191,7 +191,8 @@ def _handle_interstitials(defect_root: Path, config: PipelineConfig) -> None:
     if not config.interstitial_indices:
         raise RuntimeError(
             "Interstitials requested but no `interstitial_indices` provided. "
-            "Check the above candidate list and set `interstitial_indices` in config."
+            "Check the candidate list above and set "
+            "`defects.interstitial_indices` in plan.yaml."
         )
 
     interstitial_sites = " ".join(config.interstitial_indices)
@@ -239,9 +240,11 @@ def _generate_vasp_inputs(defect_root: Path, config: PipelineConfig) -> None:
         f"--potcar {' '.join(config.potcar_overrides)}"
         if config.potcar_overrides else ""
     )
+    encut_opt = f"ENCUT {config.encut}" if config.encut else ""
     cmd = (
         f"vise vs -x {config.functional} -t defect -k 0.1 "
-        f"--options set_hubbard_u True -uis NSW 50 SIGMA 0.02 LORBIT 11 {pp_opt}"
+        f"--options set_hubbard_u True -uis NSW 50 SIGMA 0.02 LORBIT 11 "
+        f"{encut_opt} {pp_opt}"
     )
 
     for child in defect_root.iterdir():
@@ -393,11 +396,32 @@ def _run_post_processing(
     # ── dei (defect energy info) ───────────────────────────────────
     perfect_cr = perfect_dir / "calc_results.json"
     if perfect_cr.is_file() and unitcell_yaml.is_file() and standard_energies.is_file():
-        run_local(
-            f"pydefect dei -d *_* -pcr {perfect_cr} "
-            f"-u {unitcell_yaml} -s {standard_energies}",
-            cwd=defect_root,
+        # pydefect's efnv writes ``correction.json`` into each defect
+        # subdirectory. ``dei`` silently mixes corrected and uncorrected
+        # formation energies when efnv failed for some defects, so we run
+        # ``dei`` on the subset that has a correction and surface a clear
+        # warning for the rest. Pass the explicit list (no ``*_*`` glob) so
+        # we don't accidentally include uncorrected defects.
+        defect_dirs = sorted(
+            d for d in defect_root.iterdir()
+            if d.is_dir() and "_" in d.name and d.name != "perfect"
         )
+        corrected = [d for d in defect_dirs if (d / "correction.json").is_file()]
+        missing = [d for d in defect_dirs if not (d / "correction.json").is_file()]
+        if missing:
+            logger.warning(
+                "Skipping %d defect(s) missing correction.json (efnv likely "
+                "failed for these). Re-run efnv and re-invoke dei to include "
+                "them. Missing: %s",
+                len(missing), ", ".join(d.name for d in missing),
+            )
+        if corrected:
+            targets = " ".join(d.name for d in corrected)
+            run_local(
+                f"pydefect dei -d {targets} -pcr {perfect_cr} "
+                f"-u {unitcell_yaml} -s {standard_energies}",
+                cwd=defect_root,
+            )
 
     # ── des (defect energy summary) ─────────────────────────────────
     if unitcell_yaml.is_file() and pbes_json.is_file() and target_vertices.is_file():

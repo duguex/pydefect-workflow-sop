@@ -155,7 +155,9 @@ def _do_resume(args: argparse.Namespace) -> None:
     root = args.root.resolve()
     state = StateStore.load(root)
 
-    # Try plan.yaml (new format) then config.yaml (legacy)
+    # Try plan.yaml (new format) → config.yaml (legacy YAML) → info.json
+    # (legacy JSON) before giving up. ``info.json`` is migrated to a fresh
+    # plan.yaml so the rest of the pipeline sees a single canonical format.
     from vasp_sop.core.config import PLAN_FILENAME
     config_path = root / PLAN_FILENAME
     if not config_path.is_file():
@@ -163,15 +165,30 @@ def _do_resume(args: argparse.Namespace) -> None:
     if config_path.is_file():
         config = PipelineConfig.from_yaml(config_path, root=root)
     else:
-        logger.error(
-            "No %s or config.yaml found in %s. Cannot resume.",
-            PLAN_FILENAME, root,
-        )
-        sys.exit(1)
+        legacy_json = root / "info.json"
+        if legacy_json.is_file():
+            logger.info(
+                "Found legacy info.json — migrating to %s.", PLAN_FILENAME,
+            )
+            config = PipelineConfig.from_legacy_json(legacy_json, root=root)
+            new_path = root / PLAN_FILENAME
+            config.to_yaml(new_path)
+            logger.info("Wrote %s.", new_path)
+        else:
+            logger.error(
+                "No %s, config.yaml, or info.json found in %s. Cannot resume.",
+                PLAN_FILENAME, root,
+            )
+            sys.exit(1)
 
     if state.is_terminal():
         logger.info("Pipeline already complete. Nothing to resume.")
         return
+
+    # State is non-terminal — re-enter the pipeline. The state machine in
+    # run_point_defect_pipeline checks each stage's DONE flag and skips
+    # completed work, so resume behaves the same as run.
+    _run_pipeline(config)
 
 
 

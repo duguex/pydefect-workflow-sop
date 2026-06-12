@@ -55,6 +55,12 @@ def _prepare_all_inputs(uc_root: Path, target_dir: Path, config: PipelineConfig)
         f"--potcar {' '.join(config.potcar_overrides)}"
         if config.potcar_overrides else ""
     )
+    encut_opt = (
+        f"-uis ENCUT {config.encut}" if config.encut else ""
+    )
+    # ``functional`` and ENCUT both come from config so all unitcell tasks
+    # use the same setup as the CPD and defect stages.
+    task_cmd_overrides = f" -x {config.functional} {encut_opt}"
     pp_suffix = f" --options set_hubbard_u True {pp_opt}"
 
     for task_name in _VISE_TASKS:
@@ -62,7 +68,13 @@ def _prepare_all_inputs(uc_root: Path, target_dir: Path, config: PipelineConfig)
         task_dir.mkdir(exist_ok=True)
         if not _vasp_input_ready(task_dir):
             _copy_input_from_opt(structure_opt_dir, task_dir)
-        cmd = _VISE_TASKS[task_name] + pp_suffix
+        # Replace the hardcoded ``-x pbesol`` baked into the template with the
+        # config's functional, and inject ENCUT after the existing -uis flags
+        # (or as the first -uis token if none present).
+        base = _VISE_TASKS[task_name].replace("-x pbesol", task_cmd_overrides, 1)
+        if config.encut and "ENCUT" not in base:
+            base = base + f" -uis ENCUT {config.encut}"
+        cmd = base + pp_suffix
         if not _vasp_input_ready(task_dir):
             run_local(cmd, cwd=task_dir, timeout=300)
 
@@ -180,9 +192,10 @@ def _prepare_vasp_input(work_dir: Path, config: PipelineConfig) -> None:
         f"--potcar {' '.join(config.potcar_overrides)}"
         if config.potcar_overrides else ""
     )
+    encut_opt = f"ENCUT {config.encut}" if config.encut else ""
     cmd = (
         f"vise vs -x {config.functional} -k 2 "
-        f"--options set_hubbard_u True -uis NSW 50 {pp_opt}"
+        f"--options set_hubbard_u True -uis NSW 50 {encut_opt} {pp_opt}"
     )
     run_local(cmd, cwd=work_dir, timeout=300)
 
@@ -218,8 +231,11 @@ def _run_post_processing(uc_root: Path, config: PipelineConfig) -> None:
 
     if dos_dir.is_dir():
         run_local("cd dos && vise pd", cwd=uc_root)
+        # AECCAR0 + AECCAR2 are the standard pair for
+        # ``all_electron_charge`` interpolation; AECCAR1 is not generated
+        # by the standard ``vise pd`` flow and including it FileNotFoundErrors.
         run_local(
-            "cd dos && pydefect_vasp le -v AECCAR0 AECCAR1 AECCAR2 "
+            "cd dos && pydefect_vasp le -v AECCAR0 AECCAR2 "
             "-i all_electron_charge",
             cwd=uc_root,
         )

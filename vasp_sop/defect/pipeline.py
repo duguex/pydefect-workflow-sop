@@ -59,6 +59,49 @@ def _resolve_target_job(target_dir: Path) -> VaspJob | None:
         return None
 
 
+def _cache_cpd_results(config: PipelineConfig, target_dir: Path, cpd_root: Path) -> None:
+    """Cache structure_opt VASP outputs + CPD results to global cache."""
+    from vasp_sop.core.cache import cache_target_results
+    name = target_dir.name
+    if "_mp-" in name:
+        formula_pt, mpid = name.split("_mp-", 1)
+        cache_target_results(formula_pt, mpid, target_dir, cpd_root)
+
+
+def _check_calc_cache(target_dir: Path) -> bool:
+    """Restore target_dir's VASP + CPD outputs from global calc cache.
+
+    Returns True if cache hit and files were restored.
+    """
+    name = target_dir.name
+    if "_mp-" not in name:
+        return False
+    formula_pt, mpid = name.split("_mp-", 1)
+
+    from vasp_sop.core.cache import calc_results_get, calc_cpd_get
+
+    cached = calc_results_get(formula_pt, mpid)
+    if cached is None:
+        return False
+
+    logger.info("Calc cache HIT for %s (mp-%s), restoring ...", formula_pt, mpid)
+    import shutil
+    for f in ("OUTCAR", "CONTCAR", "vasprun.xml"):
+        src = cached / f
+        if src.is_file():
+            shutil.copy2(str(src), str(target_dir / f))
+
+    cpd_dir = target_dir.parent
+    cpd_cached = calc_cpd_get(formula_pt, mpid)
+    if cpd_cached:
+        for f in ("target_vertices.yaml", "standard_energies.yaml"):
+            src = cpd_cached / f
+            if src.is_file():
+                shutil.copy2(str(src), str(cpd_dir / f))
+        (cpd_dir / "mp_flag").touch(exist_ok=True)
+    return True
+
+
 def run_point_defect_pipeline(
     config: PipelineConfig,
 ) -> PipelineState:
@@ -93,35 +136,45 @@ def run_point_defect_pipeline(
         target_dir, other_dirs = _cpd._split_target(
             cpd_root, cpd_info, config.formula)
 
-        # --- Check pre-submitted structure_opt ---
-        opt_job = _resolve_target_job(target_dir)
+        # --- Check global calc cache (skip VASP entirely if cached) ---
+        cache_hit = _check_calc_cache(target_dir)
 
-        if opt_job is None:
-            # Not pre-submitted — submit now
-            _cpd._prepare_vasp_input(target_dir, config)
-            opt_job = submit_vasp(target_dir.resolve())
-        elif opt_job.done and opt_job.poll() == 0:
-            logger.info("Structure_opt already finished (pre-submitted).")
-        else:
-            logger.info("Structure_opt pre-submitted (task %s), waiting ...",
-                        opt_job.task_name)
+        if not cache_hit:
+            # --- Check pre-submitted structure_opt (from init) ---
+            opt_job = _resolve_target_job(target_dir)
 
-        # --- Generate ALL other VASP inputs locally (while opt_job runs) ---
-        for d in other_dirs:
-            _cpd._prepare_vasp_input(d, config)
-        _uc._prepare_all_inputs(uc_root, target_dir, config)
-        _df._prepare_all_inputs(df_root, target_dir, config)
+            if opt_job is None:
+                # Not pre-submitted — submit now
+                _cpd._prepare_vasp_input(target_dir, config)
+                opt_job = submit_vasp(target_dir.resolve())
+            elif opt_job.done and opt_job.poll() != 0:
+                # Pre-submitted but FAILED — re-submit
+                logger.warning("Pre-submitted structure_opt failed; re-submitting.")
+                opt_job = None
+                _cpd._prepare_vasp_input(target_dir, config)
+                opt_job = submit_vasp(target_dir.resolve())
+            elif opt_job.done and opt_job.poll() == 0:
+                logger.info("Structure_opt already finished (pre-submitted).")
+            else:
+                logger.info("Structure_opt pre-submitted (task %s), waiting ...",
+                            opt_job.task_name)
 
-        # --- Submit competing phases (independent) ---
-        comp_jobs = _cpd._submit_remaining(cpd_root, other_dirs, config)
+            # --- Generate ALL other VASP inputs locally while opt_job runs ---
+            for d in other_dirs:
+                _cpd._prepare_vasp_input(d, config)
+            _uc._prepare_all_inputs(uc_root, target_dir, config)
+            _df._prepare_all_inputs(df_root, target_dir, config)
 
-        # --- Wait for structure_opt ---
-        if not (opt_job and opt_job.done and opt_job.poll() == 0):
-            logger.info("Waiting for structure_opt ...")
-            if opt_job:
-                wait_all([opt_job])
-            move_crisp_outputs(target_dir)
-            logger.info("Structure optimisation complete.")
+            # --- Submit competing phases (independent) ---
+            comp_jobs = _cpd._submit_remaining(cpd_root, other_dirs, config)
+
+            # --- Wait for structure_opt ---
+            if not (opt_job and opt_job.done and opt_job.poll() == 0):
+                logger.info("Waiting for structure_opt ...")
+                if opt_job:
+                    wait_all([opt_job])
+                move_crisp_outputs(target_dir)
+
         target_composition = _cpd._get_target_composition(config.formula)
         _cpd._run_post_processing(cpd_root, config, target_composition)
 
@@ -134,6 +187,10 @@ def run_point_defect_pipeline(
         state.cpd_status = StepStatus.DONE
         StateStore.save(state)
         logger.info("CPD stage complete.")
+
+        if not cache_hit:
+            _cache_cpd_results(config, target_dir, cpd_root)
+
 
     # ═══════════════════════════════════════════════════════════════════
     # Wave 2 — Submit ALL remaining VASP in one batch + wait

@@ -16,6 +16,7 @@
      interstitials: false
      complex_n: 1
      max_distance: 5.0
+     interstitial_indices: []  # 0-based indices into the dos_extrema candidate list
    corrections:
      O2: 1.374
      Cl2: 1.228
@@ -79,6 +80,7 @@ class PipelineConfig:
     poscar_src: str = ""
 
     interstitial: bool = False
+    interstitial_indices: list[int] = field(default_factory=list)
     complex_defect_order: int = 1
     remote_cutoff: float = 5.0
 
@@ -157,6 +159,7 @@ class PipelineConfig:
             supercell_min_atoms=sc.get("min_atoms", 200),
             supercell_max_atoms=sc.get("max_atoms", 600),
             interstitial=d.get("interstitials", False),
+            interstitial_indices=list(d.get("interstitial_indices", [])),
             complex_defect_order=d.get("complex_n", 1),
             remote_cutoff=d.get("max_distance", 5.0),
             molecule_corrections={
@@ -187,6 +190,7 @@ class PipelineConfig:
             },
             "defects": {
                 "interstitials": self.interstitial,
+                "interstitial_indices": list(self.interstitial_indices),
                 "complex_n": self.complex_defect_order,
                 "max_distance": self.remote_cutoff,
             },
@@ -201,29 +205,22 @@ class PipelineConfig:
                       sort_keys=False, allow_unicode=True)
 
     @classmethod
-    def from_yaml(cls, path: Path, root: Path = Path(".")) -> PipelineConfig:
-        """Load plan from a YAML file (with or without comments).
-
-        Handles both nested (new) and flat (legacy) formats.
-        """
-        with open(path) as f:
-            data = yaml.safe_load(f)
-        if not isinstance(data, dict):
-            raise ValueError(f"{path} does not contain a valid mapping.")
-        # ── Backward compat: flat → nested ───────────────────
-        if "formula" in data:
-            data = _flat_to_nested(data)
-        return cls.from_plan(data, root=root)
-
-    @classmethod
     def from_legacy_json(cls, path: Path, root: Path = Path(".")) -> PipelineConfig:
         """Migrate from the legacy ``info.json`` format."""
         with open(path) as f:
             data = json.load(f)
+        # ``iindex`` in the legacy format is a list of strings (e.g. "0", "1")
+        # — convert each to int so downstream code can join/iterate uniformly.
+        raw_iindex = data.get("iindex", [])
+        try:
+            interstitial_indices = [int(x) for x in raw_iindex]
+        except (TypeError, ValueError):
+            interstitial_indices = []
         return cls(
             formula=data.get("obj", ""),
             dopant_elements=data.get("dopant_element", []),
             interstitial=data.get("interstitial", False),
+            interstitial_indices=interstitial_indices,
             complex_defect_order=data.get("complex_defect", 1),
             remote_cutoff=data.get("remote", 5.0),
             potcar_overrides=data.get("pp", []),
@@ -265,25 +262,46 @@ def generate_config(
     from vasp_sop.core.jobs import run_local
     import re
 
-    # ① Download all competing phases (skip if mp_flag exists = cached)
+    # ① Load/download competing phases (with global MP cache)
     cpd_root = root / "cpd"
     cpd_root.mkdir(parents=True, exist_ok=True)
     mp_flag = cpd_root / "mp_flag"
 
+    from vasp_sop.core.cache import mp_phases_get, mp_phases_put, mp_poscar_get, mp_poscar_put
+
     if not mp_flag.is_file():
-        elements = re.findall(r"[A-Z][a-z]?", formula)
-        elements += dopant_elements or []
-        run_local(
-            f"pydefect_vasp mp -e {' '.join(elements)} --e_above_hull 0.0005",
-            cwd=cpd_root, timeout=120,
-        )
-        # Replace parens for shell safety
-        for child in list(cpd_root.iterdir()):
-            if child.is_dir() and ("(" in child.name or ")" in child.name):
-                child.rename(child.with_name(
-                    child.name.replace("(", "[").replace(")", "]")
-                ))
-        mp_flag.touch()
+        # Check global MP cache first
+        cached_phases = mp_phases_get(formula)
+        if cached_phases:
+            logger.info("MP cache hit for %s (%d phases)", formula, len(cached_phases))
+            phases = cached_phases
+            # Copy cached POSCARs to cpd dirs
+            for p in phases:
+                mpid = p["mpid"]
+                poscar_src = mp_poscar_get(mpid)
+                if poscar_src:
+                    dst = cpd_root / f"{p['formula']}_mp-{mpid}"
+                    dst.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(str(poscar_src), str(dst / "POSCAR"))
+                    potcar = poscar_src.parent / "POTCAR"
+                    if potcar.is_file():
+                        shutil.copy2(str(potcar), str(dst / "POTCAR"))
+            mp_flag.touch()
+        else:
+            # Cache miss — query MP
+            elements = re.findall(r"[A-Z][a-z]?", formula)
+            elements += dopant_elements or []
+            run_local(
+                f"pydefect_vasp mp -e {' '.join(elements)} --e_above_hull 0.0005",
+                cwd=cpd_root, timeout=120,
+            )
+            # Replace parens for shell safety
+            for child in list(cpd_root.iterdir()):
+                if child.is_dir() and ("(" in child.name or ")" in child.name):
+                    child.rename(child.with_name(
+                        child.name.replace("(", "[").replace(")", "]")
+                    ))
+            mp_flag.touch()
 
     # ② Parse phase info for YAML annotations and POSCAR for inference
     phases: list[dict] = []
@@ -328,7 +346,6 @@ def generate_config(
                 target_dir = child.resolve()
                 # Copy POSCAR to unitcell/structure_opt/ for inference
                 unitcell_poscar.parent.mkdir(parents=True, exist_ok=True)
-                import shutil
                 shutil.copy2(str(poscar_file), str(unitcell_poscar))
                 plan["project"]["poscar_src"] = (
                     f"MP mp-{mpid}" if mpid else f"local: {name}"
@@ -337,6 +354,16 @@ def generate_config(
             continue
 
     phases.sort(key=lambda p: (0 if p["is_target"] else 1, p.get("mpid", "")))
+
+    # Cache phases and POSCARs to global MP cache
+    clean_phases = [{k: v for k, v in p.items() if k != "is_target"} for p in phases]
+    mp_phases_put(formula, clean_phases)
+    for p in phases:
+        mpid = p.get("mpid")
+        if mpid and mpid != "?":
+            d = cpd_root / f"{p['formula']}_mp-{mpid}"
+            if d.is_dir():
+                mp_poscar_put(mpid, d)
 
     # ③ ENCUT (from POTCAR in target dir if available)
     if target_dir:
@@ -552,6 +579,7 @@ def _flat_to_nested(flat: dict) -> dict:
         },
         "defects": {
             "interstitials": flat.get("interstitial", False),
+            "interstitial_indices": flat.get("interstitial_indices", []),
             "complex_n": flat.get("complex_defect_order", 1),
             "max_distance": flat.get("remote_cutoff", 5.0),
         },

@@ -272,9 +272,10 @@ def _prepare_vasp_input(work_dir: Path, config: PipelineConfig) -> None:
         f"--potcar {' '.join(config.potcar_overrides)}"
         if config.potcar_overrides else ""
     )
+    encut_opt = f"ENCUT {config.encut}" if config.encut else ""
     cmd = (
         f"vise vs -x {config.functional} -k 2 "
-        f"--options set_hubbard_u True -uis NSW 50 {pp_opt}"
+        f"--options set_hubbard_u True -uis NSW 50 {encut_opt} {pp_opt}"
     )
     run_local(cmd, cwd=work_dir, timeout=300)
 
@@ -431,8 +432,19 @@ def _energy_adjustment_loop(
 ) -> float:
     """Loop with decrementing energy until pydefect cv succeeds."""
     chem_pot_diag = cpd_root / _CHEM_POT_DIAG
+    # The 10 eV limit is exclusive of the *next* decrement: once the previous
+    # attempt reached ``origin - 10.0``, the next ``-= step`` would overshoot,
+    # so we abort before writing the overshoot value into
+    # ``relative_energies.yaml``.
+    lower_bound = origin_energy - 10.0
     while not chem_pot_diag.is_file():
-        current_energy -= config.energy_adjust_step
+        next_energy = current_energy - config.energy_adjust_step
+        if next_energy < lower_bound:
+            raise RuntimeError(
+                f"pydefect cv still failing after adjusting energy by 10 eV for "
+                f"{target_string}. Aborting."
+            )
+        current_energy = next_energy
         with open(relative_energies_path) as f:
             rel_energies = yaml.safe_load(f) or {}
         rel_energies[target_string] = current_energy
@@ -443,11 +455,6 @@ def _energy_adjustment_loop(
                 f'pydefect cv -t "{target_string}"', cwd=cpd_root
             )
         except RuntimeError:
-            if current_energy < origin_energy - 10.0:
-                raise RuntimeError(
-                    f"pydefect cv still failing after adjusting energy by 10 eV for "
-                    f"{target_string}. Aborting."
-                )
             continue
     return current_energy
 

@@ -79,9 +79,24 @@ class TestPipelineConfig:
             assert c.formula == "GaN"
             assert c.dopant_elements == ["Mg"]
             assert c.interstitial is True
+            assert c.interstitial_indices == [0, 1]
             assert c.complex_defect_order == 2
             assert c.remote_cutoff == 3.0
             assert c.potcar_overrides == ["Cr_sv_GW"]
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def test_interstitial_indices_roundtrip(self):
+        """interstitial_indices survives a YAML round-trip."""
+        c1 = PipelineConfig(formula="GaN", interstitial=True,
+                            interstitial_indices=[0, 2, 5])
+        with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+            tmp = Path(f.name)
+        try:
+            c1.to_yaml(tmp)
+            c2 = PipelineConfig.from_yaml(tmp)
+            assert c2.interstitial is True
+            assert c2.interstitial_indices == [0, 2, 5]
         finally:
             tmp.unlink(missing_ok=True)
 
