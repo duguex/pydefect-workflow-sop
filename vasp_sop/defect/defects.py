@@ -286,53 +286,85 @@ def _construct_complex_defects(defect_root: Path, config: PipelineConfig) -> Non
         entries = maker.generate_entries(order, dopants=config.dopant_elements or None)
         maker.write(entries, str(defect_root), merge=True)
 
-    complex_flag.touch()
-    logger.info("Complex defects constructed.")
 def _vasp_completed(path: Path) -> bool:
     """Check OUTCAR in the work directory or crisp's output/ subdir."""
     return (path / "OUTCAR").is_file() or (path / "output" / "OUTCAR").is_file()
 
 
-def _run_vasp_calculations(defect_root: Path) -> None:
-    """Submit perfect + all defect VASP jobs in one batch.
+def _vasp_job_done(path: Path) -> bool:
+    """True if OUTCAR contains VASP completion signature."""
+    outcar = path / "OUTCAR"
+    if not outcar.is_file():
+        outcar = path / "output" / "OUTCAR"
+    if not outcar.is_file():
+        return False
+    try:
+        text = outcar.read_text()
+        return "General timing and accounting" in text
+    except Exception:
+        return False
 
-    Skips directories where OUTCAR already exists (resume safety).
-    """
+
+def _vasp_restart_from_contcar(path: Path) -> None:
+    """Copy CONTCAR → POSCAR and set ISTART=1 in INCAR for restart."""
+    contcar = path / "CONTCAR"
+    if not contcar.is_file():
+        return
+    import shutil
+    shutil.copy2(str(contcar), str(path / "POSCAR"))
+    incar = path / "INCAR"
+    if incar.is_file():
+        text = incar.read_text()
+        if "ISTART" not in text:
+            text = text.rstrip() + "\nISTART = 1\n"
+            incar.write_text(text)
+
+
+def _run_vasp_calculations(defect_root: Path) -> None:
+    """Submit perfect + all defect VASP jobs, with CONTCAR restart for timeouts."""
     perfect_dir = defect_root / "perfect"
     if not perfect_dir.is_dir():
         raise RuntimeError(
             f"Perfect supercell directory not found at {perfect_dir}."
         )
 
-    jobs: list[VaspJob] = []
+    def _collect_jobs() -> list[Path]:
+        """Return dirs that need VASP — NOT yet completed via CONTCAR restart."""
+        result = []
+        if not _vasp_job_done(perfect_dir):
+            result.append(perfect_dir)
+        for child in sorted(defect_root.iterdir()):
+            if not child.is_dir() or child.name == "perfect":
+                continue
+            if not _vasp_input_ready(child):
+                continue
+            if not _vasp_job_done(child):
+                result.append(child)
+        return result
 
-    def _maybe_submit(d: Path) -> None:
-        if _vasp_completed(d):
-            logger.info("Skipping %s: OUTCAR exists", d.name)
-        else:
-            jobs.append(submit_vasp(d.resolve()))
+    for attempt in range(3):  # max 3 restarts
+        dirs = _collect_jobs()
+        if not dirs:
+            break
 
-    _maybe_submit(perfect_dir)
+        # Restart incomplete ones from CONTCAR before submitting
+        for d in dirs:
+            if (d / "CONTCAR").is_file() and not _vasp_job_done(d):
+                logger.info("Restarting %s from CONTCAR (attempt %d)", d.name, attempt + 1)
+                _vasp_restart_from_contcar(d)
 
-    for child in sorted(defect_root.iterdir()):
-        if not child.is_dir() or child.name == "perfect":
-            continue
-        if not _vasp_input_ready(child):
-            logger.warning("Skipping %s: VASP inputs not ready", child.name)
-            continue
-        logger.info("Defect: submitting VASP for %s", child.name)
-        _maybe_submit(child)
-
-    if jobs:
-        logger.info("Defect: waiting for %d VASP jobs", len(jobs))
+        logger.info("Submitting %d VASP job(s) (attempt %d)", len(dirs), attempt + 1)
+        jobs = [submit_vasp(d.resolve()) for d in dirs]
         wait_all(jobs)
         for j in jobs:
             move_crisp_outputs(j.work_dir)
 
-    # Move crisp outputs for directories that were already completed
-    for d in list(defect_root.iterdir()):
-        if d.is_dir() and (d / "output").is_dir():
-            move_crisp_outputs(d)
+    still_incomplete = [d.name for d in _collect_jobs()]
+    if still_incomplete:
+        logger.warning(
+            "Defect VASP still incomplete after 3 attempts: %s",
+            ", ".join(still_incomplete),
+        )
 
 
 def _run_post_processing(
@@ -396,12 +428,6 @@ def _run_post_processing(
     # ── dei (defect energy info) ───────────────────────────────────
     perfect_cr = perfect_dir / "calc_results.json"
     if perfect_cr.is_file() and unitcell_yaml.is_file() and standard_energies.is_file():
-        # pydefect's efnv writes ``correction.json`` into each defect
-        # subdirectory. ``dei`` silently mixes corrected and uncorrected
-        # formation energies when efnv failed for some defects, so we run
-        # ``dei`` on the subset that has a correction and surface a clear
-        # warning for the rest. Pass the explicit list (no ``*_*`` glob) so
-        # we don't accidentally include uncorrected defects.
         defect_dirs = sorted(
             d for d in defect_root.iterdir()
             if d.is_dir() and "_" in d.name and d.name != "perfect"
@@ -410,9 +436,7 @@ def _run_post_processing(
         missing = [d for d in defect_dirs if not (d / "correction.json").is_file()]
         if missing:
             logger.warning(
-                "Skipping %d defect(s) missing correction.json (efnv likely "
-                "failed for these). Re-run efnv and re-invoke dei to include "
-                "them. Missing: %s",
+                "Skipping %d defect(s) missing correction.json: %s",
                 len(missing), ", ".join(d.name for d in missing),
             )
         if corrected:
@@ -442,10 +466,7 @@ def _run_post_processing(
     if target_vertices.is_file():
         with open(target_vertices) as f:
             tv_data = yaml.safe_load(f) or {}
-        # Extract vertex composition keys (skip the "target" metadata key)
         vertices = [k for k in tv_data if k != "target"]
-        # Skip plotting for single-element systems (pydefect expects
-        # element-wise chem_pot dict, but TargetVertex stores a scalar)
         if len(vertices) == 1:
             logger.info("Single-element system: skipping pydefect pe plot.")
         else:

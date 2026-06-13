@@ -335,15 +335,6 @@ def generate_config(
 
     phases.sort(key=lambda p: (0 if p["is_target"] else 1, p.get("mpid", "")))
 
-    # Cache phases and POSCARs to global MP cache
-    clean_phases = [{k: v for k, v in p.items() if k != "is_target"} for p in phases]
-    mp_phases_put(formula, clean_phases)
-    for p in phases:
-        mpid = p.get("mpid")
-        if mpid and mpid != "?":
-            d = cpd_root / f"{p['formula']}_mp-{mpid}"
-            if d.is_dir():
-                mp_poscar_put(mpid, d)
 
     # ③ ENCUT (from POTCAR in target dir if available)
     if target_dir:
