@@ -210,10 +210,20 @@ def run_point_defect_pipeline(
     # Collect all remaining VASP directories
     remaining_jobs: list[VaspJob] = []
 
+    def _vasp_done(d: Path) -> bool:
+        o = d / "OUTCAR"
+        if not o.is_file():
+            o = d / "output" / "OUTCAR"
+        if not o.is_file():
+            return False
+        try:
+            return "General timing and accounting" in o.read_text()
+        except Exception:
+            return False
+
     def _should_submit(d: Path) -> bool:
-        """Skip if OUTCAR exists (already computed)."""
-        if (d / "OUTCAR").is_file():
-            logger.info("Skipping %s: already computed", d.name)
+        if _vasp_done(d):
+            logger.info("Skipping %s: already completed", d.name)
             return False
         if not _vasp_input_ready(d):
             logger.warning("Inputs not ready for %s, skipping.", d.name)

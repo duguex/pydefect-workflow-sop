@@ -222,18 +222,15 @@ def _run_post_processing(uc_root: Path, config: PipelineConfig) -> None:
     dos_dir = uc_root / "dos"
     dielectric_dir = uc_root / "dielectric"
 
-    band_vasprun = band_dir / "vasprun.xml"
-    band_outcar = band_dir / "OUTCAR"
-    dielectric_outcar = dielectric_dir / "OUTCAR"
+    band_vasprun = (band_dir / "vasprun.xml").resolve()
+    band_outcar = (band_dir / "OUTCAR").resolve()
+    dielectric_outcar = (dielectric_dir / "OUTCAR").resolve()
 
     if band_vasprun.is_file():
         run_local("cd band && vise pb", cwd=uc_root)
 
     if dos_dir.is_dir():
         run_local("cd dos && vise pd", cwd=uc_root)
-        # AECCAR0 + AECCAR2 are the standard pair for
-        # ``all_electron_charge`` interpolation; AECCAR1 is not generated
-        # by the standard ``vise pd`` flow and including it FileNotFoundErrors.
         run_local(
             "cd dos && pydefect_vasp le -v AECCAR0 AECCAR2 "
             "-i all_electron_charge",
@@ -243,7 +240,6 @@ def _run_post_processing(uc_root: Path, config: PipelineConfig) -> None:
     if dielectric_dir.is_dir():
         run_local("cd dielectric && vise pdf", cwd=uc_root)
 
-    # Generate unitcell.yaml
     cmd = (
         f"pydefect_vasp u -vb {band_vasprun} -ob {band_outcar} "
         f"-odc {dielectric_outcar} -odi {dielectric_outcar} "
