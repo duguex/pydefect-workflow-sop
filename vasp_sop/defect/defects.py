@@ -292,33 +292,62 @@ def _vasp_completed(path: Path) -> bool:
 
 
 def _vasp_job_done(path: Path) -> bool:
-    """True if OUTCAR contains VASP completion signature."""
-    outcar = path / "OUTCAR"
-    if not outcar.is_file():
-        outcar = path / "output" / "OUTCAR"
-    if not outcar.is_file():
+    """True if VASP finished AND reached ionic convergence.
+
+    Runs ``pydefect_vasp cr`` if needed to parse OUTCAR into
+    ``calc_results.json``, then checks ``ionic_conv``.
+    """
+    cr_json = path / "calc_results.json"
+    if not cr_json.is_file():
+        # Try parsing with pydefect_vasp cr
+        try:
+            run_local(
+                f"pydefect_vasp cr -d {path.name}",
+                cwd=path.parent, timeout=120,
+            )
+        except RuntimeError:
+            pass
+    if not cr_json.is_file():
         return False
     try:
-        text = outcar.read_text()
-        return "General timing and accounting" in text
+        import json
+        c = json.loads(cr_json.read_text())
+        return bool(c.get("ionic_conv", False))
     except Exception:
         return False
 
-
 def _vasp_restart_from_contcar(path: Path) -> None:
-    """Copy CONTCAR → POSCAR and set ISTART=1 in INCAR for restart."""
+    """Copy CONTCAR → POSCAR, set ISTART=1, increase NSW for restart."""
     contcar = path / "CONTCAR"
     if not contcar.is_file():
         return
     import shutil
     shutil.copy2(str(contcar), str(path / "POSCAR"))
-    incar = path / "INCAR"
-    if incar.is_file():
-        text = incar.read_text()
-        if "ISTART" not in text:
-            text = text.rstrip() + "\nISTART = 1\n"
-            incar.write_text(text)
 
+    incar = path / "INCAR"
+    if not incar.is_file():
+        return
+    text = incar.read_text()
+    lines = text.splitlines()
+    new_lines = []
+    has_istart = False
+    for line in lines:
+        if line.strip().startswith("ISTART"):
+            new_lines.append("ISTART = 1")
+            has_istart = True
+        elif line.strip().startswith("NSW"):
+            # Double NSW on restart
+            nsw_val = 50
+            import re as _re
+            m = _re.search(r"\d+", line)
+            if m:
+                nsw_val = int(m.group()) * 2
+            new_lines.append(f"NSW = {nsw_val}")
+        else:
+            new_lines.append(line)
+    if not has_istart:
+        new_lines.append("ISTART = 1")
+    incar.write_text("\n".join(new_lines) + "\n")
 
 def _run_vasp_calculations(defect_root: Path) -> None:
     """Submit perfect + all defect VASP jobs, with CONTCAR restart for timeouts."""
