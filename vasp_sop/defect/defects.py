@@ -292,21 +292,34 @@ def _vasp_completed(path: Path) -> bool:
 
 
 def _vasp_job_done(path: Path) -> bool:
-    """True if VASP finished AND reached ionic convergence.
-
-    Runs ``pydefect_vasp cr`` if needed to parse OUTCAR into
-    ``calc_results.json``, then checks ``ionic_conv``.
-    """
+    """True if VASP reached ionic convergence (re-runs cr if OUTCAR is newer)."""
     cr_json = path / "calc_results.json"
-    if not cr_json.is_file():
-        # Try parsing with pydefect_vasp cr
-        try:
-            run_local(
-                f"pydefect_vasp cr -d {path.name}",
-                cwd=path.parent, timeout=120,
-            )
-        except RuntimeError:
-            pass
+    outcar = path / "OUTCAR"
+    if not outcar.is_file():
+        outcar = path / "output" / "OUTCAR"
+    if not outcar.is_file():
+        return False
+
+    # Re-run cr if OUTCAR is newer than calc_results.json (stale cr data)
+    if cr_json.is_file():
+        ot = outcar.stat().st_mtime
+        ct = cr_json.stat().st_mtime
+        if ot <= ct:
+            try:
+                import json
+                c = json.loads(cr_json.read_text())
+                return bool(c.get("ionic_conv", False))
+            except Exception:
+                pass
+
+    # Run or re-run pydefect_vasp cr
+    try:
+        run_local(
+            f"pydefect_vasp cr -d {path.name}",
+            cwd=path.parent, timeout=120,
+        )
+    except RuntimeError:
+        pass
     if not cr_json.is_file():
         return False
     try:
