@@ -292,12 +292,11 @@ def _vasp_completed(path: Path) -> bool:
 
 
 def _vasp_job_done(path: Path) -> bool:
-    """OUTCAR-based ionic convergence check (head + tail, ~96 KB).
+    """OUTCAR-based ionic convergence check.
 
-    Much faster than parsing the full OUTCAR + vasprun.xml via
-    ``pydefect_vasp cr``.  Checks ``General timing and accounting``
-    (VASP completed) then parses the last ``TOTAL-FORCE`` block and
-    compares max force with ``|EDIFFG|``.
+    - Not completed → False
+    - Completed with ionic_steps < NSW → EDIFFG reached → True
+    - Completed with ionic_steps == NSW → check forces vs EDIFFG
     """
     import re as _re
 
@@ -318,17 +317,25 @@ def _vasp_job_done(path: Path) -> bool:
     if "General timing and accounting" not in text[-4096:]:
         return False
 
-    # NSW / EDIFFG from header region
-    head = text[:32768]
+    # NSW / last ionic step from header + iterations
+    head = text[:16384]
     m_nsw = _re.search(r"NSW\s*=\s*(\d+)", head)
-    m_efg = _re.search(r"EDIFFG\s*=\s*([-\d.]+)", head)
     nsw = int(m_nsw.group(1)) if m_nsw else 50
-    efg = abs(float(m_efg.group(1))) if m_efg else 0.03
 
-    # Parse last TOTAL-FORCE block (tail region)
+    last_step = 0
+    for m in _re.finditer(r"Iteration\s+\d+\(\s*(\d+)\s*\)", text):
+        last_step = int(m.group(1))
+
+    # Ran fewer steps than NSW → VASP converged to EDIFFG
+    if last_step < nsw:
+        return True
+
+    # Ran all NSW steps — need to check forces
     idx = text.rfind("TOTAL-FORCE (eV/Angst)")
     if idx < 0:
         return False
+    m_efg = _re.search(r"EDIFFG\s*=\s*([-\d.]+)", head)
+    efg = abs(float(m_efg.group(1))) if m_efg else 0.03
     max_f = 0.0
     for line in text[idx:].splitlines()[2:]:
         parts = line.strip().split()
