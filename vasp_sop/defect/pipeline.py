@@ -196,56 +196,42 @@ def run_point_defect_pipeline(
 
 
     # ═══════════════════════════════════════════════════════════════════
-    # Wave 2 — Submit ALL remaining VASP in one batch + wait
+    # Wave 2 — Submit + auto-restart all remaining VASP
     # ═══════════════════════════════════════════════════════════════════
 
     if state.defect_status == StepStatus.DONE and state.defect_result is not None:
         logger.info("Defect already done, skipping.")
         return state
-    # Move any crisp outputs that might be in output/ subdirs (resume safety)
+
+    # Move crisp outputs (resume safety)
     for d in ([uc_root] if uc_root.is_dir() else []) + ([df_root] if df_root.is_dir() else []):
         for child in list(d.iterdir()):
             if child.is_dir():
                 move_crisp_outputs(child)
-    # Collect all remaining VASP directories
-    remaining_jobs: list[VaspJob] = []
 
-    def _vasp_done(d: Path) -> bool:
-        o = d / "OUTCAR"
-        if not o.is_file():
-            o = d / "output" / "OUTCAR"
-        if not o.is_file():
-            return False
-        try:
-            return "General timing and accounting" in o.read_text()
-        except Exception:
-            return False
-
-    def _should_submit(d: Path) -> bool:
-        if _vasp_done(d):
-            logger.info("Skipping %s: already completed", d.name)
-            return False
+    # Unitcell: band / dos / dielectric (single batch, no restart needed)
+    uc_jobs = []
+    for d in _uc._get_task_dirs(uc_root, config):
         if not _vasp_input_ready(d):
             logger.warning("Inputs not ready for %s, skipping.", d.name)
-            return False
-        return True
+            continue
+        outcar = d / "OUTCAR"
+        if outcar.is_file() or (d / "output" / "OUTCAR").is_file():
+            logger.info("Skipping %s: already computed", d.name)
+            continue
+        uc_jobs.append(submit_vasp(d.resolve(), nproc=64))
 
-    for d in _uc._get_task_dirs(uc_root, config):
-        if _should_submit(d):
-            remaining_jobs.append(submit_vasp(d.resolve(), nproc=64))
-
-    for d in _df._get_calc_dirs(df_root):
-        if _should_submit(d):
-            remaining_jobs.append(submit_vasp(d.resolve()))
-
-    if remaining_jobs:
-        state.defect_status = StepStatus.RUNNING
-        StateStore.save(state)
-        logger.info("Submitting %d remaining VASP jobs ...", len(remaining_jobs))
-        wait_all(remaining_jobs)
-        for j in remaining_jobs:
+    if uc_jobs:
+        logger.info("Submitting %d unitcell tasks", len(uc_jobs))
+        wait_all(uc_jobs)
+        for j in uc_jobs:
             move_crisp_outputs(j.work_dir)
 
+    # Defect: submit with auto-restart (up to 20x, progress tracking)
+    state.defect_status = StepStatus.RUNNING
+    StateStore.save(state)
+    if df_root.is_dir():
+        _df._run_vasp_calculations(df_root)
     # ═══════════════════════════════════════════════════════════════════
     # Wave 3 — Post-processing
     # ═══════════════════════════════════════════════════════════════════
