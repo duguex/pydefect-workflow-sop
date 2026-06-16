@@ -363,7 +363,12 @@ def _vasp_restart_from_contcar(path: Path) -> None:
     incar.write_text("\n".join(new_lines) + "\n")
 
 def _run_vasp_calculations(defect_root: Path) -> None:
-    """Submit perfect + all defect VASP jobs, with CONTCAR restart for timeouts."""
+    """Submit perfect + all defect VASP jobs, with CONTCAR restart for timeouts.
+
+    Loops until all jobs converge or no more progress (max_f stops decreasing).
+    """
+    import re as _re
+
     perfect_dir = defect_root / "perfect"
     if not perfect_dir.is_dir():
         raise RuntimeError(
@@ -371,7 +376,6 @@ def _run_vasp_calculations(defect_root: Path) -> None:
         )
 
     def _collect_jobs() -> list[Path]:
-        """Return dirs that need VASP — NOT yet completed via CONTCAR restart."""
         result = []
         if not _vasp_job_done(perfect_dir):
             result.append(perfect_dir)
@@ -384,19 +388,66 @@ def _run_vasp_calculations(defect_root: Path) -> None:
                 result.append(child)
         return result
 
-    for attempt in range(3):  # max 3 restarts
+    def _max_f(path: Path) -> float:
+        """Extract max force from OUTCAR (0 if unavailable)."""
+        for cand in (path / "OUTCAR", path / "output" / "OUTCAR"):
+            if cand.is_file():
+                text = cand.read_text()
+                idx = text.rfind("TOTAL-FORCE (eV/Angst)")
+                if idx < 0:
+                    return 0.0
+                mf = 0.0
+                for line in text[idx:].splitlines()[2:]:
+                    p = line.strip().split()
+                    if len(p) < 6:
+                        break
+                    try:
+                        mf = max(mf, abs(float(p[3])), abs(float(p[4])), abs(float(p[5])))
+                    except ValueError:
+                        break
+                return mf
+        return 0.0
+
+    prev_forces: dict[str, float] = {}
+    stalled: set[str] = set()
+
+    for attempt in range(20):
         dirs = _collect_jobs()
         if not dirs:
             break
 
-        # Restart incomplete ones from CONTCAR before submitting
         for d in dirs:
             if (d / "CONTCAR").is_file() and not _vasp_job_done(d):
-                logger.info("Restarting %s from CONTCAR (attempt %d)", d.name, attempt + 1)
-                _vasp_restart_from_contcar(d)
+                dirname = d.name
+                old_f = prev_forces.get(dirname, 999.0)
+                cur_f = _max_f(d)
+                if cur_f > 0 and cur_f >= old_f * 0.95:
+                    stalled.add(dirname)
+                    logger.info(
+                        "No progress for %s (max_f %.4f -> %.4f), marking stalled",
+                        dirname, old_f, cur_f,
+                    )
+                else:
+                    stalled.discard(dirname)
+                prev_forces[dirname] = cur_f
 
-        logger.info("Submitting %d VASP job(s) (attempt %d)", len(dirs), attempt + 1)
-        jobs = [submit_vasp(d.resolve()) for d in dirs]
+                if dirname not in stalled:
+                    logger.info(
+                        "Restarting %s from CONTCAR (attempt %d, max_f=%.4f)",
+                        dirname, attempt + 1, cur_f,
+                    )
+                    _vasp_restart_from_contcar(d)
+                else:
+                    logger.warning("Skipping %s: stalled (max_f=%.4f)", dirname, cur_f)
+
+        # Only submit non-stalled jobs
+        active = [d for d in dirs if d.name not in stalled]
+        if not active:
+            logger.info("All remaining jobs stalled. Giving up.")
+            break
+
+        logger.info("Submitting %d VASP job(s) (attempt %d)", len(active), attempt + 1)
+        jobs = [submit_vasp(d.resolve()) for d in active]
         wait_all(jobs)
         for j in jobs:
             move_crisp_outputs(j.work_dir)
@@ -404,10 +455,9 @@ def _run_vasp_calculations(defect_root: Path) -> None:
     still_incomplete = [d.name for d in _collect_jobs()]
     if still_incomplete:
         logger.warning(
-            "Defect VASP still incomplete after 3 attempts: %s",
-            ", ".join(still_incomplete),
+            "Defect VASP still incomplete after %d attempts: %s",
+            attempt + 1, ", ".join(still_incomplete),
         )
-
 
 def _run_post_processing(
     defect_root: Path,
