@@ -292,15 +292,31 @@ def _vasp_completed(path: Path) -> bool:
 
 
 def _vasp_job_done(path: Path) -> bool:
-    """True if VASP reached ionic convergence (re-runs cr if OUTCAR is newer)."""
-    cr_json = path / "calc_results.json"
-    outcar = path / "OUTCAR"
-    if not outcar.is_file():
-        outcar = path / "output" / "OUTCAR"
-    if not outcar.is_file():
+    """True if VASP reached ionic convergence.
+
+    Fast path: grep OUTCAR for completion + convergence signature.
+    Slow path: run ``pydefect_vasp cr`` if needed.
+    """
+    def _outcar(p: Path) -> Path | None:
+        for cand in (p / "OUTCAR", p / "output" / "OUTCAR"):
+            if cand.is_file():
+                return cand
+        return None
+
+    outcar = _outcar(path)
+    if outcar is None:
         return False
 
-    # Re-run cr if OUTCAR is newer than calc_results.json (stale cr data)
+    # Lightweight pre-check: VASP not finished yet
+    try:
+        text = outcar.read_text()
+        if "General timing and accounting" not in text:
+            return False
+    except Exception:
+        return False
+
+    # VASP exited normally.  Check if ionic convergence was reached.
+    cr_json = path / "calc_results.json"
     if cr_json.is_file():
         ot = outcar.stat().st_mtime
         ct = cr_json.stat().st_mtime
@@ -312,7 +328,7 @@ def _vasp_job_done(path: Path) -> bool:
             except Exception:
                 pass
 
-    # Run or re-run pydefect_vasp cr
+    # Run pydefect_vasp cr to get structured convergence data
     try:
         run_local(
             f"pydefect_vasp cr -d {path.name}",
@@ -320,14 +336,13 @@ def _vasp_job_done(path: Path) -> bool:
         )
     except RuntimeError:
         pass
-    if not cr_json.is_file():
-        return False
-    try:
-        import json
-        c = json.loads(cr_json.read_text())
-        return bool(c.get("ionic_conv", False))
-    except Exception:
-        return False
+    if cr_json.is_file():
+        try:
+            import json
+            return bool(json.loads(cr_json.read_text()).get("ionic_conv", False))
+        except Exception:
+            pass
+    return False
 
 def _vasp_restart_from_contcar(path: Path) -> None:
     """Copy CONTCAR → POSCAR, set ISTART=1, increase NSW for restart."""
