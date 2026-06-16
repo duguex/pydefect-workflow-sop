@@ -89,6 +89,55 @@ def mp_poscar_put(mpid: str, src_dir: Path) -> None:
     logger.debug("Cached POSCAR for mp-%s", mpid)
 
 
+# ── Combined MP download cache (by element set) ────────────────────────
+# Caches the full output of ``pydefect_vasp mp`` including molecule phases
+# like ``mol_N2``, which the per-formula cache cannot handle.
+
+
+def _combo_key(elements: list[str]) -> str:
+    return "-".join(sorted(set(elements)))
+
+
+def mp_combo_get(elements: list[str]) -> Optional[Path]:
+    """Return path to cached MP download dir, or None.
+
+    Cache hit means ALL phases (including molecules) exist.
+    """
+    d = MP_CACHE / "combos" / _combo_key(elements)
+    return d if d.is_dir() and (d / ".done").is_file() else None
+
+
+def mp_combo_put(elements: list[str], src_root: Path) -> Path:
+    """Copy all phase directories from *src_root* (cpd/) to cache.
+
+    Returns cache path.
+    """
+    dst = MP_CACHE / "combos" / _combo_key(elements)
+    dst.mkdir(parents=True, exist_ok=True)
+    import shutil
+    for child in src_root.iterdir():
+        if child.is_dir():
+            shutil.copytree(str(child), str(dst / child.name), dirs_exist_ok=True)
+    (dst / ".done").touch()
+    logger.info("MP cache: stored combo %s (%d dirs)", _combo_key(elements),
+                sum(1 for _ in dst.iterdir()))
+    return dst
+
+
+def mp_combo_restore(elements: list[str], dst_root: Path) -> None:
+    """Restore cached MP download to *dst_root* (cpd/), including mol_*."""
+    src = mp_combo_get(elements)
+    if src is None:
+        return
+    import shutil
+    for child in src.iterdir():
+        if child.is_dir() and child.name != ".done":
+            dst = dst_root / child.name
+            if not dst.exists():
+                shutil.copytree(str(child), str(dst))
+    logger.info("MP cache: restored combo %s to %s", _combo_key(elements), dst_root)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # VASP calculation cache
 # ══════════════════════════════════════════════════════════════════════════

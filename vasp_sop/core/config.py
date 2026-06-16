@@ -262,8 +262,7 @@ def generate_config(
     from vasp_sop.core.jobs import run_local
     import re
 
-    # ① Load competing phases (rely on pydefect_vasp mp — it's fast and
-    #    handles molecule phases like mol_N2 that the MP cache misses)
+    # ① Load competing phases (check combo cache first, then pydefect_vasp mp)
     cpd_root = root / "cpd"
     cpd_root.mkdir(parents=True, exist_ok=True)
     mp_flag = cpd_root / "mp_flag"
@@ -271,10 +270,21 @@ def generate_config(
     if not mp_flag.is_file():
         elements = re.findall(r"[A-Z][a-z]?", formula)
         elements += dopant_elements or []
-        run_local(
-            f"pydefect_vasp mp -e {' '.join(elements)} --e_above_hull 0.0005",
-            cwd=cpd_root, timeout=120,
-        )
+
+        from vasp_sop.core.cache import mp_combo_get, mp_combo_restore, mp_combo_put
+
+        cached = mp_combo_get(elements)
+        if cached:
+            logger.info("MP combo cache HIT for %s, restoring ...", elements)
+            mp_combo_restore(elements, cpd_root)
+        else:
+            logger.info("MP combo cache MISS for %s, querying ...", elements)
+            run_local(
+                f"pydefect_vasp mp -e {' '.join(elements)} --e_above_hull 0.0005",
+                cwd=cpd_root, timeout=120,
+            )
+            mp_combo_put(elements, cpd_root)
+
         # Replace parens for shell safety
         for child in list(cpd_root.iterdir()):
             if child.is_dir() and ("(" in child.name or ")" in child.name):
