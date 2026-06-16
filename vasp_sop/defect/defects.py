@@ -292,12 +292,7 @@ def _vasp_completed(path: Path) -> bool:
 
 
 def _vasp_job_done(path: Path) -> bool:
-    """OUTCAR-based ionic convergence check.
-
-    - Not completed → False
-    - Completed with ionic_steps < NSW → EDIFFG reached → True
-    - Completed with ionic_steps == NSW → check forces vs EDIFFG
-    """
+    """OUTCAR-based ionic convergence check (head + tail, ~96 KB)."""
     import re as _re
 
     outcar: Path | None = None
@@ -313,27 +308,14 @@ def _vasp_job_done(path: Path) -> bool:
     except Exception:
         return False
 
-    # VASP finished ?
     if "General timing and accounting" not in text[-4096:]:
         return False
 
-    # NSW / last ionic step from header + iterations
-    head = text[:16384]
-    m_nsw = _re.search(r"NSW\s*=\s*(\d+)", head)
-    nsw = int(m_nsw.group(1)) if m_nsw else 50
-
-    last_step = 0
-    for m in _re.finditer(r"Iteration\s+\d+\(\s*(\d+)\s*\)", text):
-        last_step = int(m.group(1))
-
-    # Ran fewer steps than NSW → VASP converged to EDIFFG
-    if last_step < nsw:
-        return True
-
-    # Ran all NSW steps — need to check forces
+    # Parse forces from last TOTAL-FORCE block
     idx = text.rfind("TOTAL-FORCE (eV/Angst)")
     if idx < 0:
         return False
+    head = text[:16384]
     m_efg = _re.search(r"EDIFFG\s*=\s*([-\d.]+)", head)
     efg = abs(float(m_efg.group(1))) if m_efg else 0.03
     max_f = 0.0
@@ -342,12 +324,10 @@ def _vasp_job_done(path: Path) -> bool:
         if len(parts) < 6:
             break
         try:
-            fx, fy, fz = float(parts[3]), float(parts[4]), float(parts[5])
-            max_f = max(max_f, abs(fx), abs(fy), abs(fz))
+            max_f = max(max_f, abs(float(parts[3])), abs(float(parts[4])), abs(float(parts[5])))
         except ValueError:
             break
     return max_f < efg
-
 
 
 def _vasp_restart_from_contcar(path: Path) -> None:
