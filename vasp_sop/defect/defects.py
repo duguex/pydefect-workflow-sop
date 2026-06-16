@@ -292,57 +292,56 @@ def _vasp_completed(path: Path) -> bool:
 
 
 def _vasp_job_done(path: Path) -> bool:
-    """True if VASP reached ionic convergence.
+    """OUTCAR-based ionic convergence check (head + tail, ~96 KB).
 
-    Fast path: grep OUTCAR for completion + convergence signature.
-    Slow path: run ``pydefect_vasp cr`` if needed.
+    Much faster than parsing the full OUTCAR + vasprun.xml via
+    ``pydefect_vasp cr``.  Checks ``General timing and accounting``
+    (VASP completed) then parses the last ``TOTAL-FORCE`` block and
+    compares max force with ``|EDIFFG|``.
     """
-    def _outcar(p: Path) -> Path | None:
-        for cand in (p / "OUTCAR", p / "output" / "OUTCAR"):
-            if cand.is_file():
-                return cand
-        return None
+    import re as _re
 
-    outcar = _outcar(path)
+    outcar: Path | None = None
+    for cand in (path / "OUTCAR", path / "output" / "OUTCAR"):
+        if cand.is_file():
+            outcar = cand
+            break
     if outcar is None:
         return False
 
-    # Lightweight pre-check: VASP not finished yet
     try:
         text = outcar.read_text()
-        if "General timing and accounting" not in text:
-            return False
     except Exception:
         return False
 
-    # VASP exited normally.  Check if ionic convergence was reached.
-    cr_json = path / "calc_results.json"
-    if cr_json.is_file():
-        ot = outcar.stat().st_mtime
-        ct = cr_json.stat().st_mtime
-        if ot <= ct:
-            try:
-                import json
-                c = json.loads(cr_json.read_text())
-                return bool(c.get("ionic_conv", False))
-            except Exception:
-                pass
+    # VASP finished ?
+    if "General timing and accounting" not in text[-4096:]:
+        return False
 
-    # Run pydefect_vasp cr to get structured convergence data
-    try:
-        run_local(
-            f"pydefect_vasp cr -d {path.name}",
-            cwd=path.parent, timeout=120,
-        )
-    except RuntimeError:
-        pass
-    if cr_json.is_file():
+    # NSW / EDIFFG from header region
+    head = text[:32768]
+    m_nsw = _re.search(r"NSW\s*=\s*(\d+)", head)
+    m_efg = _re.search(r"EDIFFG\s*=\s*([-\d.]+)", head)
+    nsw = int(m_nsw.group(1)) if m_nsw else 50
+    efg = abs(float(m_efg.group(1))) if m_efg else 0.03
+
+    # Parse last TOTAL-FORCE block (tail region)
+    idx = text.rfind("TOTAL-FORCE (eV/Angst)")
+    if idx < 0:
+        return False
+    max_f = 0.0
+    for line in text[idx:].splitlines()[2:]:
+        parts = line.strip().split()
+        if len(parts) < 6:
+            break
         try:
-            import json
-            return bool(json.loads(cr_json.read_text()).get("ionic_conv", False))
-        except Exception:
-            pass
-    return False
+            fx, fy, fz = float(parts[3]), float(parts[4]), float(parts[5])
+            max_f = max(max_f, abs(fx), abs(fy), abs(fz))
+        except ValueError:
+            break
+    return max_f < efg
+
+
 
 def _vasp_restart_from_contcar(path: Path) -> None:
     """Copy CONTCAR → POSCAR, set ISTART=1, increase NSW for restart."""
@@ -364,9 +363,8 @@ def _vasp_restart_from_contcar(path: Path) -> None:
             new_lines.append("ISTART = 1")
             has_istart = True
         elif line.strip().startswith("NSW"):
-            # Double NSW on restart
-            nsw_val = 50
             import re as _re
+            nsw_val = 50
             m = _re.search(r"\d+", line)
             if m:
                 nsw_val = int(m.group()) * 2
