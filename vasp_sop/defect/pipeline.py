@@ -193,6 +193,16 @@ def run_point_defect_pipeline(
 
         if not cache_hit:
             _cache_cpd_results(config, target_dir, cpd_root)
+        else:
+            # Edge case: calc cache HIT but CPD cache MISS (e.g. crash
+            # between calc_results_put and calc_cpd_put).  Regenerated CPD
+            # files would never be cached without this check.
+            name = target_dir.name
+            if "_mp-" in name:
+                f, m = name.split("_mp-", 1)
+                from vasp_sop.core.cache import calc_cpd_get
+                if calc_cpd_get(f, m) is None:
+                    _cache_cpd_results(config, target_dir, cpd_root)
 
 
     # ═══════════════════════════════════════════════════════════════════
