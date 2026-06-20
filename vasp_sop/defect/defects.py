@@ -445,12 +445,24 @@ def _run_vasp_calculations(defect_root: Path) -> None:
         if not active:
             logger.info("All remaining jobs stalled. Giving up.")
             break
-
         logger.info("Submitting %d VASP job(s) (attempt %d)", len(active), attempt + 1)
         jobs = [submit_vasp(d.resolve()) for d in active]
-        wait_all(jobs)
-        for j in jobs:
-            move_crisp_outputs(j.work_dir)
+
+        # 并行等待全部完成，不抛异常
+        from vasp_sop.core.jobs import wait_all as _wait_all
+        pending = list(jobs)
+        while pending:
+            for j in list(pending):
+                rc = j.poll()
+                if rc is not None:
+                    pending.remove(j)
+                    if rc != 0:
+                        logger.warning("VASP failed in %s (exit %d)", j.work_dir.name, rc)
+                    else:
+                        move_crisp_outputs(j.work_dir)
+            if pending:
+                import time
+                time.sleep(60)
 
     still_incomplete = [d.name for d in _collect_jobs()]
     if still_incomplete:
