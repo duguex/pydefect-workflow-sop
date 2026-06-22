@@ -1,7 +1,7 @@
 # TODO — VASP 缺陷计算管线
 
-## Pending
-
-- [ ] 复杂缺陷（pydefect-complex）与 vasp_sop 管线的端到端集成测试
-- [ ] 支持更多缺陷类型（间隙、反位）
-- [ ] Wave 2 retry + stall 检测在生产数据上的验证
+- [ ] 复杂缺陷（pydefect-complex）端到端集成测试
+- [ ] 间隙位 / 反位缺陷支持完善
+- [ ] CeO₂ Hubbard U 验证（f 电子是否需要 HSE）
+- [ ] hBN / orth-SiC 初始化（缺 cpd/ 目录）
+- [ ] P4 体系原有 unitcell 状态确认（diamond, SiC, GaN, AlN, CaO, MgO, hBN, ZnO, MoS₂）
