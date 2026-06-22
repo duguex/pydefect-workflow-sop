@@ -476,6 +476,21 @@ def _add_batch_parser(subparsers) -> None:
         help="Submit all competing phases (default: target phase only)",
     )
 
+    # run
+    rp = sub.add_parser("run", help="Run batch pipeline — advance all systems until completion")
+    rp.add_argument(
+        "root", type=Path,
+        help="Project root directory containing system subdirectories",
+    )
+    rp.add_argument(
+        "--max-jobs", type=int, default=20,
+        help="Maximum concurrent VASP jobs across all systems (default: 20)",
+    )
+    rp.add_argument(
+        "--poll", type=int, default=60,
+        help="Poll interval in seconds (default: 60)",
+    )
+
 
 def _handle_batch(args: argparse.Namespace) -> None:
     if args.batch_action == "status":
@@ -484,6 +499,8 @@ def _handle_batch(args: argparse.Namespace) -> None:
         _batch_generate_inputs(args.root.resolve(), unitcell=args.unitcell)
     elif args.batch_action == "submit":
         _batch_submit(args.root.resolve(), all_phases=args.all_phases)
+    elif args.batch_action == "run":
+        _batch_run(args.root.resolve(), max_jobs=args.max_jobs, poll_interval=args.poll)
 
 def _batch_status(root: Path) -> None:
     """Scan *root* for vasp-sop systems and print status table."""
@@ -681,6 +698,213 @@ def _batch_submit(root: Path, *, all_phases: bool = False) -> None:
     else:
         print("No jobs submitted.")
 
+
+
+def _batch_run(root: Path, *, max_jobs: int = 20, poll_interval: int = 60) -> None:
+    """Batch pipeline — advance all systems independently until completion.
+
+    Each system cycles through: TARGET → COMPETING → CPD_POST → UC_DF → DONE.
+    Disk state is the source of truth (resume-safe).
+    """
+    import time as _time
+    from vasp_sop.vasp.io import check_converged, input_ready, prepare_inputs
+    from vasp_sop.core.jobs import submit_vasp, move_crisp_outputs
+    from vasp_sop.core.config import PipelineConfig
+    from vasp_sop.defect import unitcell as _uc
+    from vasp_sop.defect import cpd as _cpd
+    from vasp_sop.defect.builder import build_all as _build_defects
+    from vasp_sop.defect.compute import run_vasp as _run_defect_vasp
+    from vasp_sop.defect.analysis import analyze as _analyze_defects
+
+    _CPD = "cpd"
+    _UC = "unitcell"
+    _DF = "defect"
+
+    # ── Collect systems ─────────────────────────────────────────────
+    sys_list: list[dict] = []  # each: {name, root, config, plan_path, formula, mpid}
+    for d in sorted(root.iterdir()):
+        if not d.is_dir():
+            continue
+        plan_path = d / "plan.yaml"
+        if not plan_path.is_file():
+            continue
+        try:
+            config = PipelineConfig.from_yaml(plan_path, root=d)
+        except Exception:
+            continue
+        src = config.poscar_src
+        mpid = src.split("mp-", 1)[1] if src.startswith("MP mp-") else None
+        sys_list.append({
+            "name": config.formula or d.name,
+            "root": d,
+            "config": config,
+            "formula": config.formula,
+            "mpid": mpid,
+        })
+
+    if not sys_list:
+        print("No systems found.")
+        return
+
+    print(f"Batch run: {len(sys_list)} systems, max_jobs={max_jobs}\n")
+
+    # ── Helpers ─────────────────────────────────────────────────────
+
+    def _target_dir(s: dict) -> Path | None:
+        if not s["mpid"]:
+            return None
+        cpd_dir = s["root"] / _CPD
+        for pd in cpd_dir.iterdir():
+            if pd.is_dir() and s["mpid"] in pd.name:
+                return pd
+        return None
+
+    def _competing_dirs(s: dict) -> list[Path]:
+        td = _target_dir(s)
+        cpd_dir = s["root"] / _CPD
+        return sorted(
+            pd for pd in cpd_dir.iterdir()
+            if pd.is_dir() and pd.name != td.name and pd.name not in ("combos", "mp_flag")
+            and input_ready(pd) and not check_converged(pd)
+        )
+
+    def _phase(s: dict) -> str:
+        """Return current phase string for system."""
+        td = _target_dir(s)
+        if td is None:
+            return "NO_TARGET"
+        if not check_converged(td):
+            return "TARGET"
+        if _competing_dirs(s):
+            return "COMPETING"
+        cpd_root = s["root"] / _CPD
+        if not (cpd_root / "target_vertices.yaml").is_file():
+            return "CPD_POST"
+        uc_root = s["root"] / _UC
+        uc_tasks = ["band", "dos", "dielectric"]
+        uc_pending = any(
+            not check_converged(uc_root / t) for t in uc_tasks
+            if (uc_root / t / "INCAR").is_file()
+        )
+        df_root = s["root"] / _DF
+        df_done = (df_root / "defect_energy_summary.json").is_file() if df_root.is_dir() else True
+        if uc_pending or not df_done:
+            return "UC_DF"
+        return "DONE"
+
+    # ── Main loop ───────────────────────────────────────────────────
+    active: dict[str, str] = {}  # work_dir (str) -> phase label
+
+    while True:
+        # 1. Poll active jobs
+        for wd_str in list(active):
+            wd = Path(wd_str)
+            if check_converged(wd):
+                move_crisp_outputs(wd)
+                del active[wd_str]
+                logger.info("Completed: %s", wd.name)
+
+        # 2. Status snapshot
+        phases = [_phase(s) for s in sys_list]
+        done_count = sum(1 for p in phases if p == "DONE")
+        running = len(active)
+
+        # 3. Print status line
+        counts = {p: phases.count(p) for p in sorted(set(phases))}
+        parts = [f"{p}={n}" for p, n in sorted(counts.items())]
+        print(f"  [{running} running]  {'  '.join(parts)}")
+
+        # 4. Done?
+        if done_count == len(sys_list) and running == 0:
+            print("\nAll systems complete.")
+            break
+
+        # 5. Advance systems that have room
+        for s in sys_list:
+            if running >= max_jobs:
+                break
+            p = _phase(s)
+            if p == "DONE" or p == "NO_TARGET":
+                continue
+
+            root_dir = s["root"]
+            cpd_root = root_dir / _CPD
+            uc_root = root_dir / _UC
+            df_root = root_dir / _DF
+
+            if p == "TARGET":
+                td = _target_dir(s)
+                if td and td not in active and not check_converged(td):
+                    try:
+                        job = submit_vasp(td.resolve())
+                        active[str(td.resolve())] = "target"
+                        running += 1
+                        print(f"  → {s['name']:<18} target: {job.task_name}")
+                    except Exception as exc:
+                        logger.warning("%s target submit failed: %s", s["name"], exc)
+
+            elif p == "COMPETING":
+                comp_dirs = _competing_dirs(s)
+                for cd in comp_dirs:
+                    if running >= max_jobs:
+                        break
+                    if str(cd.resolve()) not in active:
+                        try:
+                            job = submit_vasp(cd.resolve())
+                            active[str(cd.resolve())] = "competing"
+                            running += 1
+                            print(f"  → {s['name']:<18} phase: {cd.name} → {job.task_name}")
+                        except Exception as exc:
+                            logger.warning("%s/%s submit failed: %s", s["name"], cd.name, exc)
+
+            elif p == "CPD_POST":
+                # Local step: run CPD post-processing
+                logger.info("%s: CPD post-processing ...", s["name"])
+                try:
+                    target_composition = _cpd._get_target_composition(s["formula"])
+                    _cpd.compute_chemical_potentials(cpd_root, s["config"], target_composition)
+                except Exception as exc:
+                    logger.error("%s CPD failed: %s", s["name"], exc)
+                    print(f"  ✗ {s['name']:<18} CPD post-processing FAILED")
+
+            elif p == "UC_DF":
+                # Ensure unitcell inputs are ready
+                td = _target_dir(s)
+                if td and not (uc_root / "band" / "INCAR").is_file():
+                    _uc._prepare_all_inputs(uc_root, td, s["config"])
+
+                # Ensure defect inputs are ready
+                if td and (df_root / "defect_in.yaml").is_file() and not (df_root / "perfect" / "INCAR").is_file():
+                    _build_defects(df_root, td, s["config"])
+
+                # Submit unitcell tasks
+                for task in ("band", "dos", "dielectric"):
+                    if running >= max_jobs:
+                        break
+                    task_dir = uc_root / task
+                    if not task_dir.is_dir():
+                        continue
+                    if check_converged(task_dir):
+                        continue
+                    if str(task_dir.resolve()) not in active:
+                        prepare_inputs(task_dir, s["config"], task_type=task)
+                        try:
+                            job = submit_vasp(task_dir.resolve())
+                            active[str(task_dir.resolve())] = f"uc-{task}"
+                            running += 1
+                            print(f"  → {s['name']:<18} unitcell: {task} → {job.task_name}")
+                        except Exception as exc:
+                            logger.warning("%s/%s submit failed: %s", s["name"], task, exc)
+
+                # Submit defect VASP via the existing run_vasp function
+                if df_root.is_dir() and not (df_root / "defect_energy_summary.json").is_file():
+                    try:
+                        _run_defect_vasp(df_root)
+                    except Exception as exc:
+                        logger.warning("%s defect VASP error: %s", s["name"], exc)
+                        # _run_defect_vasp handles its own retry loop, so this is a non-issue
+
+        _time.sleep(poll_interval)
 
 def _scan_system(d: Path, plan: Path) -> dict:
     """Inspect a single system directory and return status dict."""
