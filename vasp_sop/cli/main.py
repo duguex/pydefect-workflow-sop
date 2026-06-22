@@ -868,14 +868,18 @@ def _batch_run(root: Path, *, max_jobs: int = 20, poll_interval: int = 60) -> No
                     print(f"  ✗ {s['name']:<18} CPD post-processing FAILED")
 
             elif p == "UC_DF":
-                # Ensure unitcell inputs are ready
+                # Ensure unitcell inputs are ready (local, fast)
                 td = _target_dir(s)
                 if td and not (uc_root / "band" / "INCAR").is_file():
                     _uc._prepare_all_inputs(uc_root, td, s["config"])
 
-                # Ensure defect inputs are ready
-                if td and (df_root / "defect_in.yaml").is_file() and not (df_root / "perfect" / "INCAR").is_file():
-                    _build_defects(df_root, td, s["config"])
+                # Ensure defect structures + inputs are ready (local, fast)
+                if td and not (df_root / "perfect" / "INCAR").is_file():
+                    if not (df_root / "defect_in.yaml").is_file():
+                        _build_defects(df_root, td, s["config"])
+                    else:
+                        from vasp_sop.defect.builder import _generate_vasp_inputs
+                        _generate_vasp_inputs(df_root, s["config"])
 
                 # Submit unitcell tasks
                 for task in ("band", "dos", "dielectric"):
@@ -896,13 +900,52 @@ def _batch_run(root: Path, *, max_jobs: int = 20, poll_interval: int = 60) -> No
                         except Exception as exc:
                             logger.warning("%s/%s submit failed: %s", s["name"], task, exc)
 
-                # Submit defect VASP via the existing run_vasp function
+                # Submit defect VASP jobs individually
                 if df_root.is_dir() and not (df_root / "defect_energy_summary.json").is_file():
+                    for child in sorted(df_root.iterdir()):
+                        if running >= max_jobs:
+                            break
+                        if not child.is_dir():
+                            continue
+                        if not input_ready(child):
+                            continue
+                        if check_converged(child):
+                            continue
+                        if str(child.resolve()) not in active:
+                            try:
+                                job = submit_vasp(child.resolve())
+                                active[str(child.resolve())] = f"df-{child.name}"
+                                running += 1
+                                print(f"  → {s['name']:<18} defect: {child.name} → {job.task_name}")
+                            except Exception as exc:
+                                logger.warning("%s/%s submit failed: %s", s["name"], child.name, exc)
+
+                # Post-processing when all VASP done
+                uc_all_done = all(
+                    check_converged(uc_root / t) or not (uc_root / t / "INCAR").is_file()
+                    for t in ("band", "dos", "dielectric")
+                )
+                df_vasp_done = all(
+                    check_converged(child) or not input_ready(child)
+                    for child in df_root.iterdir() if child.is_dir()
+                ) if df_root.is_dir() else True
+
+                if uc_all_done and df_vasp_done and (df_root / "defect_energy_summary.json").is_file():
+                    pass  # already done
+                elif uc_all_done and df_vasp_done:
+                    # Run post-processing
+                    logger.info("%s: post-processing ...", s["name"])
                     try:
-                        _run_defect_vasp(df_root)
+                        _uc.build_unitcell_yaml(uc_root, s["config"])
+                        _analyze_defects(
+                            df_root, s["root"], s["config"],
+                            unitcell_yaml=uc_root / "unitcell.yaml",
+                            standard_energies=cpd_root / "standard_energies.yaml",
+                            target_vertices=cpd_root / "target_vertices.yaml",
+                        )
+                        print(f"  ✓ {s['name']:<18} pipeline complete")
                     except Exception as exc:
-                        logger.warning("%s defect VASP error: %s", s["name"], exc)
-                        # _run_defect_vasp handles its own retry loop, so this is a non-issue
+                        logger.error("%s post-processing failed: %s", s["name"], exc)
 
         _time.sleep(poll_interval)
 
