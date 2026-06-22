@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import shutil
 import tempfile
 from dataclasses import dataclass, field, asdict
@@ -259,39 +258,20 @@ def generate_config(
     plan["project"]["dopant_elements"] = list(dopant_elements or [])
     plan["parameters"]["functional"] = functional
 
-    from vasp_sop.core.jobs import run_local
-    import re
+    from vasp_sop.materials import (
+        fetch_candidate_phases,
+        get_intrinsic_elements,
+        list_potcar_variants,
+        detect_encut,
+        needs_hubbard_u,
+    )
 
-    # ① Load competing phases (check combo cache first, then pydefect_vasp mp)
+    # ① Load competing phases from Materials Project
     cpd_root = root / "cpd"
     cpd_root.mkdir(parents=True, exist_ok=True)
-    mp_flag = cpd_root / "mp_flag"
 
-    if not mp_flag.is_file():
-        elements = re.findall(r"[A-Z][a-z]?", formula)
-        elements += dopant_elements or []
-
-        from vasp_sop.core.cache import mp_combo_get, mp_combo_restore, mp_combo_put
-
-        cached = mp_combo_get(elements)
-        if cached:
-            logger.info("MP combo cache HIT for %s, restoring ...", elements)
-            mp_combo_restore(elements, cpd_root)
-        else:
-            logger.info("MP combo cache MISS for %s, querying ...", elements)
-            run_local(
-                f"pydefect_vasp mp -e {' '.join(elements)} --e_above_hull 0.0005",
-                cwd=cpd_root, timeout=120,
-            )
-            mp_combo_put(elements, cpd_root)
-
-        # Replace parens for shell safety
-        for child in list(cpd_root.iterdir()):
-            if child.is_dir() and ("(" in child.name or ")" in child.name):
-                child.rename(child.with_name(
-                    child.name.replace("(", "[").replace(")", "]")
-                ))
-        mp_flag.touch()
+    elements = get_intrinsic_elements(formula) + (dopant_elements or [])
+    fetch_candidate_phases(elements, cpd_root, use_cache=True)
 
     # ② Parse phase info for YAML annotations and POSCAR for inference
     phases: list[dict] = []
@@ -350,16 +330,16 @@ def generate_config(
     if target_dir:
         potcar = target_dir / "POTCAR"
         if potcar.exists():
-            inferred = _detect_encut_from_potcar(potcar)
+            inferred = detect_encut(potcar)
             if inferred:
                 plan["parameters"]["encut"] = inferred
 
     # ④ DFT+U
     if unitcell_poscar.exists():
-        plan["parameters"]["hubbard_u"] = _infer_hubbard_u(unitcell_poscar)
+        plan["parameters"]["hubbard_u"] = needs_hubbard_u(unitcell_poscar)
 
     # ⑤ POTCAR variants
-    variants = _query_potcar_variants(formula, dopant_elements or [])
+    variants = list_potcar_variants(formula, dopant_elements or [])
     if variants:
         plan["_potcar_variants"] = variants
         plan["parameters"]["pp"] = [
@@ -371,9 +351,10 @@ def generate_config(
     pre_submit_file = cpd_root / ".target_submit.json"
     already_submitted = pre_submit_file.is_file()
     if target_dir and _crisp_available() and not _structure_opt_done(target_dir) and not already_submitted:
-        from vasp_sop.core.jobs import submit_vasp, _vasp_input_ready
+        from vasp_sop.core.jobs import run_local, submit_vasp
+        from vasp_sop.vasp.io import input_ready
 
-        if not _vasp_input_ready(target_dir):
+        if not input_ready(target_dir):
             run_local(
                 f"vise vs -x {functional} -k 2 "
                 f"--options set_hubbard_u True -uis NSW 50",
@@ -467,60 +448,6 @@ def _write_plan_yaml(root: Path, plan: dict, phases: list[dict]) -> Path:
 
 
 
-def _query_potcar_variants(
-    formula: str, dopants: list[str],
-) -> dict[str, list[str]]:
-    """Enumerate available PAW_PBE POTCAR variants per element."""
-    from pymatgen.core import SETTINGS
-
-    potcar_dir = (
-        Path(SETTINGS.get("PMG_VASP_PSP_DIR", "")) / "POT_GGA_PAW_PBE_54"
-    )
-    if not potcar_dir.is_dir():
-        return {}
-
-    elements = set(re.findall(r"[A-Z][a-z]?", formula)) | set(dopants)
-    variants: dict[str, list[str]] = {}
-    for el in sorted(elements):
-        matches = sorted(
-            d.name for d in potcar_dir.iterdir()
-            if d.is_dir() and re.match(
-                rf"^{re.escape(el)}(_|$)", d.name, re.IGNORECASE
-            )
-        )
-        if matches:
-            variants[el] = matches
-    return variants
-
-def _detect_encut_from_potcar(potcar: Path) -> Optional[float]:
-    """Detect ENCUT = 1.3 × max(ENMAX) from a POTCAR file."""
-    if not potcar.is_file():
-        return None
-    max_enmax = 0.0
-    try:
-        text = potcar.read_text()
-        for enmax in re.findall(r"ENMAX\s*=\s*([\d.]+)", text):
-            max_enmax = max(max_enmax, float(enmax))
-    except Exception:
-        return None
-    return round(max_enmax * 1.3, 1) if max_enmax > 0 else None
-
-
-def _infer_hubbard_u(poscar_path: Path) -> bool:
-    """Return True if any species in POSCAR needs DFT+U."""
-    _DFTU_FALLBACK = frozenset({
-        "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
-        "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd",
-        "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg",
-        "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy",
-        "Ho", "Er", "Tm", "Yb", "U",
-    })
-    try:
-        from pymatgen.core import Structure
-        s = Structure.from_file(str(poscar_path))
-        return any(el in _DFTU_FALLBACK for el in s.symbol_set)
-    except Exception:
-        return False
 
 
 # ══════════════════════════════════════════════════════════════════════════

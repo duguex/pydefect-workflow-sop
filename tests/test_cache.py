@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from vasp_sop.core import cache as _cache
+from vasp_sop import materials as _mp
 
 # Access cache-path constants through the module so monkeypatch takes effect.
 def _mp_cache() -> Path:
@@ -34,6 +35,10 @@ def _isolate_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("vasp_sop.core.cache.POSCAR_CACHE",
                         cr / "mp_cache" / "poscars")
     monkeypatch.setattr("vasp_sop.core.cache.CALC_CACHE", cr / "calc_cache")
+    # Also patch references already bound in materials.mp
+    monkeypatch.setattr("vasp_sop.materials.mp.MP_CACHE", cr / "mp_cache")
+    monkeypatch.setattr("vasp_sop.materials.mp.POSCAR_CACHE",
+                        cr / "mp_cache" / "poscars")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -62,8 +67,8 @@ class TestMpComboCache:
         tmp_path: Path, elements: list[str], phase_names: list[str]
     ) -> Path:
         """Create a combo cache entry with phase dirs and .done marker."""
-        key = _cache._combo_key(elements)
-        d = _mp_cache() / "combos" / key
+        key = _mp.mp._combo_key(elements)
+        d = _mp_cache() / key
         d.mkdir(parents=True)
         for name in phase_names:
             p = d / name
@@ -76,33 +81,33 @@ class TestMpComboCache:
 
     def test_combo_get_hit(self):
         """Cache hit when .done + directory exist."""
-        d = _mp_cache() / "combos" / "Ga-N"
+        d = _mp_cache() / "Ga-N"
         d.mkdir(parents=True)
         (d / ".done").touch()
 
-        result = _cache.mp_combo_get(["Ga", "N"])
+        result = _mp.mp_combo_get(["Ga", "N"])
         assert result == d
 
     def test_combo_get_miss_no_dir(self):
         """Returns None when directory does not exist."""
-        assert _cache.mp_combo_get(["Ga", "N"]) is None
+        assert _mp.mp_combo_get(["Ga", "N"]) is None
 
     def test_combo_get_miss_no_dotdone(self):
         """Returns None when directory exists but .done is missing."""
-        d = _mp_cache() / "combos" / "Ga-N"
+        d = _mp_cache() / "Ga-N"
         d.mkdir(parents=True)
 
-        assert _cache.mp_combo_get(["Ga", "N"]) is None
+        assert _mp.mp_combo_get(["Ga", "N"]) is None
 
     def test_combo_put_copies_phase_dirs(self, tmp_path: Path):
         """mp_combo_put copies all phase subdirs from src_root."""
-        src_root = self._make_src_root(tmp_path, ["Ga", "Ga₂O₃", "mol_O₂"])
+        src_root = self._make_src_root(tmp_path, ["Ga_mp-123", "Ga₂O₃_mp-456", "mol_O₂"])
 
-        result = _cache.mp_combo_put(["Ga", "O"], src_root)
+        result = _mp.mp_combo_put(["Ga", "O"], src_root)
 
         assert result.is_dir()
         assert (result / ".done").is_file()
-        for name in ("Ga", "Ga₂O₃", "mol_O₂"):
+        for name in ("Ga_mp-123", "Ga₂O₃_mp-456", "mol_O₂"):
             assert (result / name).is_dir()
             assert (result / name / "POSCAR").read_text() == "dummy poscar\n"
 
@@ -111,7 +116,7 @@ class TestMpComboCache:
         src_root = tmp_path / "empty_src"
         src_root.mkdir()
 
-        result = _cache.mp_combo_put(["Ga", "N"], src_root)
+        result = _mp.mp_combo_put(["Ga", "N"], src_root)
 
         assert result.is_dir()
         assert (result / ".done").is_file()
@@ -125,7 +130,7 @@ class TestMpComboCache:
 
         dst_root = tmp_path / "restored"
         dst_root.mkdir()
-        _cache.mp_combo_restore(["N", "Ga"], dst_root)
+        _mp.mp_combo_restore(["N", "Ga"], dst_root)
 
         assert (dst_root / "GaN").is_dir()
         assert (dst_root / "mol_N₂").is_dir()
@@ -135,34 +140,32 @@ class TestMpComboCache:
         """mp_combo_restore does nothing when cache has no entry."""
         dst_root = tmp_path / "restored"
         dst_root.mkdir()
-        _cache.mp_combo_restore(["X", "Y"], dst_root)
+        _mp.mp_combo_restore(["X", "Y"], dst_root)
 
         assert list(dst_root.iterdir()) == []  # nothing created
 
-    def test_combo_restore_skips_existing_dirs(self, tmp_path: Path):
-        """mp_combo_restore does not overwrite existing dirs in dst_root."""
+    def test_combo_restore_overwrites_existing_dirs(self, tmp_path: Path):
+        """mp_combo_restore overwrites existing dirs in dst_root."""
         self._populate_combo_cache(tmp_path, ["Ga", "N"], ["GaN", "mol_N₂"])
         dst_root = tmp_path / "restored"
         dst_root.mkdir()
-        # Pre-create a dir that would conflict, with different content
+        # Pre-create a conflicting dir with different content
         (dst_root / "GaN").mkdir()
         (dst_root / "GaN" / "ORIGINAL").write_text("keep me\n")
-
-        _cache.mp_combo_restore(["Ga", "N"], dst_root)
-
-        # Existing dir was not overwritten (original marker still there)
-        assert (dst_root / "GaN" / "ORIGINAL").is_file()
-        assert not (dst_root / "GaN" / "POSCAR").exists()
+        _mp.mp_combo_restore(["Ga", "N"], dst_root)
+        # Existing dir was overwritten (cache marker present, original gone)
+        assert (dst_root / "GaN" / "POSCAR").is_file()
+        assert not (dst_root / "GaN" / "ORIGINAL").exists()
         # New dir was restored
         assert (dst_root / "mol_N₂").is_dir()
 
     def test_combo_key_dedup_and_sort(self, tmp_path: Path):
         """Duplicate / differently ordered elements → same cache dir."""
-        _cache.mp_combo_put(["Ga", "N"],
+        _mp.mp_combo_put(["Ga", "N"],
                             self._make_src_root(tmp_path, ["GaN"]))
 
         # Get with reversed dedup order
-        result = _cache.mp_combo_get(["N", "Ga", "Ga", "N"])
+        result = _mp.mp_combo_get(["N", "Ga", "Ga", "N"])
         assert result is not None
         assert result.name == "Ga-N"
 
@@ -350,14 +353,14 @@ class TestMpPhasesCache:
     def test_phases_roundtrip(self):
         """Put then get returns the same phase data."""
         phases = [{"mpid": "mp-149", "formula": "Si"}]
-        _cache.mp_phases_put("Si", phases)
+        _mp.mp_phases_put("Si", phases)
 
-        result = _cache.mp_phases_get("Si")
+        result = _mp.mp_phases_get("Si")
         assert result == phases
 
     def test_phases_get_miss(self):
         """Returns None when no cache file exists."""
-        assert _cache.mp_phases_get("Si") is None
+        assert _mp.mp_phases_get("Si") is None
 
     def test_phases_get_corrupt_json(self):
         """Returns None (no exception) when the cached file is garbage."""
@@ -365,7 +368,7 @@ class TestMpPhasesCache:
         f.parent.mkdir(parents=True)
         f.write_bytes(b"\xff\xfe\x00\x01 garbage bytes")
 
-        result = _cache.mp_phases_get("Si")
+        result = _mp.mp_phases_get("Si")
         assert result is None
 
 
@@ -378,19 +381,19 @@ class TestMpPoscarCache:
         d.mkdir(parents=True)
         (d / "POSCAR").write_text("poscar data\n")
 
-        result = _cache.mp_poscar_get("149")
+        result = _mp.mp_poscar_get("mp-149")
         assert result == d / "POSCAR"
 
     def test_poscar_get_miss_no_dir(self):
         """Returns None when directory does not exist."""
-        assert _cache.mp_poscar_get("149") is None
+        assert _mp.mp_poscar_get("mp-149") is None
 
     def test_poscar_get_miss_no_poscar(self):
         """Returns None when directory exists but POSCAR is missing."""
         d = _poscar_cache() / "mp-149"
         d.mkdir(parents=True)
 
-        assert _cache.mp_poscar_get("149") is None
+        assert _mp.mp_poscar_get("mp-149") is None
 
     def test_poscar_put_copies_both(self, tmp_path: Path):
         """mp_poscar_put copies both POSCAR and POTCAR into cache."""
@@ -399,7 +402,7 @@ class TestMpPoscarCache:
         (src / "POSCAR").write_text("poscar\n")
         (src / "POTCAR").write_text("potcar\n")
 
-        _cache.mp_poscar_put("149", src)
+        _mp.mp_poscar_put("mp-149", src)
 
         d = _poscar_cache() / "mp-149"
         assert (d / "POSCAR").read_text() == "poscar\n"
@@ -411,7 +414,7 @@ class TestMpPoscarCache:
         src.mkdir()
         (src / "POSCAR").write_text("poscar\n")
 
-        _cache.mp_poscar_put("149", src)
+        _mp.mp_poscar_put("mp-149", src)
 
         d = _poscar_cache() / "mp-149"
         assert (d / "POSCAR").read_text() == "poscar\n"

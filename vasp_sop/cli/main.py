@@ -22,6 +22,177 @@ from vasp_sop.defect.pipeline import run_point_defect_pipeline
 logger = logging.getLogger(__name__)
 
 
+def _add_pipeline_parser(subparsers) -> None:
+    """Add the ``pipeline`` subcommand."""
+    p = subparsers.add_parser("pipeline", help="Run the full pipeline end-to-end")
+    p.add_argument("-c", "--config", type=Path, required=True, help="Path to plan.yaml")
+    p.add_argument("-r", "--root", type=Path, default=Path("."), help="Project root")
+
+
+def _add_materials_parser(subparsers) -> None:
+    """Add ``materials`` subcommand with sub-actions."""
+    p = subparsers.add_parser("materials", help="Materials Project queries and analysis")
+    sub = p.add_subparsers(dest="action", required=True)
+
+    # fetch
+    fetch_p = sub.add_parser("fetch", help="Download competing phases from MP")
+    fetch_p.add_argument("-e", "--elements", type=str, nargs="+", required=True, help="Element symbols")
+    fetch_p.add_argument("-d", "--dopants", type=str, nargs="*", default=[], help="Dopant elements")
+    fetch_p.add_argument("-o", "--output", type=Path, default=Path("cpd"), help="Output directory")
+
+    # phases
+    phases_p = sub.add_parser("phases", help="List cached phases")
+    phases_p.add_argument("-e", "--elements", type=str, nargs="+", required=True, help="Intrinsic element symbols")
+    phases_p.add_argument("-d", "--cpd-dir", type=Path, default=Path("cpd"), help="CPD root directory")
+
+    # poscar
+    poscar_p = sub.add_parser("poscar", help="Download a single POSCAR by MP-ID")
+    poscar_p.add_argument("mpid", type=str, help="Materials Project ID (e.g. mp-804)")
+
+    # cache
+    cache_p = sub.add_parser("cache", help="Manage MP cache")
+    cache_sub = cache_p.add_subparsers(dest="cache_action", required=True)
+    cache_sub.add_parser("list", help="List cached combinations")
+    cache_sub.add_parser("clear", help="Clear MP cache")
+
+
+def _add_vasp_parser(subparsers) -> None:
+    """Add ``vasp`` subcommand with sub-actions."""
+    p = subparsers.add_parser("vasp", help="VASP input/output utilities")
+    sub = p.add_subparsers(dest="action", required=True)
+
+    inputs_p = sub.add_parser("inputs", help="Generate VASP inputs via vise")
+    inputs_p.add_argument("work_dir", type=Path, help="Target calculation directory")
+    inputs_p.add_argument("-x", "--functional", type=str, default="pbesol", help="Exchange-correlation functional")
+
+    check_p = sub.add_parser("check", help="Check VASP completion")
+    check_p.add_argument("work_dir", type=Path, help="Calculation directory")
+
+
+def _add_cpd_parser(subparsers) -> None:
+    """Add ``cpd`` subcommand with sub-actions."""
+    p = subparsers.add_parser("cpd", help="Chemical-potential diagram tools")
+    sub = p.add_subparsers(dest="action", required=True)
+
+    energies_p = sub.add_parser("energies", help="Compute composition energies")
+    energies_p.add_argument("cpd_dir", type=Path, help="CPD root directory")
+    energies_p.add_argument("-f", "--formula", type=str, default="GaN", help="Target formula")
+
+    diagram_p = sub.add_parser("diagram", help="Solve and plot phase diagram")
+    diagram_p.add_argument("cpd_dir", type=Path, help="CPD root directory")
+
+
+def _add_unitcell_parser(subparsers) -> None:
+    """Add ``unitcell`` subcommand."""
+    p = subparsers.add_parser("unitcell", help="Unitcell analysis tools")
+    sub = p.add_subparsers(dest="action", required=True)
+
+    yaml_p = sub.add_parser("yaml", help="Generate unitcell.yaml from VASP outputs")
+    yaml_p.add_argument("uc_dir", type=Path, help="Unitcell directory")
+
+
+def _handle_materials(args: argparse.Namespace) -> None:
+    if args.action == "fetch":
+        from vasp_sop.materials import fetch_candidate_phases, get_intrinsic_elements
+        elements = args.elements
+        if args.dopants:
+            elements = elements + args.dopants
+        fetch_candidate_phases(elements, args.output.resolve(), use_cache=True)
+        print(f"Phases downloaded to {args.output.resolve()}")
+
+    elif args.action == "phases":
+        from vasp_sop.materials import list_phases
+        info = list_phases(args.cpd_dir.resolve(), args.elements)
+        for name, meta in info.items():
+            mpid = meta.get("mpid") or "—"
+            print(f"  {name:40s}  {mpid}")
+
+    elif args.action == "poscar":
+        from vasp_sop.materials import mp_poscar_get
+        poscar = mp_poscar_get(args.mpid)
+        if poscar:
+            print(f"Cached POSCAR for {args.mpid}: {poscar}")
+        else:
+            print(f"No cached POSCAR for {args.mpid}. Run 'fetch' first.")
+
+    elif args.action == "cache":
+        if args.cache_action == "list":
+            from vasp_sop.core.cache import MP_CACHE
+            if MP_CACHE.is_dir():
+                for child in sorted(MP_CACHE.iterdir()):
+                    if child.is_dir():
+                        print(f"  {child.name}")
+            else:
+                print("MP cache is empty.")
+        elif args.cache_action == "clear":
+            import shutil
+            from vasp_sop.core.cache import MP_CACHE
+            if MP_CACHE.is_dir():
+                shutil.rmtree(str(MP_CACHE))
+                print("MP cache cleared.")
+            else:
+                print("MP cache already empty.")
+
+
+def _handle_vasp(args: argparse.Namespace) -> None:
+    if args.action == "inputs":
+        from vasp_sop.vasp.io import input_ready, prepare_inputs
+        from vasp_sop.core.config import PipelineConfig
+        wd = args.work_dir.resolve()
+        config = PipelineConfig(
+            formula="", root=Path.cwd(), functional=args.functional,
+        )
+        prepare_inputs(wd, config)
+        print(f"VASP inputs generated in {wd}")
+
+    elif args.action == "check":
+        from vasp_sop.vasp.io import check_converged
+        wd = args.work_dir.resolve()
+        if check_converged(wd):
+            print(f"{wd}: converged")
+        else:
+            print(f"{wd}: NOT converged or not complete")
+
+
+def _handle_cpd(args: argparse.Namespace) -> None:
+    from vasp_sop.materials import get_intrinsic_elements
+    from vasp_sop.defect.cpd import compute_chemical_potentials, adjust_unstable_phase
+    from vasp_sop.core.config import PipelineConfig
+    from pymatgen.core import Composition
+
+    cpd_dir = args.cpd_dir.resolve()
+    formula = getattr(args, "formula", "GaN")
+
+    config = PipelineConfig(
+        formula=formula, root=Path.cwd(),
+    )
+    target_comp = Composition(formula)
+
+    if args.action == "energies":
+        compute_chemical_potentials(cpd_dir, config, target_comp)
+        print(f"Composition energies processed in {cpd_dir}")
+
+    elif args.action == "diagram":
+        from vasp_sop.defect.cpd import adjust_unstable_phase
+        from pymatgen.core import Composition
+        from pathlib import Path
+        rel = cpd_dir / "relative_energies.yaml"
+        adjust_unstable_phase(cpd_dir, rel, target_comp, config)
+        print(f"Phase diagram processed in {cpd_dir}")
+
+
+def _handle_unitcell(args: argparse.Namespace) -> None:
+    from vasp_sop.defect.unitcell import build_unitcell_yaml
+    from vasp_sop.core.config import PipelineConfig
+
+    uc_dir = args.uc_dir.resolve()
+    config = PipelineConfig(formula="", root=Path.cwd())
+    build_unitcell_yaml(uc_dir, config)
+    print(f"Unitcell YAML generated in {uc_dir}")
+
+
+
+
 def main() -> None:
     """CLI entry point (``vasp-sop``)."""
     parser = argparse.ArgumentParser(
@@ -36,8 +207,46 @@ def main() -> None:
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
+    _add_pipeline_parser(subparsers)
+    _add_materials_parser(subparsers)
+    _add_vasp_parser(subparsers)
+    _add_cpd_parser(subparsers)
+    _add_unitcell_parser(subparsers)
+    _add_defect_parser(subparsers)
 
-    # ── defect ──────────────────────────────────────────────────────
+    args = parser.parse_args()
+
+    if args.verbose:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s %(name)s[%(lineno)d] %(levelname)s %(message)s",
+            datefmt="%H:%M:%S",
+        )
+    else:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(message)s",
+            datefmt="%H:%M:%S",
+        )
+
+    # ── Dispatch ────────────────────────────────────────────────────
+    if args.command == "materials":
+        _handle_materials(args)
+    elif args.command == "vasp":
+        _handle_vasp(args)
+    elif args.command == "cpd":
+        _handle_cpd(args)
+    elif args.command == "unitcell":
+        _handle_unitcell(args)
+    elif args.command == "defect":
+        _handle_defect(args)
+    elif args.command == "pipeline":
+        config = PipelineConfig.from_yaml(args.config, root=args.root.resolve())
+        _run_pipeline(config)
+
+
+def _add_defect_parser(subparsers) -> None:
+    """Add the ``defect`` subcommand with its actions."""
     defect_parser = subparsers.add_parser("defect", help="Point-defect pipeline")
     defect_sub = defect_parser.add_subparsers(dest="action", required=True)
 
@@ -77,24 +286,13 @@ def main() -> None:
     init_parser.add_argument("-d", "--dopant", type=str, nargs="*", default=[],
                              help="Dopant elements (e.g. Mg Si)")
 
-    args = parser.parse_args()
+    # build — standalone defect structure generation
+    build_parser = defect_sub.add_parser("build", help="Build defect structures only")
+    build_parser.add_argument("project_dir", type=Path, help="Project root directory")
 
-    if args.verbose:
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format="%(asctime)s %(name)s[%(lineno)d] %(levelname)s %(message)s",
-            datefmt="%H:%M:%S",
-        )
-    else:
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s %(levelname)s %(message)s",
-            datefmt="%H:%M:%S",
-        )
-
-    # ── Dispatch ────────────────────────────────────────────────────
-    if args.command == "defect":
-        _handle_defect(args)
+    # analyze — standalone defect post-processing
+    analyze_parser = defect_sub.add_parser("analyze", help="Run defect post-processing only")
+    analyze_parser.add_argument("project_dir", type=Path, help="Project root directory")
 
 
 def _handle_defect(args: argparse.Namespace) -> None:

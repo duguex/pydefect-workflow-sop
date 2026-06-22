@@ -1,10 +1,10 @@
-"""Tests for defect module — _vasp_job_done convergence check."""
+"""Tests for VASP convergence check — ``check_converged`` from vasp.io."""
 
 from pathlib import Path
 
 import pytest
 
-from vasp_sop.defect.defects import _vasp_job_done
+from vasp_sop.vasp.io import check_converged
 
 
 def _make_outcar(dir_path: Path, nsw: int = 50, ediffg: float = -0.03,
@@ -37,33 +37,33 @@ class TestVaspJobDone:
     def test_converged(self, tmp_path: Path):
         """Normal convergence: max_f < |EDIFFG|."""
         _make_outcar(tmp_path, nsw=50, last_ionic_step=5, max_force=0.01)
-        assert _vasp_job_done(tmp_path) is True
+        assert check_converged(tmp_path) is True
 
     def test_unconverged(self, tmp_path: Path):
         """Completed but forces too high: max_f >= |EDIFFG|."""
         _make_outcar(tmp_path, nsw=50, last_ionic_step=50, max_force=0.5)
-        assert _vasp_job_done(tmp_path) is False
+        assert check_converged(tmp_path) is False
 
     def test_truncated(self, tmp_path: Path):
         """VASP did not finish — no 'General timing and accounting'."""
         _make_outcar(tmp_path, completed=False)
-        assert _vasp_job_done(tmp_path) is False
+        assert check_converged(tmp_path) is False
 
     def test_no_outcar(self, tmp_path: Path):
         """No OUTCAR file at all."""
-        assert _vasp_job_done(tmp_path) is False
+        assert check_converged(tmp_path) is False
 
     def test_empty_outcar(self, tmp_path: Path):
         """OUTCAR exists but is empty."""
         (tmp_path / "OUTCAR").write_text("")
-        assert _vasp_job_done(tmp_path) is False
+        assert check_converged(tmp_path) is False
 
     def test_missing_force_block(self, tmp_path: Path):
         """OUTCAR has completion but no TOTAL-FORCE block."""
         lines = ["  NSW = 50", "  EDIFFG = -0.03",
                  " General timing and accounting informations for this job:"]
         (tmp_path / "OUTCAR").write_text("\n".join(lines))
-        assert _vasp_job_done(tmp_path) is False
+        assert check_converged(tmp_path) is False
 
     def test_many_atoms_converged(self, tmp_path: Path):
         """Multiple atoms, all forces below threshold."""
@@ -78,11 +78,11 @@ class TestVaspJobDone:
         lines.append("\n General timing and accounting informations for this job:\n")
         (tmp_path / "OUTCAR").write_text("\n".join(lines))
         # max_f = 0.025 < 0.03 → converged
-        assert _vasp_job_done(tmp_path) is True
+        assert check_converged(tmp_path) is True
 
     def test_converged_output_subdir(self, tmp_path: Path):
         """OUTCAR in output/ subdirectory (crisp style)."""
         output_dir = tmp_path / "output"
         output_dir.mkdir()
         _make_outcar(output_dir, nsw=50, last_ionic_step=4, max_force=0.02)
-        assert _vasp_job_done(tmp_path) is True
+        assert check_converged(tmp_path) is True

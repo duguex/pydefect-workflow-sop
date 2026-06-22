@@ -11,13 +11,13 @@ import shutil
 from pathlib import Path
 
 from vasp_sop.core.config import PipelineConfig
+from vasp_sop.vasp.io import input_ready, prepare_inputs
 from vasp_sop.core.jobs import (
     VaspJob,
     move_crisp_outputs,
     submit_vasp,
     wait_all,
     run_local,
-    _vasp_input_ready,
 )
 from vasp_sop.core.state import (
     PipelineState,
@@ -50,7 +50,7 @@ def _prepare_all_inputs(uc_root: Path, target_dir: Path, config: PipelineConfig)
     if poscar_src.exists() and not (structure_opt_dir / "POSCAR").exists():
         shutil.copy2(str(poscar_src), str(structure_opt_dir / "POSCAR"))
 
-    _prepare_vasp_input(structure_opt_dir, config)
+    prepare_inputs(structure_opt_dir, config)
     pp_opt = (
         f"--potcar {' '.join(config.potcar_overrides)}"
         if config.potcar_overrides else ""
@@ -66,7 +66,7 @@ def _prepare_all_inputs(uc_root: Path, target_dir: Path, config: PipelineConfig)
     for task_name in _VISE_TASKS:
         task_dir = uc_root / task_name
         task_dir.mkdir(exist_ok=True)
-        if not _vasp_input_ready(task_dir):
+        if not input_ready(task_dir):
             _copy_input_from_opt(structure_opt_dir, task_dir)
         # Replace the hardcoded ``-x pbesol`` baked into the template with the
         # config's functional, and inject ENCUT after the existing -uis flags
@@ -75,7 +75,7 @@ def _prepare_all_inputs(uc_root: Path, target_dir: Path, config: PipelineConfig)
         if config.encut and "ENCUT" not in base:
             base = base + f" -uis ENCUT {config.encut}"
         cmd = base + pp_suffix
-        if not _vasp_input_ready(task_dir):
+        if not input_ready(task_dir):
             run_local(cmd, cwd=task_dir, timeout=300)
 
 
@@ -115,7 +115,7 @@ def run_unitcell(
         shutil.copytree(str(src_structure), str(structure_opt_dir))
 
     # ── 2. Structure optimisation ─────────────────────────────────────
-    _prepare_vasp_input(structure_opt_dir, config)
+    prepare_inputs(structure_opt_dir, config)
     outcar = structure_opt_dir / "OUTCAR"
     if outcar.is_file():
         logger.info("Skipping structure_opt: OUTCAR exists")
@@ -141,11 +141,11 @@ def run_unitcell(
     for task_name in _VISE_TASKS:
         task_dir = uc_root / task_name
         task_dir.mkdir(exist_ok=True)
-        if not _vasp_input_ready(task_dir):
+        if not input_ready(task_dir):
             _copy_input_from_opt(structure_opt_dir, task_dir)
 
         cmd = _VISE_TASKS[task_name] + pp_suffix
-        if not _vasp_input_ready(task_dir):
+        if not input_ready(task_dir):
             run_local(cmd, cwd=task_dir, timeout=300)
 
         outcar = task_dir / "OUTCAR"
@@ -162,7 +162,7 @@ def run_unitcell(
             move_crisp_outputs(j.work_dir)
 
     # ── 4. Post-processing ───────────────────────────────────────────
-    _run_post_processing(uc_root, config)
+    build_unitcell_yaml(uc_root, config)
 
     result = UnitcellResult(
         unitcell_yaml_path=(uc_root / _UNITCELL_YAML).resolve(),
@@ -183,21 +183,6 @@ def run_unitcell(
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def _prepare_vasp_input(work_dir: Path, config: PipelineConfig) -> None:
-    """Generate VASP inputs via vise if missing."""
-    if _vasp_input_ready(work_dir):
-        return
-
-    pp_opt = (
-        f"--potcar {' '.join(config.potcar_overrides)}"
-        if config.potcar_overrides else ""
-    )
-    encut_opt = f"ENCUT {config.encut}" if config.encut else ""
-    cmd = (
-        f"vise vs -x {config.functional} -k 2 "
-        f"--options set_hubbard_u True -uis NSW 50 {encut_opt} {pp_opt}"
-    )
-    run_local(cmd, cwd=work_dir, timeout=300)
 
 
 def _copy_input_from_opt(src: Path, dst: Path) -> None:
@@ -211,7 +196,7 @@ def _copy_input_from_opt(src: Path, dst: Path) -> None:
         shutil.copy(str(prior_src), str(dst / "prior_info.yaml"))
 
 
-def _run_post_processing(uc_root: Path, config: PipelineConfig) -> None:
+def build_unitcell_yaml(uc_root: Path, config: PipelineConfig) -> None:
     """Run post-processing visualisation and unitcell.yaml generation."""
     uc_yaml = uc_root / _UNITCELL_YAML
     if uc_yaml.is_file():

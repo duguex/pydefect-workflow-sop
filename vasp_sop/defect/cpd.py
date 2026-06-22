@@ -7,20 +7,24 @@ for each, and constructs the chemical-potential diagram with pydefect.
 from __future__ import annotations
 
 import logging
-import shutil
 from pathlib import Path
 from typing import Optional
 
 import yaml
 from pymatgen.core import Composition
 
+from vasp_sop.materials import (
+    fetch_candidate_phases,
+    list_phases,
+    get_intrinsic_elements,
+)
+from vasp_sop.vasp.io import check_complete, prepare_inputs
 from vasp_sop.core.jobs import (
     VaspJob,
     move_crisp_outputs,
     submit_vasp,
     wait_all,
     run_local,
-    _vasp_input_ready,
 )
 from vasp_sop.core.state import (
     CpdResult,
@@ -41,18 +45,13 @@ _CHEM_POT_DIAG = "chem_pot_diag.json"
 
 
 
-def _get_intrinsic_elements(formula: str) -> list[str]:
-    from pymatgen.core import Composition
-    return list(Composition(formula).as_dict().keys())
-
 
 def _get_target_composition(formula: str):
     from pymatgen.core import Composition
     return Composition(formula)
 
-
 def _get_cpd_info(cpd_root: Path, intrinsic_elements: list[str]) -> dict[str, dict]:
-    return _build_cpd_info(cpd_root, intrinsic_elements)
+    return list_phases(cpd_root, intrinsic_elements)
 
 
 def _split_target(
@@ -84,16 +83,13 @@ def _submit_remaining(
     """Submit VASP for competing phases (not target — already submitted)."""
     jobs: list[VaspJob] = []
     for d in dirs:
-        if _vasp_completed(d):
+        if check_complete(d):
             logger.info("Skipping %s: OUTCAR exists", d.name)
             continue
         logger.info("CPD: submitting VASP for %s", d.name)
         jobs.append(submit_vasp(d))
     return jobs
 
-
-def _vasp_completed(path: Path) -> bool:
-    return (path / "OUTCAR").is_file() or (path / "output" / "OUTCAR").is_file()
 
 def run_cpd(
     config: PipelineConfig,
@@ -115,15 +111,15 @@ def run_cpd(
     state.cpd_status = StepStatus.RUNNING
     StateStore.save(state)
 
-    intrinsic_elements = list(Composition(config.formula).as_dict().keys())
+    intrinsic_elements = get_intrinsic_elements(config.formula)
     logger.info("CPD: intrinsic elements = %s", intrinsic_elements)
 
     # ── 1. Fetch competing phases from Materials Project ─────────────
-    _fetch_elements(cpd_root, intrinsic_elements, config.dopant_elements)
-    _fix_parenthesis_dirnames(cpd_root)
+    elements = intrinsic_elements + config.dopant_elements
+    fetch_candidate_phases(elements, cpd_root)
 
     # Build cpd_info dict {dirname: {formula, mpid}}
-    cpd_info = _build_cpd_info(cpd_root, intrinsic_elements)
+    cpd_info = list_phases(cpd_root, intrinsic_elements)
 
     target_composition = Composition(config.formula)
     unitcell_path: Optional[Path] = None
@@ -150,7 +146,7 @@ def run_cpd(
             move_crisp_outputs(j.work_dir)
 
     # ── 3. Post-processing: composition energies + corrections ───────
-    _run_post_processing(cpd_root, config, target_composition)
+    compute_chemical_potentials(cpd_root, config, target_composition)
 
     # ── 4. Build result ──────────────────────────────────────────────
     result = CpdResult(
@@ -184,7 +180,7 @@ def _submit_cpd_batch(
     jobs: list[VaspJob] = []
     for d in dirnames:
         work_dir = cpd_root / d
-        _prepare_vasp_input(work_dir, config)
+        prepare_inputs(work_dir, config)
         outcar = work_dir / "OUTCAR"
         if outcar.is_file():
             logger.info("Skipping %s: OUTCAR exists", d)
@@ -193,94 +189,7 @@ def _submit_cpd_batch(
         jobs.append(submit_vasp(work_dir.resolve()))
     return jobs
 
-def _fetch_elements(
-    cpd_root: Path,
-    intrinsic_elements: list[str],
-    dopant_elements: list[str],
-) -> None:
-    """Run Materials Project query if not already done."""
-    flag = cpd_root / _MP_FLAG
-    if flag.is_file():
-        logger.info("CPD: MP fetch already done (%s exists).", _MP_FLAG)
-        return
-
-    elements = intrinsic_elements + dopant_elements
-    cmd = f"pydefect_vasp mp -e {' '.join(elements)} --e_above_hull 0.0005"
-    logger.info("CPD: running: %s", cmd)
-    run_local(cmd, cwd=cpd_root)
-    flag.touch()
-
-
-def _fix_parenthesis_dirnames(cpd_root: Path) -> None:
-    """Replace ``(`` → ``[`` and ``)`` → ``]`` in directory names.
-
-    The MP download may produce directories containing parentheses,
-    which cause issues for shell commands and YAML parsing.
-    """
-    for child in list(cpd_root.iterdir()):
-        if child.is_dir() and ("(" in child.name or ")" in child.name):
-            new_name = child.name.replace("(", "[").replace(")", "]")
-            dst = child.with_name(new_name)
-            if not dst.exists():
-                shutil.move(str(child), str(dst))
-                logger.info("Renamed %s -> %s", child.name, new_name)
-
-
-def _build_cpd_info(
-    cpd_root: Path,
-    intrinsic_elements: list[str],
-) -> dict[str, dict]:
-    """Scan CPD directories and return info for relevant ones.
-
-    Only directories whose composition contains at least one intrinsic
-    element are kept.
-    """
-    info: dict[str, dict] = {}
-    for child in sorted(cpd_root.iterdir()):
-        if not child.is_dir():
-            continue
-        name = child.name
-
-        if "_mp-" in name:
-            formula, mpid = name.split("_mp-", 1)
-            mpid = f"mp-{mpid}"
-        elif name.startswith("mol_"):
-            formula = name[len("mol_"):]
-            mpid = None
-        else:
-            continue
-
-        composition = Composition(formula)
-        elements = list(composition.as_dict().keys())
-        # Keep only phases containing intrinsic elements
-        if len(elements) == 1 or any(e in elements for e in intrinsic_elements):
-            info[name] = {"formula": formula, "mpid": mpid}
-
-    return info
-
-
-def _prepare_vasp_input(work_dir: Path, config: PipelineConfig) -> None:
-    """Generate VASP input files via vise if missing.
-
-    Uses the same command pattern as the legacy code.
-    """
-    if _vasp_input_ready(work_dir):
-        logger.debug("VASP input already ready in %s", work_dir)
-        return
-
-    pp_opt = (
-        f"--potcar {' '.join(config.potcar_overrides)}"
-        if config.potcar_overrides else ""
-    )
-    encut_opt = f"ENCUT {config.encut}" if config.encut else ""
-    cmd = (
-        f"vise vs -x {config.functional} -k 2 "
-        f"--options set_hubbard_u True -uis NSW 50 {encut_opt} {pp_opt}"
-    )
-    run_local(cmd, cwd=work_dir, timeout=300)
-
-
-def _run_post_processing(
+def compute_chemical_potentials(
     cpd_root: Path,
     config: PipelineConfig,
     target_composition: Composition,
@@ -304,7 +213,7 @@ def _run_post_processing(
 
         # Apply molecule corrections
         if composition_energies.is_file():
-            _apply_molecule_corrections(
+            apply_molecule_corrections(
                 composition_energies, config.molecule_corrections
             )
 
@@ -314,7 +223,7 @@ def _run_post_processing(
 
     # ── Chem-pot diagram (energy adjustment for unstable phases) ─────
     if not target_vertices.is_file():
-        _adjust_unstable_phase(
+        adjust_unstable_phase(
             cpd_root, relative_energies, target_composition, config
         )
 
@@ -323,7 +232,7 @@ def _run_post_processing(
         run_local("pydefect pc", cwd=cpd_root)
 
 
-def _apply_molecule_corrections(
+def apply_molecule_corrections(
     comp_energies_path: Path,
     corrections: dict[str, float],
 ) -> None:
@@ -346,7 +255,7 @@ def _apply_molecule_corrections(
             yaml.dump(data, f, default_flow_style=None)
 
 
-def _adjust_unstable_phase(
+def adjust_unstable_phase(
     cpd_root: Path,
     relative_energies_path: Path,
     target_composition: Composition,
