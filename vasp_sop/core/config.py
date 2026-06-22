@@ -375,26 +375,7 @@ def generate_config(
             for el in sorted(variants)
         ]
 
-    # ⑥ Submit structure_opt VASP ahead of pipeline (skip if already submitted)
-    pre_submit_file = cpd_root / ".target_submit.json"
-    already_submitted = pre_submit_file.is_file()
-    if target_dir and _crisp_available() and not _structure_opt_done(target_dir) and not already_submitted:
-        from vasp_sop.core.jobs import run_local, submit_vasp
-        from vasp_sop.vasp.io import input_ready
 
-        if not input_ready(target_dir):
-            run_local(
-                f"vise vs -x {functional} -k 2 "
-                f"--options set_hubbard_u True -uis NSW 50",
-                cwd=target_dir, timeout=300,
-            )
-        job = submit_vasp(target_dir)
-        with open(pre_submit_file, "w") as f:
-            json.dump({"task_name": job.task_name, "work_dir": str(target_dir)}, f)
-        logger.info(
-            "Structure optimisation pre-submitted: crisp task %s",
-            job.task_name,
-        )
 
     # ⑥ kwargs overrides
     for k, v in kwargs.items():
@@ -537,12 +518,3 @@ def read_plan(project_dir: str | Path) -> dict:
         return yaml.safe_load(f)
 
 
-def _crisp_available() -> bool:
-    """Check if crisp CLI is on PATH (cached)."""
-    from vasp_sop.core.jobs import _crisp_available as _ca
-    return _ca()
-
-
-def _structure_opt_done(target_dir: Path) -> bool:
-    """Return True if target VASP already ran (OUTCAR exists)."""
-    return (target_dir / "OUTCAR").is_file() or (target_dir / "output" / "OUTCAR").is_file()
