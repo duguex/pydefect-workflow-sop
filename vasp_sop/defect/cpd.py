@@ -229,7 +229,28 @@ def compute_chemical_potentials(
 
     # ── Phase-diagram plot (skip for single-element — nothing to plot) ─
     if len(target_composition.as_dict()) > 1 and not (cpd_root / "cpd.pdf").is_file():
-        run_local("pydefect pc", cwd=cpd_root)
+        n_elements = len(target_composition.elements)
+        if n_elements > 3:
+            # pydefect's pc command only supports 2D / 3D chem-pot diagrams.
+            # For 4+ element systems the chem-pot polytope is > 3D and cannot
+            # be plotted with the current matplotlib plotters. Skip the plot
+            # but leave the rest of the CPD artefacts intact.
+            # See issues/0002-skip-4d-cpd-diagram.md.
+            logger.warning(
+                "%s: %d-element system, skipping pydefect pc "
+                "(only 2D/3D chem-pot diagrams are supported).",
+                cpd_root.name, n_elements,
+            )
+        else:
+            # Plotting is a diagnostic only — a failure here must NOT block
+            # the rest of the pipeline. See issues/0002-skip-4d-cpd-diagram.md.
+            try:
+                run_local("pydefect pc", cwd=cpd_root)
+            except Exception as exc:
+                logger.warning(
+                    "pydefect pc failed for %s (non-fatal): %s",
+                    cpd_root.name, exc,
+                )
 
 
 def apply_molecule_corrections(
@@ -296,9 +317,13 @@ def adjust_unstable_phase(
     with open(relative_energies_path) as f:
         rel_energies = yaml.safe_load(f) or {}
 
+    # Match against pymatgen-reduced formula so we are insensitive to whether
+    # pydefect's sre output uses "Sr1Te1", "SrTe", or "Sr1 Te1" as the key.
+    # See issues/0001-srte-cpd-target-lookup-false-positive-failure.md.
     target_string: Optional[str] = None
+    target_reduced = target_composition.reduced_formula
     for comp_str in rel_energies:
-        if Composition(comp_str) == target_composition:
+        if Composition(comp_str).reduced_formula == target_reduced:
             target_string = comp_str
             break
     if target_string is None:
