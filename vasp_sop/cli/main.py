@@ -207,12 +207,14 @@ def main() -> None:
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
+
     _add_pipeline_parser(subparsers)
     _add_materials_parser(subparsers)
     _add_vasp_parser(subparsers)
     _add_cpd_parser(subparsers)
     _add_unitcell_parser(subparsers)
     _add_defect_parser(subparsers)
+    _add_batch_parser(subparsers)
 
     args = parser.parse_args()
 
@@ -243,6 +245,8 @@ def main() -> None:
     elif args.command == "pipeline":
         config = PipelineConfig.from_yaml(args.config, root=args.root.resolve())
         _run_pipeline(config)
+    elif args.command == "batch":
+        _handle_batch(args)
 
 
 def _add_defect_parser(subparsers) -> None:
@@ -410,5 +414,211 @@ def _run_pipeline(config: PipelineConfig) -> None:
         sys.exit(1)
 
 
+
+# ══════════════════════════════════════════════════════════════════════════
+# Batch — multi-system operations
+# ══════════════════════════════════════════════════════════════════════════
+
+_PRIORITY_MAP: dict[str, str] = {
+    # P0 — A级 NV-like 候选
+    "SrS": "P0", "MgS": "P0", "SrO": "P0",
+    # P1 — B级 T2 > 2ms
+    "CaS": "P1", "CaCO3": "P1", "CaMg2(SO4)3": "P1",
+    "BaGe2S5": "P1", "Sr2MgGe2O7": "P1", "Sr2MgSi2O7": "P1",
+    "Ca2Ge7O16": "P1", "SrGe4O9": "P1", "BaGe4O9": "P1",
+    # P2 — C级 扩展候选
+    "CaSe": "P2", "SeO2": "P2", "SrSe": "P2",
+    "BaS3": "P2", "Ba2MgGe2O7": "P2", "GeSe2": "P2",
+    "MgCO3": "P2", "Ba2MgSi2O7": "P2", "SrTe": "P2",
+    "BaSe": "P2", "BaS": "P2", "Sn(SeO3)2": "P2",
+    "BaTe": "P2", "Mg3TeO6": "P2", "Ba2TeO": "P2",
+    "BaO2": "P2", "BaO": "P2",
+    # P3 — 特殊体系
+    "CeO2": "P3",
+    # P4 — 已有体系
+    "AlN": "P4", "CaO": "P4", "diamond": "P4",
+    "GaN": "P4", "hBN": "P4", "MgO": "P4",
+    "MoS2": "P4", "SiC": "P4", "ZnO": "P4",
+}
+
+
+def _add_batch_parser(subparsers) -> None:
+    """Add ``batch`` subcommand with status action."""
+    p = subparsers.add_parser("batch", help="Multi-system batch operations")
+    sub = p.add_subparsers(dest="batch_action", required=True)
+
+    sp = sub.add_parser("status", help="Show status table for all systems")
+    sp.add_argument(
+        "root", type=Path,
+        help="Project root directory containing system subdirectories",
+    )
+
+
+def _handle_batch(args: argparse.Namespace) -> None:
+    if args.batch_action == "status":
+        _batch_status(args.root.resolve())
+
+
+def _batch_status(root: Path) -> None:
+    """Scan *root* for vasp-sop systems and print status table."""
+    from vasp_sop.vasp.io import check_converged, input_ready
+    from vasp_sop.core.state import StateStore, StepStatus
+
+    rows: list[dict] = []
+    for d in sorted(root.iterdir()):
+        if not d.is_dir():
+            continue
+        plan = d / "plan.yaml"
+        if not plan.is_file():
+            continue
+        rows.append(_scan_system(d, plan))
+
+    if not rows:
+        print(f"No vasp-sop systems found in {root}")
+        return
+
+    # Print header
+    print(f"{'System':<18} {'P':<3} {'VASPin':<7} {'CPD':<5} {'Unitcell':<9} {'Defect':<7}")
+    print("-" * 55)
+    for r in rows:
+        print(f"{r['name']:<18} {r['pri']:<3} {r['vasp_in']:<7} {r['cpd']:<5} {r['uc']:<9} {r['defect']:<7}")
+
+    # Summary line
+    total = len(rows)
+    done = sum(1 for r in rows if r['cpd'] == '✓' and r['uc'] == '✓' and r['defect'] == '✓')
+    print("-" * 55)
+    print(f"{total} systems  |  {done} complete")
+
+
+def _scan_system(d: Path, plan: Path) -> dict:
+    """Inspect a single system directory and return status dict."""
+    import yaml
+    formula = "?"
+    try:
+        with open(plan) as f:
+            data = yaml.safe_load(f)
+        formula = (data or {}).get("project", {}).get("formula", "?")
+    except Exception:
+        pass
+
+    pri = _PRIORITY_MAP.get(formula, "—")
+
+    # VASP inputs ready?
+    from vasp_sop.vasp.io import input_ready
+    cpd = d / "cpd"
+    vasp_ready = "·"
+    if cpd.is_dir():
+        phase_dirs = [x for x in cpd.iterdir() if x.is_dir() and x.name != "combos"]
+        if any(input_ready(x) for x in phase_dirs):
+            vasp_ready = "✓"
+
+    # CPD stage
+    cpd_status = _check_cpd(cpd)
+
+    # Unitcell stage
+    uc_status = _check_unitcell(d / "unitcell")
+
+    # Defect stage
+    defect_status = _check_defect(d / "defect")
+
+    return {
+        "name": formula,
+        "pri": pri,
+        "vasp_in": vasp_ready,
+        "cpd": cpd_status,
+        "uc": uc_status,
+        "defect": defect_status,
+    }
+
+
+def _check_cpd(cpd_dir: Path) -> str:
+    """Determine CPD stage status from disk state."""
+    from vasp_sop.vasp.io import check_converged
+
+    if not cpd_dir.is_dir():
+        return "·"
+
+    # Post-processing done?
+    if (cpd_dir / "target_vertices.yaml").is_file():
+        return "✓"
+
+    # Any phase directory has converged OUTCAR?
+    for child in cpd_dir.iterdir():
+        if not child.is_dir():
+            continue
+        if check_converged(child):
+            return "▶"
+
+    # Any VASP input exists?
+    from vasp_sop.vasp.io import input_ready
+    for child in cpd_dir.iterdir():
+        if child.is_dir() and input_ready(child):
+            return "·"  # inputs ready, VASP not run
+
+    return "·"
+
+
+def _check_unitcell(uc_dir: Path) -> str:
+    """Determine unitcell stage status."""
+    from vasp_sop.vasp.io import check_converged, input_ready
+
+    if not uc_dir.is_dir():
+        return "·"
+
+    stages = ["structure_opt", "band", "dos", "dielectric"]
+    results = []
+    for s in stages:
+        sd = uc_dir / s
+        if not sd.is_dir():
+            results.append("·")
+        elif check_converged(sd):
+            results.append("✓")
+        elif input_ready(sd):
+            results.append("▶")  # inputs ready, VASP not run yet
+        else:
+            results.append("·")  # directory exists but no inputs
+
+    done_count = sum(1 for r in results if r == "✓")
+    if done_count == len(stages):
+        return "✓"
+    elif done_count > 0:
+        return f"{done_count}/4"
+    elif any(r == "▶" for r in results):
+        return "▶"
+    else:
+        return "·"
+def _check_defect(df_dir: Path) -> str:
+    """Determine defect stage status."""
+    from vasp_sop.vasp.io import check_converged, input_ready
+
+    if not df_dir.is_dir():
+        return "·"
+
+    # No supercell? barely started
+    if not (df_dir / "supercell_info.json").is_file():
+        return "·"
+
+    # Defect energy summary exists → fully done
+    if (df_dir / "defect_energy_summary.json").is_file():
+        return "✓"
+
+    # Check VASP results
+    has_perfect = check_converged(df_dir / "perfect") if (df_dir / "perfect").is_dir() else False
+
+    # Count defect dirs with VASP done vs total
+    defect_dirs = [x for x in df_dir.iterdir()
+                   if x.is_dir() and x.name != "perfect" and input_ready(x)]
+    done_dirs = sum(1 for x in defect_dirs if check_converged(x))
+
+    if has_perfect and done_dirs == len(defect_dirs) and len(defect_dirs) > 0:
+        return "▶"  # VASP done, post-processing pending
+    elif has_perfect or done_dirs > 0:
+        return f"{done_dirs}/{len(defect_dirs) or '?'}"
+    elif (df_dir / "defect_in.yaml").is_file():
+        return "▶"  # structures generated, VASP not run
+    else:
+        return "·"
+
 if __name__ == "__main__":
     main()
+
