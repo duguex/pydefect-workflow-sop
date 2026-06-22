@@ -465,13 +465,25 @@ def _add_batch_parser(subparsers) -> None:
         help="Also generate unitcell inputs (structure_opt/band/dos/dielectric)",
     )
 
+    # submit
+    sp2 = sub.add_parser("submit", help="Submit VASP calculations for all systems")
+    sp2.add_argument(
+        "root", type=Path,
+        help="Project root directory containing system subdirectories",
+    )
+    sp2.add_argument(
+        "--all-phases", action="store_true",
+        help="Submit all competing phases (default: target phase only)",
+    )
+
 
 def _handle_batch(args: argparse.Namespace) -> None:
     if args.batch_action == "status":
         _batch_status(args.root.resolve())
     elif args.batch_action == "generate-inputs":
         _batch_generate_inputs(args.root.resolve(), unitcell=args.unitcell)
-
+    elif args.batch_action == "submit":
+        _batch_submit(args.root.resolve(), all_phases=args.all_phases)
 
 def _batch_status(root: Path) -> None:
     """Scan *root* for vasp-sop systems and print status table."""
@@ -564,6 +576,178 @@ def _batch_generate_inputs(root: Path, *, unitcell: bool = False) -> None:
                 print(f"  FAIL {t[0]}/{t[1]}: {exc}")
 
     print(f"Done: {ok} generated, {fail} failed")
+
+
+def _batch_submit(root: Path, *, all_phases: bool = False) -> None:
+    """Submit VASP calculations for all systems."""
+    import json
+    from vasp_sop.vasp.io import input_ready, check_converged
+    from vasp_sop.core.jobs import submit_vasp
+
+    _CPD_DIR = "cpd"
+
+    all_jobs: list[tuple[str, str, str]] = []  # (sys, phase, task_name)
+    skipped = 0
+
+    for d in sorted(root.iterdir()):
+        if not d.is_dir():
+            continue
+        plan_path = d / "plan.yaml"
+        if not plan_path.is_file():
+            continue
+
+        cpd_dir = d / _CPD_DIR
+        if not cpd_dir.is_dir():
+            continue
+
+        # Identify target phase from formula in plan.yaml
+        formula = "?"
+        try:
+            import yaml
+            with open(plan_path) as f:
+                data = yaml.safe_load(f)
+            formula = (data or {}).get("project", {}).get("formula", "?")
+        except Exception:
+            pass
+
+        target_name = None
+        other_phases: list[Path] = []
+        for pd in sorted(cpd_dir.iterdir()):
+            if not pd.is_dir() or pd.name == "combos" or pd.name == "mp_flag":
+                continue
+            if not input_ready(pd):
+                continue
+            if target_name is None and formula.replace(" ", "") in pd.name.replace(" ", ""):
+                target_name = pd.name
+            else:
+                other_phases.append(pd)
+
+        if target_name is None:
+            print(f"  {d.name:<18} no target phase found, skipped")
+            continue
+
+        target_dir = cpd_dir / target_name
+
+        # Skip if already converged
+        if check_converged(target_dir):
+            print(f"  {d.name:<18} target already converged, skipped")
+            skipped += 1
+            continue
+
+        # Submit target phase
+        try:
+            job = submit_vasp(target_dir.resolve())
+            all_jobs.append((d.name, target_name, job.task_name))
+            print(f"  {d.name:<18} target: {job.task_name}")
+
+            # Write .target_submit.json for pipeline resume
+            submit_info = {
+                "task_name": job.task_name,
+                "work_dir": str(target_dir.resolve()),
+            }
+            with open(cpd_dir / ".target_submit.json", "w") as f:
+                json.dump(submit_info, f)
+        except Exception as exc:
+            print(f"  {d.name:<18} target FAIL: {exc}")
+
+        # Submit competing phases (only if --all-phases)
+        if not all_phases:
+            continue
+
+        for pd in other_phases:
+            if check_converged(pd):
+                continue
+            try:
+                job = submit_vasp(pd.resolve())
+                all_jobs.append((d.name, pd.name, job.task_name))
+                print(f"  {d.name:<18}   phase: {pd.name} → {job.task_name}")
+            except Exception as exc:
+                print(f"  {d.name:<18}   phase: {pd.name} FAIL: {exc}")
+
+    # Summary
+    print("-" * 55)
+    if skipped:
+        print(f"Skipped {skipped} already-converged system(s)")
+    if all_jobs:
+        print(f"Submitted {len(all_jobs)} job(s):")
+        for sys, phase, task in all_jobs:
+            print(f"  {sys}/{phase}: {task}")
+    else:
+        print("No jobs submitted.")
+    all_jobs: list[tuple[str, str, str]] = []  # (sys, phase, task_name)
+
+    for d in sorted(root.iterdir()):
+        if not d.is_dir():
+            continue
+        plan_path = d / "plan.yaml"
+        if not plan_path.is_file():
+            continue
+
+        cpd_dir = d / _CPD_DIR
+        if not cpd_dir.is_dir():
+            continue
+
+        # Identify target phase
+        formula = "?"
+        try:
+            import yaml
+            with open(plan_path) as f:
+                data = yaml.safe_load(f)
+            formula = (data or {}).get("project", {}).get("formula", "?")
+        except Exception:
+            pass
+
+        target_name = None
+        other_phases: list[Path] = []
+        for pd in sorted(cpd_dir.iterdir()):
+            if not pd.is_dir() or pd.name == "combos" or pd.name == "mp_flag":
+                continue
+            if not input_ready(pd):
+                continue
+            if target_name is None and formula.replace(" ", "") in pd.name.replace(" ", ""):
+                target_name = pd.name
+            else:
+                other_phases.append(pd)
+
+        if target_name is None:
+            print(f"  {d.name:<18} no target phase found, skipped")
+            continue
+
+        target_dir = cpd_dir / target_name
+
+        # Submit target phase
+        try:
+            job = submit_vasp(target_dir.resolve())
+            all_jobs.append((d.name, target_name, job.task_name))
+            print(f"  {d.name:<18} target: {job.task_name}")
+
+            # Write .target_submit.json for pipeline resume
+            submit_info = {
+                "task_name": job.task_name,
+                "work_dir": str(target_dir.resolve()),
+            }
+            with open(cpd_dir / ".target_submit.json", "w") as f:
+                json.dump(submit_info, f)
+        except Exception as exc:
+            print(f"  {d.name:<18} target FAIL: {exc}")
+
+        # Submit competing phases (only if --all-phases)
+        if not all_phases:
+            continue
+
+        for pd in other_phases:
+            try:
+                job = submit_vasp(pd.resolve())
+                all_jobs.append((d.name, pd.name, job.task_name))
+                print(f"  {d.name:<18}   phase: {pd.name} → {job.task_name}")
+            except Exception as exc:
+                print(f"  {d.name:<18}   phase: {pd.name} FAIL: {exc}")
+
+    # Summary
+    print("-" * 55)
+    print(f"Submitted {len(all_jobs)} job(s)")
+    for sys, phase, task in all_jobs:
+        print(f"  {sys}/{phase}: {task}")
 
 
 def _scan_system(d: Path, plan: Path) -> dict:
