@@ -443,20 +443,34 @@ _PRIORITY_MAP: dict[str, str] = {
 
 
 def _add_batch_parser(subparsers) -> None:
-    """Add ``batch`` subcommand with status action."""
+    """Add ``batch`` subcommand with actions."""
     p = subparsers.add_parser("batch", help="Multi-system batch operations")
     sub = p.add_subparsers(dest="batch_action", required=True)
 
+    # status
     sp = sub.add_parser("status", help="Show status table for all systems")
     sp.add_argument(
         "root", type=Path,
         help="Project root directory containing system subdirectories",
     )
 
+    # generate-inputs
+    gp = sub.add_parser("generate-inputs", help="Generate VASP inputs for all systems")
+    gp.add_argument(
+        "root", type=Path,
+        help="Project root directory containing system subdirectories",
+    )
+    gp.add_argument(
+        "--unitcell", action="store_true",
+        help="Also generate unitcell inputs (structure_opt/band/dos/dielectric)",
+    )
+
 
 def _handle_batch(args: argparse.Namespace) -> None:
     if args.batch_action == "status":
         _batch_status(args.root.resolve())
+    elif args.batch_action == "generate-inputs":
+        _batch_generate_inputs(args.root.resolve(), unitcell=args.unitcell)
 
 
 def _batch_status(root: Path) -> None:
@@ -488,6 +502,68 @@ def _batch_status(root: Path) -> None:
     done = sum(1 for r in rows if r['cpd'] == '✓' and r['uc'] == '✓' and r['defect'] == '✓')
     print("-" * 55)
     print(f"{total} systems  |  {done} complete")
+
+
+def _batch_generate_inputs(root: Path, *, unitcell: bool = False) -> None:
+    """Generate VASP inputs for all systems in *root* that need them."""
+    import concurrent.futures
+    from vasp_sop.vasp.io import input_ready, prepare_inputs
+    from vasp_sop.core.config import PipelineConfig
+    import logging
+    log = logging.getLogger(__name__)
+
+    _CPD_DIR = "cpd"
+    _UC_DIR = "unitcell"
+
+    # Collect all phase dirs that need inputs
+    tasks: list[tuple[str, str, Path, Path]] = []  # (sys_name, phase_name, phase_dir, plan_path)
+    for d in sorted(root.iterdir()):
+        if not d.is_dir():
+            continue
+        plan_path = d / "plan.yaml"
+        if not plan_path.is_file():
+            continue
+        cpd_dir = d / _CPD_DIR
+        if not cpd_dir.is_dir():
+            continue
+        for pd in sorted(cpd_dir.iterdir()):
+            if not pd.is_dir() or pd.name == "combos":
+                continue
+            if not input_ready(pd):
+                tasks.append((d.name, pd.name, pd, plan_path))
+
+    if not tasks:
+        print("All phase directories already have VASP inputs.")
+        return
+
+    print(f"Generating inputs for {len(tasks)} phase directories across {len(set(t[0] for t in tasks))} systems ...")
+
+    def _gen_one(sys_name: str, phase_name: str, phase_dir: Path, plan_path: Path) -> str:
+        try:
+            config = PipelineConfig.from_yaml(plan_path, root=phase_dir.parent.parent)
+            prepare_inputs(phase_dir, config)
+            return f"OK  {sys_name}/{phase_name}"
+        except Exception as exc:
+            return f"FAIL {sys_name}/{phase_name}: {exc}"
+
+    ok = 0
+    fail = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        fut_map = {pool.submit(_gen_one, *t): t for t in tasks}
+        for fut in concurrent.futures.as_completed(fut_map):
+            t = fut_map[fut]
+            try:
+                msg = fut.result()
+                if msg.startswith("OK"):
+                    ok += 1
+                else:
+                    fail += 1
+                print(f"  {msg}")
+            except Exception as exc:
+                fail += 1
+                print(f"  FAIL {t[0]}/{t[1]}: {exc}")
+
+    print(f"Done: {ok} generated, {fail} failed")
 
 
 def _scan_system(d: Path, plan: Path) -> dict:
