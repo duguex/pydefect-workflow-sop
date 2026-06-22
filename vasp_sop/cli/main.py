@@ -652,11 +652,6 @@ def _batch_run(root: Path, *, poll_interval: int = 60) -> None:
             if p == "DONE" or p == "NO_TARGET":
                 continue
 
-            root_dir = s["root"]
-            cpd_root = root_dir / _CPD
-            uc_root = root_dir / _UC
-            df_root = root_dir / _DF
-
             if p == "TARGET":
                 td = _target_dir(s)
                 if td and str(td.resolve()) not in active and not check_converged(td):
@@ -679,6 +674,10 @@ def _batch_run(root: Path, *, poll_interval: int = 60) -> None:
                         logger.warning("%s/%s submit failed: %s", s["name"], cd.name, exc)
 
             elif p == "CPD_POST":
+                # Ensure crisp outputs are moved before pydefect tools run
+                for pd in cpd_root.iterdir():
+                    if pd.is_dir():
+                        move_crisp_outputs(pd)
                 logger.info("%s: CPD post-processing ...", s["name"])
                 try:
                     target_composition = _cpd._get_target_composition(s["formula"])
@@ -686,7 +685,6 @@ def _batch_run(root: Path, *, poll_interval: int = 60) -> None:
                 except Exception as exc:
                     logger.error("%s CPD failed: %s", s["name"], exc)
                     print(f"  ✗ {s['name']:<18} CPD post-processing FAILED")
-
             elif p == "UC_DF":
                 td = _target_dir(s)
                 if td and not (uc_root / "band" / "INCAR").is_file():
