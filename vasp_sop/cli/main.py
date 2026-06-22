@@ -622,12 +622,27 @@ def _batch_run(root: Path, *, poll_interval: int = 60) -> None:
     # ── Main loop ───────────────────────────────────────────────────
     active: dict[str, str] = {}  # work_dir (str) -> phase label
 
+    def _cache_target_vasp(wd: Path) -> None:
+        """Cache completed target phase VASP results."""
+        for s in sys_list:
+            td = _target_dir(s)
+            if td and td.resolve() == wd:
+                f, m = s["formula"], s["mpid"]
+                if f and m:
+                    from vasp_sop.core.cache import calc_results_put
+                    try:
+                        calc_results_put(f, m, wd)
+                    except Exception:
+                        pass
+                break
+
     while True:
         # 1. Poll active jobs
         for wd_str in list(active):
             wd = Path(wd_str)
             if check_converged(wd):
                 move_crisp_outputs(wd)
+                _cache_target_vasp(wd)
                 del active[wd_str]
                 logger.info("Completed: %s", wd.name)
 
@@ -646,7 +661,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60) -> None:
             print("\nAll systems complete.")
             break
 
-        # 5. Advance all systems (submit everything ready)
+        # 5. Advance all systems
         for s in sys_list:
             p = _phase(s)
             if p == "DONE" or p == "NO_TARGET":
@@ -655,12 +670,32 @@ def _batch_run(root: Path, *, poll_interval: int = 60) -> None:
             if p == "TARGET":
                 td = _target_dir(s)
                 if td and str(td.resolve()) not in active and not check_converged(td):
-                    try:
-                        job = submit_vasp(td.resolve())
-                        active[str(td.resolve())] = "target"
-                        print(f"  → {s['name']:<18} target: {job.task_name}")
-                    except Exception as exc:
-                        logger.warning("%s target submit failed: %s", s["name"], exc)
+                    f, m = s["formula"], s["mpid"]
+                    cached = None
+                    if f and m:
+                        from vasp_sop.core.cache import calc_results_get
+                        cached = calc_results_get(f, m)
+                    if cached:
+                        import shutil as _sh
+                        for fn in ("OUTCAR", "CONTCAR", "vasprun.xml"):
+                            src = cached / fn
+                            if src.is_file():
+                                _sh.copy2(str(src), str(td / fn))
+                        logger.info("%s restored from calc cache", s["name"])
+                        import json as _json
+                        submit_info = {
+                            "task_name": "cached",
+                            "work_dir": str(td.resolve()),
+                        }
+                        with open((s["root"] / _CPD / ".target_submit.json"), "w") as _f:
+                            _json.dump(submit_info, _f)
+                    else:
+                        try:
+                            job = submit_vasp(td.resolve())
+                            active[str(td.resolve())] = "target"
+                            print(f"  → {s['name']:<18} target: {job.task_name}")
+                        except Exception as exc:
+                            logger.warning("%s target submit failed: %s", s["name"], exc)
 
             elif p == "COMPETING":
                 for cd in _competing_dirs(s):
@@ -674,7 +709,6 @@ def _batch_run(root: Path, *, poll_interval: int = 60) -> None:
                         logger.warning("%s/%s submit failed: %s", s["name"], cd.name, exc)
 
             elif p == "CPD_POST":
-                # Ensure crisp outputs are moved before pydefect tools run
                 for pd in cpd_root.iterdir():
                     if pd.is_dir():
                         move_crisp_outputs(pd)
@@ -682,9 +716,17 @@ def _batch_run(root: Path, *, poll_interval: int = 60) -> None:
                 try:
                     target_composition = _cpd._get_target_composition(s["formula"])
                     _cpd.compute_chemical_potentials(cpd_root, s["config"], target_composition)
+                    f, m = s["formula"], s["mpid"]
+                    if f and m:
+                        from vasp_sop.core.cache import cache_target_results
+                        try:
+                            cache_target_results(f, m, _target_dir(s), cpd_root)
+                        except Exception:
+                            pass
                 except Exception as exc:
                     logger.error("%s CPD failed: %s", s["name"], exc)
                     print(f"  ✗ {s['name']:<18} CPD post-processing FAILED")
+
             elif p == "UC_DF":
                 td = _target_dir(s)
                 if td and not (uc_root / "band" / "INCAR").is_file():
