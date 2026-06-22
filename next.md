@@ -1,4 +1,4 @@
-# TODO — VASP 缺陷计算管线
+# NEXT — VASP 缺陷计算管线
 
 - [ ] 复杂缺陷（pydefect-complex）端到端集成测试
 - [ ] 间隙位 / 反位缺陷支持完善
