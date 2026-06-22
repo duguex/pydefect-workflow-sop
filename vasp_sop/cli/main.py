@@ -499,6 +499,35 @@ def _handle_batch(args: argparse.Namespace) -> None:
         _batch_run(args.root.resolve(), poll_interval=args.poll)
 
 
+
+def _batch_status(root: Path) -> None:
+    """Scan *root* for vasp-sop systems and print status table."""
+    from vasp_sop.vasp.io import check_converged, input_ready
+    from vasp_sop.core.state import StateStore, StepStatus
+
+    rows: list[dict] = []
+    for d in sorted(root.iterdir()):
+        if not d.is_dir():
+            continue
+        plan = d / "plan.yaml"
+        if not plan.is_file():
+            continue
+        rows.append(_scan_system(d, plan))
+
+    if not rows:
+        print(f"No vasp-sop systems found in {root}")
+        return
+
+    print(f"{'System':<18} {'P':<3} {'VASPin':<7} {'CPD':<5} {'Unitcell':<9} {'Defect':<7}")
+    print("-" * 55)
+    for r in rows:
+        print(f"{r['name']:<18} {r['pri']:<3} {r['vasp_in']:<7} {r['cpd']:<5} {r['uc']:<9} {r['defect']:<7}")
+
+    total = len(rows)
+    done = sum(1 for r in rows if r['cpd'] == '✓' and r['uc'] == '✓' and r['defect'] == '✓')
+    print("-" * 55)
+    print(f"{total} systems  |  {done} complete")
+
 def _batch_run(root: Path, *, poll_interval: int = 60) -> None:
     """Batch pipeline — advance all systems independently until completion.
 
