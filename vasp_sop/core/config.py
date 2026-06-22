@@ -325,6 +325,34 @@ def generate_config(
 
     phases.sort(key=lambda p: (0 if p["is_target"] else 1, p.get("mpid", "")))
 
+    # ②b Fallback: if MP didn't return the exact target formula, download it directly
+    if not target_found:
+        try:
+            from mp_api.client import MPRester as _MPRester
+            import os as _os
+            _key = _os.environ.get("MP_API_KEY") or _os.environ.get("PMG_MAPI_KEY")
+            if _key:
+                logger.info("Target phase %s not in MP element query, querying exact formula ...", formula)
+                with _MPRester(_key) as _mpr:
+                    _docs = _mpr.materials.summary.search(
+                        formula=formula, fields=["material_id", "formula_pretty"],
+                    )
+                    if _docs:
+                        _mpid = _docs[0].material_id
+                        _target_dir = cpd_root / f"{formula}_{_mpid}"
+                        if not _target_dir.is_dir():
+                            _target_dir.mkdir(parents=True)
+                            _struct = _mpr.get_structure_by_material_id(_mpid)
+                            _struct.to(fmt="poscar", filename=str(_target_dir / "POSCAR"))
+                        target_found = True
+                        target_dir = _target_dir.resolve()
+                        unitcell_poscar.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(str(_target_dir / "POSCAR"), str(unitcell_poscar))
+                        plan["project"]["poscar_src"] = f"MP {_mpid}"
+                        logger.info("Downloaded target phase %s (%s)", formula, _mpid)
+        except Exception as _exc:
+            logger.warning("Failed to download target phase %s: %s", formula, _exc)
+
 
     # ③ ENCUT (from POTCAR in target dir if available)
     if target_dir:
