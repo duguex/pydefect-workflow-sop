@@ -667,6 +667,11 @@ def _batch_run(root: Path, *, poll_interval: int = 60) -> None:
             if p == "DONE" or p == "NO_TARGET":
                 continue
 
+            root_dir = s["root"]
+            cpd_root = root_dir / _CPD
+            uc_root = root_dir / _UC
+            df_root = root_dir / _DF
+
             if p == "TARGET":
                 td = _target_dir(s)
                 if td and str(td.resolve()) not in active and not check_converged(td):
