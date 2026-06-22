@@ -701,6 +701,19 @@ def _batch_run(root: Path, *, poll_interval: int = 60) -> None:
                 for cd in _competing_dirs(s):
                     if str(cd.resolve()) in active:
                         continue
+                    # Check calc cache (same structure may be target of another system)
+                    if "_mp-" in cd.name:
+                        _cf, _cm = cd.name.split("_mp-", 1)
+                        from vasp_sop.core.cache import calc_results_get as _crg
+                        _cached = _crg(_cf, _cm)
+                        if _cached:
+                            import shutil as _sh
+                            for _fn in ("OUTCAR", "CONTCAR", "vasprun.xml"):
+                                _src = _cached / _fn
+                                if _src.is_file():
+                                    _sh.copy2(str(_src), str(cd / _fn))
+                            logger.info("%s restored from calc cache", cd.name)
+                            continue
                     try:
                         job = submit_vasp(cd.resolve())
                         active[str(cd.resolve())] = "competing"
