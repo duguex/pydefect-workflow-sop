@@ -593,7 +593,9 @@ def _batch_run(root: Path, *, poll_interval: int = 60) -> None:
         return sorted(
             pd for pd in cpd_dir.iterdir()
             if pd.is_dir() and pd.name != td.name and pd.name not in ("combos", "mp_flag")
-            and input_ready(pd) and not check_converged(pd)
+            and input_ready(pd)
+            and not check_converged(pd)
+            and not (pd / "submit.slurm").is_file()  # already in crisp queue
         )
 
     def _phase(s: dict) -> str:
@@ -680,7 +682,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60) -> None:
 
             if p == "TARGET":
                 td = _target_dir(s)
-                if td and str(td.resolve()) not in active and not check_converged(td):
+                if td and str(td.resolve()) not in active and not check_converged(td) and not (td / "submit.slurm").is_file():
                     f, m = s["formula"], s["mpid"]
                     cached = None
                     if f and m:
@@ -732,7 +734,6 @@ def _batch_run(root: Path, *, poll_interval: int = 60) -> None:
                     except Exception as exc:
                         logger.warning("%s/%s submit failed: %s", s["name"], cd.name, exc)
 
-
             elif p == "CPD_POST":
                 for pd in cpd_root.iterdir():
                     if pd.is_dir():
@@ -753,6 +754,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60) -> None:
                     print(f"  ✗ {s['name']:<18} CPD post-processing FAILED")
 
             elif p == "UC_DF":
+
                 try:
                     td = _target_dir(s)
                     if td and not (uc_root / "band" / "INCAR").is_file():
