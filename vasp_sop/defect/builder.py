@@ -28,6 +28,7 @@ def build_all(
     at this point in the pipeline.  The unrelaxed lattice is fine for
     supercell sizing; the defect VASP calculations will relax the atoms.
     """
+    defect_root.mkdir(parents=True, exist_ok=True)
     poscar = target_dir / "POSCAR"
     if not poscar.is_file():
         raise FileNotFoundError(f"Target POSCAR not found at {poscar}.")
