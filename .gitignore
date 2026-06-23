@@ -14,3 +14,4 @@ venv/
 # Cloned external libraries
 libs/
 unitcell/
+.claude
