@@ -609,13 +609,19 @@ def _batch_run(root: Path, *, poll_interval: int = 60) -> None:
             return "CPD_POST"
         uc_root = s["root"] / _UC
         uc_tasks = ["band", "dos", "dielectric"]
+        uc_has_inputs = any((uc_root / t / "INCAR").is_file() for t in uc_tasks)
+        if not uc_has_inputs:
+            return "UC_DF"  # unitcell not yet prepared
         uc_pending = any(
             not check_converged(uc_root / t) for t in uc_tasks
             if (uc_root / t / "INCAR").is_file()
         )
         df_root = s["root"] / _DF
-        df_done = (df_root / "defect_energy_summary.json").is_file() if df_root.is_dir() else True
-        if uc_pending or not df_done:
+        if not df_root.is_dir():
+            return "UC_DF"  # defect not yet prepared
+        if not (df_root / "defect_energy_summary.json").is_file():
+            return "UC_DF"
+        if uc_pending:
             return "UC_DF"
         return "DONE"
 
