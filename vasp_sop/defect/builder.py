@@ -53,6 +53,9 @@ def _build_supercell(defect_root: Path, uc_contcar: Path, config: PipelineConfig
         logger.info("Supercell info already exists, skipping supercell construction.")
         return
 
+    import time as _time
+    # Ensure NFS visibility before subprocess.run(cwd=...)
+    _time.sleep(0.5)
     cmd = (
         f"pydefect s -p {uc_contcar} "
         f"--max_atoms {config.supercell_max_atoms} "

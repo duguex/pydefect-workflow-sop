@@ -732,6 +732,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60) -> None:
                     except Exception as exc:
                         logger.warning("%s/%s submit failed: %s", s["name"], cd.name, exc)
 
+
             elif p == "CPD_POST":
                 for pd in cpd_root.iterdir():
                     if pd.is_dir():
@@ -752,74 +753,77 @@ def _batch_run(root: Path, *, poll_interval: int = 60) -> None:
                     print(f"  ✗ {s['name']:<18} CPD post-processing FAILED")
 
             elif p == "UC_DF":
-                td = _target_dir(s)
-                if td and not (uc_root / "band" / "INCAR").is_file():
-                    _uc._prepare_all_inputs(uc_root, td, s["config"])
-                if td and not (df_root / "perfect" / "INCAR").is_file():
-                    if not (df_root / "defect_in.yaml").is_file():
-                        _build_defects(df_root, td, s["config"])
-                    else:
-                        from vasp_sop.defect.builder import _generate_vasp_inputs
-                        _generate_vasp_inputs(df_root, s["config"])
+                try:
+                    td = _target_dir(s)
+                    if td and not (uc_root / "band" / "INCAR").is_file():
+                        _uc._prepare_all_inputs(uc_root, td, s["config"])
+                    if td and not (df_root / "perfect" / "INCAR").is_file():
+                        if not (df_root / "defect_in.yaml").is_file():
+                            _build_defects(df_root, td, s["config"])
+                        else:
+                            from vasp_sop.defect.builder import _generate_vasp_inputs
+                            _generate_vasp_inputs(df_root, s["config"])
 
-                for task in ("band", "dos", "dielectric"):
-                    task_dir = uc_root / task
-                    if not task_dir.is_dir():
-                        continue
-                    if check_converged(task_dir):
-                        continue
-                    if str(task_dir.resolve()) in active:
-                        continue
-                    prepare_inputs(task_dir, s["config"], task_type=task)
-                    try:
-                        job = submit_vasp(task_dir.resolve())
-                        active[str(task_dir.resolve())] = f"uc-{task}"
-                        print(f"  → {s['name']:<18} unitcell: {task} → {job.task_name}")
-                    except Exception as exc:
-                        logger.warning("%s/%s submit failed: %s", s["name"], task, exc)
-
-                if df_root.is_dir() and not (df_root / "defect_energy_summary.json").is_file():
-                    for child in sorted(df_root.iterdir()):
-                        if not child.is_dir():
+                    for task in ("band", "dos", "dielectric"):
+                        task_dir = uc_root / task
+                        if not task_dir.is_dir():
                             continue
-                        if not input_ready(child):
+                        if check_converged(task_dir):
                             continue
-                        if check_converged(child):
+                        if str(task_dir.resolve()) in active:
                             continue
-                        if str(child.resolve()) in active:
-                            continue
+                        prepare_inputs(task_dir, s["config"], task_type=task)
                         try:
-                            job = submit_vasp(child.resolve())
-                            active[str(child.resolve())] = f"df-{child.name}"
-                            print(f"  → {s['name']:<18} defect: {child.name} → {job.task_name}")
+                            job = submit_vasp(task_dir.resolve())
+                            active[str(task_dir.resolve())] = f"uc-{task}"
+                            print(f"  → {s['name']:<18} unitcell: {task} → {job.task_name}")
                         except Exception as exc:
-                            logger.warning("%s/%s submit failed: %s", s["name"], child.name, exc)
+                            logger.warning("%s/%s submit failed: %s", s["name"], task, exc)
 
-                uc_all_done = all(
-                    check_converged(uc_root / t) or not (uc_root / t / "INCAR").is_file()
-                    for t in ("band", "dos", "dielectric")
-                )
-                df_vasp_done = all(
-                    check_converged(child) or not input_ready(child)
-                    for child in df_root.iterdir() if child.is_dir()
-                ) if df_root.is_dir() else True
+                    if df_root.is_dir() and not (df_root / "defect_energy_summary.json").is_file():
+                        for child in sorted(df_root.iterdir()):
+                            if not child.is_dir():
+                                continue
+                            if not input_ready(child):
+                                continue
+                            if check_converged(child):
+                                continue
+                            if str(child.resolve()) in active:
+                                continue
+                            try:
+                                job = submit_vasp(child.resolve())
+                                active[str(child.resolve())] = f"df-{child.name}"
+                                print(f"  → {s['name']:<18} defect: {child.name} → {job.task_name}")
+                            except Exception as exc:
+                                logger.warning("%s/%s submit failed: %s", s["name"], child.name, exc)
 
-                if uc_all_done and df_vasp_done and (df_root / "defect_energy_summary.json").is_file():
-                    pass
-                elif uc_all_done and df_vasp_done:
-                    logger.info("%s: post-processing ...", s["name"])
-                    try:
-                        _uc.build_unitcell_yaml(uc_root, s["config"])
-                        _analyze_defects(
-                            df_root, s["root"], s["config"],
-                            unitcell_yaml=uc_root / "unitcell.yaml",
-                            standard_energies=cpd_root / "standard_energies.yaml",
-                            target_vertices=cpd_root / "target_vertices.yaml",
-                        )
-                        print(f"  ✓ {s['name']:<18} pipeline complete")
-                    except Exception as exc:
-                        logger.error("%s post-processing failed: %s", s["name"], exc)
+                    uc_all_done = all(
+                        check_converged(uc_root / t) or not (uc_root / t / "INCAR").is_file()
+                        for t in ("band", "dos", "dielectric")
+                    )
+                    df_vasp_done = all(
+                        check_converged(child) or not input_ready(child)
+                        for child in df_root.iterdir() if child.is_dir()
+                    ) if df_root.is_dir() else True
 
+                    if uc_all_done and df_vasp_done and (df_root / "defect_energy_summary.json").is_file():
+                        pass
+                    elif uc_all_done and df_vasp_done:
+                        logger.info("%s: post-processing ...", s["name"])
+                        try:
+                            _uc.build_unitcell_yaml(uc_root, s["config"])
+                            _analyze_defects(
+                                df_root, s["root"], s["config"],
+                                unitcell_yaml=uc_root / "unitcell.yaml",
+                                standard_energies=cpd_root / "standard_energies.yaml",
+                                target_vertices=cpd_root / "target_vertices.yaml",
+                            )
+                            print(f"  ✓ {s['name']:<18} pipeline complete")
+                        except Exception as exc:
+                            logger.error("%s post-processing failed: %s", s["name"], exc)
+                except Exception as exc:
+                    logger.error("%s UC_DF failed: %s", s["name"], exc)
+                    print(f"  ✗ {s['name']:<18} UC_DF FAILED")
         _time.sleep(poll_interval)
 
 
