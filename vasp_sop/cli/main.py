@@ -576,6 +576,27 @@ def _batch_run(root: Path, *, poll_interval: int = 60) -> None:
 
     print(f"Batch run: {len(sys_list)} systems\n")
 
+
+    # ── Query crisp for active jobs (prevent re-submit on restart) ──
+    def _crisp_active_dirs() -> set[str]:
+        import subprocess as _sp, json as _json
+        try:
+            r = _sp.run(["crisp", "jobs"], capture_output=True, text=True, timeout=30)
+            raw = _json.loads(r.stdout)
+            jobs = raw.get("jobs", raw.get("data", {}).get("jobs", []))
+        except Exception:
+            return set()
+        alive = {"submit", "submitted", "running", "ready_fetch"}
+        return {j.get("local_dir", "") for j in jobs
+                if j.get("status") in alive and j.get("local_dir")}
+
+    _crisp_active = _crisp_active_dirs()
+    if _crisp_active:
+        logger.info("Found %d active crisp tasks, will skip their directories", len(_crisp_active))
+
+    def _is_active(path: Path) -> bool:
+        return str(path.resolve()) in _crisp_active
+
     # ── Helpers ─────────────────────────────────────────────────────
 
     def _target_dir(s: dict) -> Path | None:
@@ -595,7 +616,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60) -> None:
             if pd.is_dir() and pd.name != td.name and pd.name not in ("combos", "mp_flag")
             and input_ready(pd)
             and not check_converged(pd)
-            and not (pd / "submit.slurm").is_file()  # already in crisp queue
+            and not _is_active(pd)
         )
 
     def _phase(s: dict) -> str:
@@ -682,7 +703,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60) -> None:
 
             if p == "TARGET":
                 td = _target_dir(s)
-                if td and str(td.resolve()) not in active and not check_converged(td) and not (td / "submit.slurm").is_file():
+                if td and str(td.resolve()) not in active and not check_converged(td) and not _is_active(td):
                     f, m = s["formula"], s["mpid"]
                     cached = None
                     if f and m:
