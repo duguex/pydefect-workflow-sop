@@ -459,51 +459,51 @@ def _add_cache_parser(subparsers) -> None:
 
 
 def _handle_cache(args: argparse.Namespace) -> None:
-    from vasp_sop.core.cache import CALC_CACHE, _get_db
+    from vasp_sop.core.cache import _get_db
 
     if args.cache_action == "status":
         db = _get_db()
-
         calc_count = db.execute("SELECT COUNT(*) FROM calc_results").fetchone()[0]
         cpd_count = db.execute("SELECT COUNT(*) FROM cpd_results").fetchone()[0]
-        calc_with_contcar = db.execute(
-            "SELECT COUNT(*) FROM calc_results WHERE has_contcar=1"
+        converged = db.execute(
+            "SELECT COUNT(*) FROM calc_results WHERE converged=1"
+        ).fetchone()[0]
+        with_energy = db.execute(
+            "SELECT COUNT(*) FROM calc_results WHERE total_energy IS NOT NULL"
         ).fetchone()[0]
 
-        print(f"calc_results: {calc_count} entries ({calc_with_contcar} with CONTCAR)")
+        print(f"calc_results: {calc_count} entries  ({converged} converged, {with_energy} with energy)")
         print(f"cpd_results:  {cpd_count} entries")
-
-        if CALC_CACHE.is_dir():
-            import shutil
-            du = shutil.disk_usage(str(CALC_CACHE))
-            print(f"disk usage:  {du.used // 1024} KB")
 
         if args.verbose:
             print()
             for row in db.execute(
-                "SELECT formula, mpid, has_outcar, has_contcar, "
-                "file_count, datetime(cached_at, 'unixepoch') AS ts "
+                "SELECT formula, mpid, total_energy, converged, n_sites, "
+                "formula_pretty, space_group, "
+                "datetime(cached_at, 'unixepoch') AS ts "
                 "FROM calc_results ORDER BY cached_at DESC"
             ):
-                status = "O" if row["has_outcar"] else " "
-                status += "C" if row["has_contcar"] else " "
-                print(f"  {status}  {row['formula']}_mp-{row['mpid']:12s}"
-                      f"  {row['file_count']} files  {row['ts']}")
+                c = "C" if row["converged"] else " "
+                e = f"{row['total_energy']:.4f}" if row["total_energy"] is not None else "?"
+                sg = row["space_group"] or "?"
+                ns = str(row["n_sites"] or "?")
+                print(f"  {c} {row['formula']:12s} mp-{row['mpid']:12s}"
+                      f"  E={e}  {ns:>4s} sites  {sg:8s}"
+                      f"  {row['ts']}")
 
     elif args.cache_action == "verify":
         db = _get_db()
         ok = 0
-        orphans = []
-        for row in db.execute("SELECT formula, mpid FROM calc_results"):
-            d = CALC_CACHE / f"{row['formula']}_mp-{row['mpid']}"
-            if not d.is_dir() or not (d / ".converged").is_file():
-                orphans.append(f"{row['formula']}_mp-{row['mpid']}")
-            else:
+        incomplete = []
+        for row in db.execute("SELECT formula, mpid, converged, outcar_json FROM calc_results"):
+            if row["converged"] and row["outcar_json"] is not None:
                 ok += 1
+            else:
+                incomplete.append(f"{row['formula']}_mp-{row['mpid']}")
         print(f"OK: {ok}")
-        if orphans:
-            print(f"DB orphans (DB has, files missing): {len(orphans)}")
-            for name in orphans[:10]:
+        if incomplete:
+            print(f"Incomplete (missing outcar_json or not converged): {len(incomplete)}")
+            for name in incomplete[:10]:
                 print(f"  {name}")
 def _add_batch_parser(subparsers) -> None:
     """Add ``batch`` subcommand with actions."""
@@ -591,6 +591,14 @@ def _batch_status(root: Path) -> None:
         print(f"{r['name']:<18} {r['pri']:<3} {r['vasp_in']:<7} {r['cpd']:<5} {r['uc']:<9} {r['defect']:<7}")
 
     total = len(rows)
+def _is_cached(pd: Path) -> bool:
+    if "_mp-" not in pd.name:
+        return False
+    formula, mpid = pd.name.split("_mp-", 1)
+    from vasp_sop.core.cache import calc_results_get
+    return calc_results_get(formula, mpid) is not None
+
+
 def _advance_one_system(s: dict, active: dict, *,
                          dry_run: bool = False) -> None:
     """Advance one system by one cycle (subprocess-safe for ProcessPoolExecutor)."""
@@ -639,6 +647,7 @@ def _advance_one_system(s: dict, active: dict, *,
             if pd.is_dir() and pd.name != td.name and pd.name not in ("combos", "mp_flag")
             and input_ready(pd)
             and not check_converged(pd)
+            and not _is_cached(pd)
         )
 
     def _phase(s: dict) -> str:
@@ -723,12 +732,7 @@ def _advance_one_system(s: dict, active: dict, *,
             if f and m:
                 cached = _crg(f, m)
             if cached:
-                import shutil as _sh
-                for fn in ("OUTCAR", "CONTCAR", "vasprun.xml"):
-                    src = cached / fn
-                    if src.is_file():
-                        _sh.copy2(str(src), str(td / fn))
-                _logger.info("%s restored from calc cache", s["name"])
+                _logger.info("%s target restored from calc cache", s["name"])
                 import json as _json
                 submit_info = {"task_name": "cached", "work_dir": str(td.resolve())}
                 with open((s["root"] / _CPD / ".target_submit.json"), "w") as _f:
@@ -745,11 +749,6 @@ def _advance_one_system(s: dict, active: dict, *,
                 _cf, _cm = cd.name.split("_mp-", 1)
                 _cached = _crg(_cf, _cm)
                 if _cached:
-                    import shutil as _sh
-                    for _fn in ("OUTCAR", "CONTCAR", "vasprun.xml"):
-                        _src = _cached / _fn
-                        if _src.is_file():
-                            _sh.copy2(str(_src), str(cd / _fn))
                     _logger.info("%s restored from calc cache", cd.name)
                     continue
             _submit_or_skip(cd, f"phase:{cd.name}", s["name"])
@@ -773,7 +772,6 @@ def _advance_one_system(s: dict, active: dict, *,
             _logger.error("%s CPD failed: %s", s["name"], exc)
             print(f"  ✗ {s['name']:<18} CPD post-processing FAILED")
         return
-
     if p == "UC_DF":
         try:
             td = _target_dir(s)
@@ -938,6 +936,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
             and input_ready(pd)
             and not check_converged(pd)
             and not _is_active(pd)
+            and not _is_cached(pd)
         )
 
     def _phase(s: dict) -> str:
@@ -989,6 +988,21 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
 
     if dry_run:
         print("Dry-run mode: will build defect structures and generate inputs, NO VASP submission.\n")
+
+    # ── Backfill cache: cache already-converged phase results ──────
+    backfilled = 0
+    for s in sys_list:
+        cpd_root = s["root"] / _CPD
+        for pd in cpd_root.iterdir():
+            if not pd.is_dir() or "_mp-" not in pd.name:
+                continue
+            if not check_converged(pd):
+                continue
+            formula, mpid = pd.name.split("_mp-", 1)
+            _cache_put(formula, mpid, pd)
+            backfilled += 1
+    if backfilled:
+        logger.info("Backfilled %d already-converged phase results into cache.", backfilled)
 
     while True:
         # 1. Poll active jobs
