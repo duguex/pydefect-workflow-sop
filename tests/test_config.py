@@ -48,6 +48,47 @@ class TestPipelineConfig:
         finally:
             tmp.unlink(missing_ok=True)
 
+    def test_yaml_roundtrip_minmax_pydefect(self):
+        """Issue #13: pydefect supercell min/max_atoms must survive round-trip,
+        even though the doped-specific min_distance is also written."""
+        c1 = PipelineConfig(
+            formula="GaN",
+            supercell_tool="pydefect",
+            supercell_min_atoms=200,
+            supercell_max_atoms=600,
+        )
+        with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+            tmp = Path(f.name)
+        try:
+            c1.to_yaml(tmp)
+            c2 = PipelineConfig.from_yaml(tmp)
+            assert c2.supercell_tool == "pydefect"
+            assert c2.supercell_min_atoms == 200
+            assert c2.supercell_max_atoms == 600
+            assert c2.supercell_min_distance == 10.0  # default, no data loss
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def test_yaml_roundtrip_minmax_doped(self):
+        """Issue #13: doped supercell min_distance must survive round-trip,
+        even though the pydefect-specific min/max_atoms are also written."""
+        c1 = PipelineConfig(
+            formula="GaN",
+            supercell_tool="doped",
+            supercell_min_distance=12.5,
+        )
+        with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+            tmp = Path(f.name)
+        try:
+            c1.to_yaml(tmp)
+            c2 = PipelineConfig.from_yaml(tmp)
+            assert c2.supercell_tool == "doped"
+            assert c2.supercell_min_distance == 12.5
+            assert c2.supercell_min_atoms == 200  # default, no data loss
+            assert c2.supercell_max_atoms == 600
+        finally:
+            tmp.unlink(missing_ok=True)
+
     def test_yaml_flat_backward_compat(self):
         """Flat-format YAML should still load."""
         with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:

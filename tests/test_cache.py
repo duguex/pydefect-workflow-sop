@@ -167,12 +167,12 @@ class TestMpComboCache:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  VASP calculation cache  (calc_results_*)
+#  VASP calculation cache  (vasp_results_*)
 # ══════════════════════════════════════════════════════════════════════════
 
 
-class TestCalcResultsCache:
-    """Tests for calc_results_get / calc_results_put (DB-only storage)."""
+class TestVaspResultsCache:
+    """Tests for vasp_results_get / vasp_results_put (DB-only storage)."""
 
     def _write_minimal_outcar(self, d: Path, energy: str = "-9.18") -> None:
         """Write OUTCAR that our regex parser can handle."""
@@ -182,7 +182,7 @@ class TestCalcResultsCache:
             " General timing and accounting\n"
         )
 
-    def test_calc_results_get_hit(self, tmp_path: Path):
+    def test_vasp_results_get_hit(self, tmp_path: Path):
         """Returns dict with total_energy when OUTCAR is cached."""
         src = tmp_path / "src"
         src.mkdir()
@@ -190,26 +190,26 @@ class TestCalcResultsCache:
         (src / "CONTCAR").write_text(
             "H\n1.0\n10 0 0\n0 10 0\n0 0 10\nH\n1\nDirect\n0 0 0\n"
         )
-        _cache.calc_results_put("GaN", "804", src)
-        result = _cache.calc_results_get("GaN", "804")
+        _cache.vasp_results_put("GaN", "804", src)
+        result = _cache.vasp_results_get("GaN", "804")
         assert result is not None
         assert result["total_energy"] == -9.18
         assert result["converged"] == 1
         assert result["n_sites"] == 1
 
-    def test_calc_results_get_miss_no_dir(self):
+    def test_vasp_results_get_miss_no_dir(self):
         """Returns None when not cached."""
-        assert _cache.calc_results_get("GaN", "804") is None
+        assert _cache.vasp_results_get("GaN", "804") is None
 
-    def test_calc_results_get_miss_no_outcar(self, tmp_path: Path):
+    def test_vasp_results_get_miss_no_outcar(self, tmp_path: Path):
         """Returns None when no OUTCAR in src_dir (nothing cached)."""
         src = tmp_path / "empty"
         src.mkdir()
-        _cache.calc_results_put("GaN", "804", src)
-        assert _cache.calc_results_get("GaN", "804") is None
+        _cache.vasp_results_put("GaN", "804", src)
+        assert _cache.vasp_results_get("GaN", "804") is None
 
-    def test_calc_results_put_stores_parsed_data(self, tmp_path: Path):
-        """calc_results_put stores parsed data in SQLite, not files."""
+    def test_vasp_results_put_stores_parsed_data(self, tmp_path: Path):
+        """vasp_results_put stores parsed data in SQLite, not files."""
         src = tmp_path / "src"
         src.mkdir()
         self._write_minimal_outcar(src)
@@ -217,118 +217,37 @@ class TestCalcResultsCache:
         (src / "CONTCAR").write_text(
             "H\n1.0\n10 0 0\n0 10 0\n0 0 10\nH\n1\nDirect\n0 0 0\n"
         )
-        _cache.calc_results_put("GaN", "804", src)
+        _cache.vasp_results_put("GaN", "804", src)
 
-        result = _cache.calc_results_get("GaN", "804")
+        result = _cache.vasp_results_get("GaN", "804")
         assert result is not None
         assert result["total_energy"] == -9.18
         assert result["converged"] == 1
         assert result["n_sites"] == 1
         assert result["incar_json"] is not None
 
-    def test_calc_results_put_missing_src_files(self, tmp_path: Path):
+    def test_vasp_results_put_missing_src_files(self, tmp_path: Path):
         """Partial files still produce an entry (energy only)."""
         src = tmp_path / "src"
         src.mkdir()
         self._write_minimal_outcar(src)
-        _cache.calc_results_put("GaN", "804", src)
+        _cache.vasp_results_put("GaN", "804", src)
 
-        result = _cache.calc_results_get("GaN", "804")
+        result = _cache.vasp_results_get("GaN", "804")
         assert result is not None
         assert result["total_energy"] == -9.18
         assert result["converged"] == 1
         assert result["incar_json"] is None
         assert result["structure_json"] is None
 
-    def test_calc_results_put_skips_no_outcar(self, tmp_path: Path):
+    def test_vasp_results_put_skips_no_outcar(self, tmp_path: Path):
         """No OUTCAR produces no cache entry."""
         src = tmp_path / "empty"
         src.mkdir()
-        _cache.calc_results_put("GaN", "804", src)
-        assert _cache.calc_results_get("GaN", "804") is None
+        _cache.vasp_results_put("GaN", "804", src)
+        assert _cache.vasp_results_get("GaN", "804") is None
 
 
-# ══════════════════════════════════════════════════════════════════════════
-#  CPD result cache  (calc_cpd_*)
-# ══════════════════════════════════════════════════════════════════════════
-
-
-class TestCalcCpdCache:
-    """Tests for calc_cpd_get / calc_cpd_put (DB-only storage)."""
-
-    def test_cpd_get_hit(self, tmp_path: Path):
-        """Returns dict with target_vertices when put then get."""
-        src = tmp_path / "cpd_src"
-        src.mkdir()
-        (src / "target_vertices.yaml").write_text("tv: data\n")
-        _cache.calc_cpd_put("GaN", "804", src)
-        result = _cache.calc_cpd_get("GaN", "804")
-        assert result is not None
-        assert "target_vertices_json" in result
-
-    def test_cpd_get_miss_no_dir(self):
-        """Returns None when not cached."""
-        assert _cache.calc_cpd_get("GaN", "804") is None
-
-    def test_cpd_get_miss_no_data(self):
-        """Returns None when not cached."""
-        assert _cache.calc_cpd_get("GaN", "804") is None
-
-    def test_cpd_put_stores_all(self, tmp_path: Path):
-        """calc_cpd_put stores all CPD YAMLs as JSON blobs."""
-        cpd_root = tmp_path / "cpd"
-        cpd_root.mkdir()
-        for fname in ("target_vertices.yaml", "standard_energies.yaml",
-                      "composition_energies.yaml"):
-            (cpd_root / fname).write_text(f"content {fname}\n")
-        _cache.calc_cpd_put("GaN", "804", cpd_root)
-        result = _cache.calc_cpd_get("GaN", "804")
-        assert result is not None
-        assert result["target_vertices_json"] is not None
-        assert result["standard_energies_json"] is not None
-        assert result["composition_energies_json"] is not None
-
-    def test_cpd_put_partial(self, tmp_path: Path):
-        """Partial YAMLs produce partial cache entry."""
-        cpd_root = tmp_path / "cpd"
-        cpd_root.mkdir()
-        (cpd_root / "target_vertices.yaml").write_text("tv: data\n")
-        _cache.calc_cpd_put("GaN", "804", cpd_root)
-        result = _cache.calc_cpd_get("GaN", "804")
-        assert result is not None
-        assert result["target_vertices_json"] is not None
-        assert result["standard_energies_json"] is None
-
-
-class TestCacheTargetResults:
-    """Tests for cache_target_results (DB-only storage)."""
-
-    def test_caches_both(self, tmp_path: Path):
-        """cache_target_results stores VASP and CPD in DB."""
-        target_dir = tmp_path / "target"
-        target_dir.mkdir()
-        (target_dir / "OUTCAR").write_text(
-            " free  energy    TOTEN  =    -12.64 eV\n"
-            " General timing and accounting\n"
-        )
-        (target_dir / "CONTCAR").write_text(
-            "H\n1.0\n10 0 0\n0 10 0\n0 0 10\nH\n1\nDirect\n0 0 0\n"
-        )
-        cpd_root = tmp_path / "cpd"
-        cpd_root.mkdir()
-        (cpd_root / "target_vertices.yaml").write_text("tv: data\n")
-
-        _cache.cache_target_results("GaN", "804", target_dir, cpd_root)
-
-        calc = _cache.calc_results_get("GaN", "804")
-        assert calc is not None
-        assert calc["total_energy"] == -12.64
-        assert calc["converged"] == 1
-        assert calc["n_sites"] == 1
-
-        cpd = _cache.calc_cpd_get("GaN", "804")
-        assert cpd is not None
-        assert cpd["target_vertices_json"] is not None
 
 
 # ══════════════════════════════════════════════════════════════════════════

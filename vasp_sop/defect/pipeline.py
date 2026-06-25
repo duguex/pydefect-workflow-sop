@@ -62,28 +62,20 @@ def _resolve_target_job(target_dir: Path) -> VaspJob | None:
         return None
 
 
-def _cache_cpd_results(config: PipelineConfig, target_dir: Path, cpd_root: Path) -> None:
-    """Cache structure_opt VASP outputs + CPD results to global cache."""
-    from vasp_sop.core.cache import cache_target_results
-    name = target_dir.name
-    if "_mp-" in name:
-        formula_pt, mpid = name.split("_mp-", 1)
-        cache_target_results(formula_pt, mpid, target_dir, cpd_root)
 
 
 def _check_calc_cache(target_dir: Path) -> bool:
-    """Restore target_dir's VASP + CPD outputs from global calc cache.
+    """Restore target_dir's VASP outputs from global calc cache.
 
-    Returns True if cache hit and files were restored.
+    Returns True if cache hit and OUTCAR/CONTCAR were restored.
     """
     name = target_dir.name
     if "_mp-" not in name:
         return False
     formula_pt, mpid = name.split("_mp-", 1)
 
-    from vasp_sop.core.cache import calc_results_get, calc_cpd_get
-
-    cached = calc_results_get(formula_pt, mpid)
+    from vasp_sop.core.cache import vasp_results_get
+    cached = vasp_results_get(formula_pt, mpid)
     if cached is None:
         return False
 
@@ -93,17 +85,6 @@ def _check_calc_cache(target_dir: Path) -> bool:
         src = cached / f
         if src.is_file():
             shutil.copy2(str(src), str(target_dir / f))
-
-    cpd_dir = target_dir.parent
-    cpd_cached = calc_cpd_get(formula_pt, mpid)
-    if cpd_cached:
-        for f in ("target_vertices.yaml", "standard_energies.yaml"):
-            src = cpd_cached / f
-            if src.is_file():
-                shutil.copy2(str(src), str(cpd_dir / f))
-        (cpd_dir / "mp_flag").touch(exist_ok=True)
-    return True
-
 
 def run_point_defect_pipeline(
     config: PipelineConfig,
@@ -194,18 +175,6 @@ def run_point_defect_pipeline(
         StateStore.save(state)
         logger.info("CPD stage complete.")
 
-        if not cache_hit:
-            _cache_cpd_results(config, target_dir, cpd_root)
-        else:
-            # Edge case: calc cache HIT but CPD cache MISS (e.g. crash
-            # between calc_results_put and calc_cpd_put).  Regenerated CPD
-            # files would never be cached without this check.
-            name = target_dir.name
-            if "_mp-" in name:
-                f, m = name.split("_mp-", 1)
-                from vasp_sop.core.cache import calc_cpd_get
-                if calc_cpd_get(f, m) is None:
-                    _cache_cpd_results(config, target_dir, cpd_root)
 
 
     # ═══════════════════════════════════════════════════════════════════

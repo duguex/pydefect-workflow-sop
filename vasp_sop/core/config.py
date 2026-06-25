@@ -191,11 +191,16 @@ class PipelineConfig:
                 "hubbard_u": self.hubbard_u,
                 "pp": list(self.potcar_overrides),
             },
-            "supercell": {"tool": self.supercell_tool}
-            | ({"min_atoms": self.supercell_min_atoms, "max_atoms": self.supercell_max_atoms}
-               if self.supercell_tool == "pydefect" else {})
-            | ({"min_distance": self.supercell_min_distance}
-               if self.supercell_tool == "doped" else {}),
+            "supercell": {
+                "tool": self.supercell_tool,
+                # Emit all three keys so that round-trip never silently drops
+                # either the atom-count bounds (used by pydefect) or the
+                # image-distance bound (used by doped). Downstream code reads
+                # only the key it cares about; the other is harmless.
+                "min_atoms": self.supercell_min_atoms,
+                "max_atoms": self.supercell_max_atoms,
+                "min_distance": self.supercell_min_distance,
+            },
             "defects": {
                 "interstitials": self.interstitial,
                 "interstitial_indices": list(self.interstitial_indices),

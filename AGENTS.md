@@ -29,21 +29,35 @@ CLI (vasp-sop command)
   └── materials fetch      ← MP query + download
 ```
 
+### Three-Wave VASP Scheduling
+
+The pipeline orchestrator in `defect/pipeline.py` uses a three-wave model:
+
+| Wave | Phase | Work |
+|------|-------|------|
+| 1 | TARGET | structure_opt + generate all inputs while target runs |
+| 2 | COMPETING + UC + DEFECT | competing phases, band/dos/dielectric, perfect, all defects |
+| 3 | POST-PROCESSING | pydefect analysis, formation energy summary |
+
+Wave 2 submits all independent VASP jobs in parallel (competing phases + unitcell
+sub-tasks + defect calculations). Wave 3 runs after all Wave 2 jobs complete.
+
 ### Key Modules
 
 | Module | Path | Role |
 |--------|------|------|
-| CLI | `vasp_sop/cli/main.py` | argparse dispatch, batch orchestrator |
-| Config | `vasp_sop/core/config.py` | `PipelineConfig` dataclass, `plan.yaml` |
-| Jobs | `vasp_sop/core/jobs.py` | VASP submission (crisp/local), `run_local()` |
-| State | `vasp_sop/core/state.py` | Pipeline state machine, `StateStore` |
-| Cache | `vasp_sop/core/cache.py` | SQLite-backed VASP/CPD result cache |
-| Builder | `vasp_sop/defect/builder.py` | Supercell + defect enumeration + VASP inputs |
+| CLI | `vasp_sop/cli/main.py` | argparse dispatch (8 subcommands), batch orchestrator |
+| Config | `vasp_sop/core/config.py` | `PipelineConfig` dataclass, `plan.yaml` I/O, `generate_config()` |
+| Jobs | `vasp_sop/core/jobs.py` | VASP submission (crisp/local), `VaspJob` hierarchy, `run_local()` |
+| State | `vasp_sop/core/state.py` | Pipeline state machine, `StateStore`, `StepStatus` enum |
+| Cache | `vasp_sop/core/cache.py` | SQLite-backed VASP/CPD result cache (~/.vasp_sop/cache.db) |
+| Builder | `vasp_sop/defect/builder.py` | Supercell (doped/pydefect) + defect enumeration + VASP inputs |
 | CPD | `vasp_sop/defect/cpd.py` | Competing phase diagram pipeline |
 | Unitcell | `vasp_sop/defect/unitcell.py` | Perfect-cell band/DOS/dielectric |
-| Analysis | `vasp_sop/defect/analysis.py` | Formation energy post-processing |
+| Analysis | `vasp_sop/defect/analysis.py` | Formation energy post-processing (10 pydefect steps) |
 | Pipeline | `vasp_sop/defect/pipeline.py` | Three-wave VASP orchestration |
-| VASP I/O | `vasp_sop/vasp/io.py` | `check_converged()`, `prepare_inputs()` |
+| Compute | `vasp_sop/defect/compute.py` | Defect VASP execution with CONTCAR restart loop |
+| VASP I/O | `vasp_sop/vasp/io.py` | `check_converged()`, `prepare_inputs()`, `restart_from_contcar()` |
 | Materials | `vasp_sop/materials/mp.py` | MP API integration, parameter inference |
 
 ### Data Flow
@@ -59,26 +73,42 @@ plan.yaml → PipelineConfig
   │   ├── _generate_defect_list() ← pydefect ds
   │   ├── _generate_structures()  ← pydefect_vasp de
   │   └── _generate_vasp_inputs() ← ThreadPoolExecutor(8)
-  ├── compute.run_vasp() → OUTCAR per defect
+  ├── compute.run_vasp() → OUTCAR per defect  (CONTCAR restart loop, max 20 attempts)
   └── analysis.analyze() → defect_energy_summary.json
 ```
+
+### Batch Pipeline State Machine
+
+Each system cycles through phases determined by `_phase()`:
+
+```
+TARGET → COMPETING → CPD_POST → UC_DF → DONE
+```
+
+- Phase is determined by filesystem state (OUTCAR presence, convergence, target_vertices.yaml, etc.)
+- `batch run` polls and advances all systems via `ProcessPoolExecutor(max_workers=14)`
+- `--dry-run` does one pass and exits (no VASP submission)
+- Cache hit in TARGET/COMPETING skips submission (saves `.target_submit.json` with `"cached"`)
+- Errors in `_advance_one_system` are caught per-system — one failure doesn't block others
 
 ## Key Directories
 
 ```
 vasp_sop/
-├── cli/main.py          ← CLI entry point (1344 lines)
+├── cli/main.py          ← CLI entry point (1414 lines)
 ├── core/                ← Config, jobs, state, cache
-├── defect/              ← Pipeline stages (cpd, unitcell, builder, compute, analysis)
+├── defect/              ← Pipeline stages (cpd, unitcell, builder, compute, analysis, _legacy)
 ├── vasp/                ← VASP I/O layer (check_converged, prepare_inputs)
-└── materials/           ← Materials Project integration
+├── materials/           ← Materials Project integration
+└── __init__.py          ← version = "0.1.0"
 
 tests/
-├── test_cache.py        ← Cache tests (MP + SQLite)
-├── test_cli.py          ← CLI + dry-run tests
+├── test_cache.py        ← Cache tests (MP + SQLite) — largest test file (16.5KB)
+├── test_cli.py          ← CLI + dry-run + batch status tests
 ├── test_builder.py      ← Supercell builder tests
-├── test_config.py       ← Config validation + round-trip
-├── test_defects.py      ← Convergence detection tests
+├── test_config.py       ← Config validation + YAML round-trip
+├── test_cpd.py          ← CPD regression tests (issues #0001, #0002)
+├── test_defects.py      ← Convergence detection 7-case matrix
 ├── test_jobs.py         ← Subprocess + input-ready tests
 ├── test_import.py       ← Smoke tests
 └── test_state.py        ← Pipeline state machine tests
@@ -111,6 +141,19 @@ vasp-sop batch run /path/to/project
 vasp-sop cache status --verbose
 ```
 
+### CLI Subcommands
+
+| Command | Description |
+|---------|-------------|
+| `batch run` | Multi-system pipeline orchestrator (main workflow) |
+| `pipeline` | Single-system pipeline |
+| `defect build` | Standalone defect structure generation |
+| `cache status/verify` | SQLite cache inspection |
+| `materials fetch` | Materials Project query + download |
+| `vasp` | VASP operations |
+| `cpd` | CPD stage standalone |
+| `unitcell` | Unitcell stage standalone |
+
 ## Code Conventions & Patterns
 
 ### Configuration
@@ -120,12 +163,18 @@ vasp-sop cache status --verbose
 - `from_plan(dict)` / `to_plan()` handle the dict↔dataclass conversion
 - `DEFAULT_PLAN` provides the template for `generate_config()`
 - Validation via `__post_init__` with `ValueError`
+- Legacy JSON format supported via `from_legacy_json()` migration
+- All three supercell keys (`min_atoms`, `max_atoms`, `min_distance`) are emitted unconditionally
+  so round-trip never silently drops data — downstream code reads only what it cares about
 
 ### Cache
 
-- SQLite at `~/.vasp_sop/cache.db` with two tables: `calc_results`, `cpd_results`
-- `calc_results_put(formula, mpid, src_dir)` — parses OUTCAR/vasprun.xml/INCAR/CONTCAR/KPOINTS via pymatgen, stores as JSON blobs
+- SQLite at `~/.vasp_sop/cache.db` with WAL journaling, two tables:
+  - `calc_results` (formula, mpid, total_energy, converged, OUTCAR/vasprun/INCAR/CONTCAR/KPOINTS JSON blobs)
+  - `cpd_results` (composition_energies_json, standard_energies_json, target_vertices_json)
+- `calc_results_put(formula, mpid, src_dir)` — parses VASP outputs via pymatgen, stores as JSON blobs
 - `calc_results_get(formula, mpid)` — returns `Optional[dict]` with parsed data
+- Best-effort pymatgen parsing: exceptions → warning log + partial data stored
 - Never write to `CALC_CACHE` directory (backward-compat constant only)
 - For testing: `override_cache_root(tmp_path)` isolates cache to temp directory
 - `_is_cached(pd: Path) -> bool` checks if a phase dir is in the global cache
@@ -133,30 +182,31 @@ vasp-sop cache status --verbose
 ### Error Handling
 
 - CLI commands catch top-level exceptions and log via `logger.exception()`
-- Batch pipeline: errors in `_advance_one_system` are caught per-system, not propagated (one failing system doesn't block others)
+- Batch pipeline: errors in `_advance_one_system` are caught per-system, not propagated
 - `run_local()` raises `RuntimeError` on non-zero exit or timeout
 - `check_converged()` returns `bool`, never raises
 - Cache functions catch exceptions during pymatgen parsing, log warnings, store what they can
+- Per-system isolation: one failing system doesn't block others in batch mode
 
 ### Parallelism
 
 - `ProcessPoolExecutor(max_workers=14)` for per-system parallelism in batch run
 - `ThreadPoolExecutor(max_workers=8)` for per-directory VASP input generation
 - Process workers import `_advance_one_system` at module level (pickle-safe)
-- Caching: `_cache_phase_results()` called after job completion in polling loop
+- `_cache_phase_results()` called after job completion in polling loop
+- VASP jobs run independently per-phase, submitted via crisp or local subprocess
 
-### Batch Pipeline State Machine
+### Supercell Construction
 
-Each system cycles through phases determined by `_phase()`:
+Dual backend selected by `config.supercell_tool`:
 
-```
-TARGET → COMPETING → CPD_POST → UC_DF → DONE
-```
+| Tool | Constraint | CLI flag |
+|------|-----------|----------|
+| `doped` | Minimum image distance (`min_distance`) | Preferred — canonical for distance constraints |
+| `pydefect` | Atom count bounds (`min_atoms`/`max_atoms`) | No `--min_distance` flag in pydefect CLI |
 
-- Phase is determined by filesystem state (OUTCAR presence, convergence, target_vertices.yaml, etc.)
-- `batch run` polls and advances all systems via `ProcessPoolExecutor`
-- `--dry-run` does one pass and exits (no VASP submission)
-- Cache hit in TARGET/COMPETING skips submission (saves `.target_submit.json` with `"cached"`)
+- `_build_supercell_doped` delegates symmetry site grouping to `vise.util.structure_symmetrizer.StructureSymmetrizer`
+  (handles centering, time-reversal, angle tolerance; sorts `equivalent_atoms` indices)
 
 ### Job Management (CRISP)
 
@@ -167,17 +217,96 @@ operation.
 ```bash
 crisp submit              # Submit VASP job
 crisp cancel -n TASK_NAME # Cancel job
-crisp jobs                # List all jobs
+crisp jobs                # List all jobs (JSON output)
 ```
 
-### Testing
+### VASP Convergence Detection
 
-- Framework: pytest (no conftest.py)
-- Cache isolation: `override_cache_root(tmp_path / ".vasp_sop")` in `@pytest.fixture(autouse=True)`
-- No pytest markers, no parameterization
+`check_converged()` in `vasp/vasp/io.py`:
+- Parses OUTCAR for EDIFFG regex match + TOTAL-FORCE block max-force comparison
+- Returns `bool`, never raises
+- 7-case test matrix in `tests/test_defects.py`
+
+CONTCAR restart loop in `defect/compute.py`:
+- Copies CONTCAR → POSCAR, sets ISTART=1, doubles NSW (capped at 3200)
+- Stalled detection via max-force comparison (no progress threshold = 99% of previous)
+- Up to 20 restart attempts
+
+### Imports
+
+- Standard library + third-party imports at top of file
+- Heavy/conditional imports (`pydefect`, `vise`, `pymatgen`) inside functions
+  (deferred to call-time, which also makes `monkeypatch.setattr` on module
+  attributes work for testing)
+- Local module imports use full `vasp_sop.xxx` paths
+
+### Persistence
+
+- Project state: `{root}/.pipeline_state.json` (JSON-serialized `PipelineState`)
+- Calculation cache: `~/.vasp_sop/cache.db` (SQLite, WAL mode)
+- MP combo cache: `~/.vasp_sop/mp_cache/` (POSCARs + POTCARs on disk)
+- State is filesystem-based: phase determined by OUTCAR existence, convergence, YAML files
+
+## Testing & QA
+
+### Framework
+
+- pytest (no conftest.py, no pytest markers, no parameterization)
 - Each scenario is a separate test method
-- `tmp_path` fixture used universally for file I/O tests
-- `monkeypatch` used in CLI tests to prevent real VASP submission
+- `tmp_path` fixture used universally for filesystem I/O tests
+
+### Fixture Patterns
+
+| Fixture | Usage |
+|---------|-------|
+| `tmp_path` | Filesystem sandbox per test |
+| `monkeypatch` | Mock VASP/crisp/pydefect subprocess calls |
+| `capsys` | Capture stdout for CLI output assertions |
+| `@pytest.fixture(autouse=True)` | Test-class-level heavy patching |
+
+### Cache Isolation
+
+```python
+@pytest.fixture(autouse=True)
+def _isolate_cache(self, tmp_path):
+    from vasp_sop.core.cache import override_cache_root
+    override_cache_root(tmp_path / ".vasp_sop")
+```
+
+Additional manual reassignment of module-level path globals may be needed
+(cache module imports evaluate before monkeypatch takes effect).
+
+### Mocking Strategy
+
+- External subprocess calls (`crisp`, `sbatch`, `pydefect`, `vise`) are
+  mocked via `monkeypatch.setattr` on `subprocess.run` or the module import path
+- No real subprocess calls in tests
+- MPI/VASP binaries never invoked
+- Test data is synthetic (dummy OUTCAR files, fake JSON payloads)
+- `_make_system_dict()` helper constructs system state dicts without real filesystem
+
+### Test Coverage
+
+Well-tested:
+- Cache layer (hit/miss/partial/overwrite, SQLite + MP)
+- Config validation + YAML round-trip
+- VASP convergence detection (7-case matrix)
+- Pipeline state persistence
+- CLI dry-run modes and batch status reporting
+- Supercell builder (doped + pydefect, error cases, sorted equivalent_atoms)
+
+Notable gaps:
+- `submit_vasp()` / `run_vasp()` have no unit tests
+- MP network download paths uncovered
+- No end-to-end integration tests
+- State error-handling paths uncovered
+
+### Test Naming Conventions
+
+- Class: `Test<Feature>` (e.g., `TestCrispActiveDirs`)
+- Method: descriptive snake_case (e.g., `test_dry_run_skips_crisp_subprocess`)
+- Docstring: one line describing the scenario and issue reference
+- Helper methods: prefixed with `_` (e.g., `_make_system`, `_make_uc_df_system`)
 
 ## Important Files
 
@@ -186,15 +315,17 @@ crisp jobs                # List all jobs
 | `vasp_sop/cli/main.py` | CLI entry, batch orchestrator, `_advance_one_system` |
 | `vasp_sop/core/config.py` | `PipelineConfig`, `plan.yaml` generation |
 | `vasp_sop/core/cache.py` | SQLite cache (calc_results + cpd_results) |
-| `vasp_sop/core/jobs.py` | VASP submission, `run_local()` |
+| `vasp_sop/core/jobs.py` | VASP submission, `run_local()`, `VaspJob` hierarchy |
 | `vasp_sop/core/state.py` | Pipeline state machine |
 | `vasp_sop/defect/builder.py` | Supercell + defect generation |
 | `vasp_sop/defect/cpd.py` | Chemical potential diagram |
 | `vasp_sop/defect/pipeline.py` | Three-wave orchestration |
+| `vasp_sop/defect/compute.py` | Defect VASP execution with CONTCAR restart |
+| `vasp_sop/defect/analysis.py` | Formation energy post-processing |
 | `vasp_sop/vasp/io.py` | `check_converged()`, `prepare_inputs()` |
+| `vasp_sop/materials/mp.py` | MP query + parameter inference |
 | `pyproject.toml` | Dependencies, entry point, pytest config |
 | `PROJECT.md` | Detailed pipeline SOP (Chinese) |
-| `tests/test_cache.py` | Cache test suite with isolation fixture |
 
 ## Runtime Requirements
 
@@ -203,13 +334,47 @@ crisp jobs                # List all jobs
 - HPC cluster access with `crisp` scheduler agent
 - Materials Project API key (`MP_API_KEY` or `PMG_MAPI_KEY`)
 - VASP binary via singularity container (`/mnt/shared/vasp_latest.sif`)
+- `crisp` CLI must be on PATH for HPC operations
 
+## Production Instances
+
+### `2025_undergo_spin_defect`
+
+**Path:** `/mnt/shared/home/2sidesniddle/vasp/2025_undergo_spin_defect/`
+**Systems:** 40 个目录，29 个有 `plan.yaml` 的活跃系统
+**Batches:** 首批 P4（10 个）+ 第二批新材料（29 个）
+
+| Phase | 数量 | 系统 |
+|-------|------|------|
+| ✅ DONE | 9 | AlN, diamond, GaN, hBN, MoS₂, SiC, CaO, MgO, orth-SiC |
+| ▶️ UC_DF | 8 | BaTe, Ca₂Ge₇O₁₆, CaCO₃, CeO₂, MgCO₃, Sr₂MgSi₂O₇, SrO, SrTe |
+| ⏳ COMPETING | 21 | Ba₂MgGe₂O₇, Ba₂MgSi₂O₇, Ba₂TeO, BaGe₂S₅, BaGe₄O₉, BaO, BaO₂, BaS, BaS₃, BaSe, CaMg₂(SO₄)₃, CaS, CaSe, GeSe₂, Mg₃TeO₆, MgS, SeO₂, Sn(SeO₃)₂, Sr₂MgGe₂O₇, SrGe₄O₉, SrS, SrSe |
+| ❓ 待确认 | 1 | ZnO（CPD_POST 但缺 target_vertices.yaml） |
+
+**常用命令：**
+
+```bash
+# 推进所有系统
+cd /mnt/shared/home/2sidesniddle/vasp/2025_undergo_spin_defect
+vasp-sop batch run .
+
+# 干运行预览
+vasp-sop batch run . --dry-run
+
+# 查看批处理状态
+vasp-sop cache status --verbose
+```
 ## Known Issues
 
 - `cache_target_results` in CPD_POST calls `calc_results_put` then `calc_cpd_put`;
   if the target dir lacks OUTCAR (e.g. cached result restored without files),
   the put silently skips. Verify converged flag before calling.
 - CPD target composition lookup in `relative_energies.yaml` can fail
-  intermittently (pydefect key format instability). Issue #23 tracks this.
+  intermittently (pydefect key format instability). See `issues/0001-srte-cpd-target-lookup-false-positive-failure.md`.
 - 4-element CPD diagrams fail in pydefect (halfspace >3D). Handled via
-  dimension check in `cpd.py`.
+  dimension check in `cpd.py`. See `issues/0002-skip-4d-cpd-diagram.md`.
+- Dry-run UC_DF phase reports "already complete" when `defect_energy_summary.json`
+  exists, "would post-process" when artifacts are present but analysis hasn't run,
+  and "post-process blocked" when artifacts are missing.
+- `compute.run_vasp()` stalled detection threshold (99% of previous max-force)
+  may trigger false positives for some systems.

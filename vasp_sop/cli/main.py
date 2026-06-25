@@ -463,17 +463,16 @@ def _handle_cache(args: argparse.Namespace) -> None:
 
     if args.cache_action == "status":
         db = _get_db()
-        calc_count = db.execute("SELECT COUNT(*) FROM calc_results").fetchone()[0]
-        cpd_count = db.execute("SELECT COUNT(*) FROM cpd_results").fetchone()[0]
+        calc_count = db.execute("SELECT COUNT(*) FROM vasp_results").fetchone()[0]
         converged = db.execute(
-            "SELECT COUNT(*) FROM calc_results WHERE converged=1"
+            "SELECT COUNT(*) FROM vasp_results WHERE converged=1"
         ).fetchone()[0]
         with_energy = db.execute(
-            "SELECT COUNT(*) FROM calc_results WHERE total_energy IS NOT NULL"
+            "SELECT COUNT(*) FROM vasp_results WHERE total_energy IS NOT NULL"
         ).fetchone()[0]
 
-        print(f"calc_results: {calc_count} entries  ({converged} converged, {with_energy} with energy)")
-        print(f"cpd_results:  {cpd_count} entries")
+        print(f"vasp_results: {calc_count} entries  ({converged} converged, {with_energy} with energy)")
+
 
         if args.verbose:
             print()
@@ -481,7 +480,7 @@ def _handle_cache(args: argparse.Namespace) -> None:
                 "SELECT formula, mpid, total_energy, converged, n_sites, "
                 "formula_pretty, space_group, "
                 "datetime(cached_at, 'unixepoch') AS ts "
-                "FROM calc_results ORDER BY cached_at DESC"
+                "FROM vasp_results ORDER BY cached_at DESC"
             ):
                 c = "C" if row["converged"] else " "
                 e = f"{row['total_energy']:.4f}" if row["total_energy"] is not None else "?"
@@ -495,7 +494,7 @@ def _handle_cache(args: argparse.Namespace) -> None:
         db = _get_db()
         ok = 0
         incomplete = []
-        for row in db.execute("SELECT formula, mpid, converged, outcar_json FROM calc_results"):
+        for row in db.execute("SELECT formula, mpid, converged, outcar_json FROM vasp_results"):
             if row["converged"] and row["outcar_json"] is not None:
                 ok += 1
             else:
@@ -590,13 +589,56 @@ def _batch_status(root: Path) -> None:
     for r in rows:
         print(f"{r['name']:<18} {r['pri']:<3} {r['vasp_in']:<7} {r['cpd']:<5} {r['uc']:<9} {r['defect']:<7}")
 
+    # ── Summary footer ────────────────────────────────────────────────
+    # Status string conventions used by _check_cpd / _check_unitcell /
+    # _check_defect: "✓" = done, "▶" or "N/M" = in progress, "·" = not started.
     total = len(rows)
+    completed = sum(
+        1 for r in rows
+        if r["cpd"] == "✓" and r["uc"] == "✓" and r["defect"] == "✓"
+    )
+    in_progress = total - completed - sum(
+        1 for r in rows
+        if r["cpd"] == "·" and r["uc"] == "·" and r["defect"] == "·"
+    )
+    not_started = sum(
+        1 for r in rows
+        if r["cpd"] == "·" and r["uc"] == "·" and r["defect"] == "·"
+    )
+    print("-" * 55)
+    print(
+        f"Total: {total}  Completed: {completed}  "
+        f"In progress: {in_progress}  Not started: {not_started}"
+    )
+
+
 def _is_cached(pd: Path) -> bool:
     if "_mp-" not in pd.name:
         return False
     formula, mpid = pd.name.split("_mp-", 1)
-    from vasp_sop.core.cache import calc_results_get
-    return calc_results_get(formula, mpid) is not None
+    from vasp_sop.core.cache import vasp_results_get
+    return vasp_results_get(formula, mpid) is not None
+
+
+def _crisp_active_dirs(*, skip: bool = False) -> set[str]:
+    """Query ``crisp`` for currently-running jobs and return their work dirs.
+
+    When *skip* is True (e.g. dry-run), short-circuit and return an empty set
+    without spawning the subprocess. This avoids a 30 s wait on `crisp jobs`
+    when no submission is actually happening.
+    """
+    if skip:
+        return set()
+    import subprocess as _sp, json as _json
+    try:
+        r = _sp.run(["crisp", "jobs"], capture_output=True, text=True, timeout=30)
+        raw = _json.loads(r.stdout)
+        jobs = raw.get("jobs", raw.get("data", {}).get("jobs", []))
+    except Exception:
+        return set()
+    alive = {"submit", "submitted", "running", "ready_fetch"}
+    return {j.get("local_dir", "") for j in jobs
+            if j.get("status") in alive and j.get("local_dir")}
 
 
 def _advance_one_system(s: dict, active: dict, *,
@@ -611,8 +653,7 @@ def _advance_one_system(s: dict, active: dict, *,
     from vasp_sop.defect import cpd as _cpd
     from vasp_sop.defect.builder import build_all as _build_defects
     from vasp_sop.defect.analysis import analyze as _analyze_defects
-    from vasp_sop.core.cache import calc_results_get as _crg
-    from vasp_sop.core.cache import cache_target_results as _ctr
+    from vasp_sop.core.cache import vasp_results_get as _crg, vasp_results_put
     _logger = logging.getLogger(__name__)
     _CPD = "cpd"; _UC = "unitcell"; _DF = "defect"
 
@@ -765,7 +806,7 @@ def _advance_one_system(s: dict, active: dict, *,
             f, m = s["formula"], s["mpid"]
             if f and m:
                 try:
-                    _ctr(f, m, _target_dir(s), cpd_root)
+                    vasp_results_put(f, m, _target_dir(s))
                 except Exception:
                     pass
         except Exception as exc:
@@ -773,6 +814,44 @@ def _advance_one_system(s: dict, active: dict, *,
             print(f"  ✗ {s['name']:<18} CPD post-processing FAILED")
         return
     if p == "UC_DF":
+        # ── Dry-run artifact-based preview ────────────────────────────
+        # The UC_DF branch normally submits VASP and (when converged) calls
+        # _analyze_defects for post-processing. In dry-run, no VASP will ever
+        # run, so the convergence gate never opens. We instead check whether
+        # the artifacts post-processing would consume are all present and
+        # log what *would* happen — without mutating anything. See issue #20.
+        if dry_run:
+            artifacts = {
+                "unitcell.yaml": uc_root / "unitcell.yaml",
+                "target_vertices.yaml": cpd_root / "target_vertices.yaml",
+                "standard_energies.yaml": cpd_root / "standard_energies.yaml",
+            }
+            missing = [name for name, p in artifacts.items() if not p.is_file()]
+            has_defect_contcar = False
+            if df_root.is_dir():
+                has_defect_contcar = any(
+                    child.is_dir() and (child / "CONTCAR").is_file()
+                    for child in df_root.iterdir()
+                )
+            if not has_defect_contcar:
+                missing.append("defect/CONTCAR")
+            done_summary = df_root / "defect_energy_summary.json"
+            if not missing and not done_summary.is_file():
+                print(
+                    f"  [dry-run] {s['name']:<18} would post-process "
+                    f"(artifacts present, no analysis run)"
+                )
+            elif not missing and done_summary.is_file():
+                print(
+                    f"  [dry-run] {s['name']:<18} already complete "
+                    f"(summary exists)"
+                )
+            else:
+                print(
+                    f"  [dry-run] {s['name']:<18} post-process blocked "
+                    f"(missing: {', '.join(missing)})"
+                )
+
         try:
             td = _target_dir(s)
             if td and not (uc_root / "band" / "INCAR").is_file():
@@ -884,26 +963,15 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
 
 
     # ── Query crisp for active jobs (prevent re-submit on restart) ──
-    def _crisp_active_dirs() -> set[str]:
-        import subprocess as _sp, json as _json
-        try:
-            r = _sp.run(["crisp", "jobs"], capture_output=True, text=True, timeout=30)
-            raw = _json.loads(r.stdout)
-            jobs = raw.get("jobs", raw.get("data", {}).get("jobs", []))
-        except Exception:
-            return set()
-        alive = {"submit", "submitted", "running", "ready_fetch"}
-        return {j.get("local_dir", "") for j in jobs
-                if j.get("status") in alive and j.get("local_dir")}
-
-    _crisp_active = _crisp_active_dirs()
+    # Skip the subprocess in dry-run (no submission, no need to query).
+    _crisp_active = _crisp_active_dirs(skip=dry_run)
     if _crisp_active:
         logger.info("Found %d active crisp tasks, will skip their directories", len(_crisp_active))
 
     def _is_active(path: Path) -> bool:
         return str(path.resolve()) in _crisp_active
 
-    from vasp_sop.core.cache import calc_results_put as _cache_put
+    from vasp_sop.core.cache import vasp_results_put as _cache_put
 
     def _cache_phase_results(wd: Path) -> None:
         """Cache completed VASP calculation (target or competing phase)."""

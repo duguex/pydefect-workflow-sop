@@ -64,7 +64,14 @@ def _build_supercell(defect_root: Path, uc_contcar: Path, config: PipelineConfig
 
 
 def _build_supercell_pydefect(defect_root: Path, uc_contcar: Path, config: PipelineConfig) -> None:
-    """Construct the supercell via pydefect CLI."""
+    """Construct the supercell via pydefect CLI.
+
+    Falls back to atom-count bounds (``--min_atoms``/``--max_atoms``).
+    Note: this fallback does NOT honor ``config.supercell_min_distance`` —
+    pydefect's CLI has no ``--min_distance`` flag. This is by design: the
+    ``doped`` happy path is the canonical way to satisfy a minimum
+    image-distance constraint. See issue #15.
+    """
     cmd = (
         f"pydefect s -p {uc_contcar} "
         f"--max_atoms {config.supercell_max_atoms} "
@@ -108,37 +115,16 @@ def _build_supercell_doped(defect_root: Path, uc_contcar: Path, config: Pipeline
     sc = uc * matrix
 
     # ── Build symmetry-based site groups ──────────────────────────────
+    # Delegate to vise.StructureSymmetrizer — it groups equivalent sites,
+    # sorts `equivalent_atoms` indices, and handles edge cases (centering,
+    # time-reversal, angle tolerance) that the prior hand-rolled loop did
+    # not. This resolves issues #19 (re-implementation) and #21 (sort order).
     from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
-    from vise.util.structure_symmetrizer import Site
+    from vise.util.structure_symmetrizer import StructureSymmetrizer
 
     sga = SpacegroupAnalyzer(sc, symprec=0.1)
     spg = sga.get_space_group_symbol()
-    ds = sga.get_symmetry_dataset()
-
-    # Track (element, wyckoff) -> assigned name so we group correctly
-    sites: dict[str, Site] = {}
-    site_keys: dict[tuple[str, str], str] = {}
-    group_counter: dict[str, int] = {}
-    for i in range(sc.num_sites):
-        el = str(sc[i].specie.symbol)
-        wyck = ds.wyckoffs[i]
-        eq = int(ds.equivalent_atoms[i])
-        site_sym = ds.site_symmetry_symbols[i]
-        key = (el, wyck)
-        if key not in site_keys:
-            n = group_counter.get(el, 0) + 1
-            group_counter[el] = n
-            name = f"{el}{n}"
-            site_keys[key] = name
-            sites[name] = Site(
-                element=el,
-                wyckoff_letter=wyck,
-                site_symmetry=site_sym,
-                equivalent_atoms=[eq],
-            )
-        else:
-            name = site_keys[key]
-            sites[name].equivalent_atoms.append(eq)
+    sites = StructureSymmetrizer(sc, symprec=0.1).sites
 
     # ── Build pydefect-compatible SupercellInfo ───────────────────────
     from pydefect.input_maker.supercell_info import SupercellInfo
