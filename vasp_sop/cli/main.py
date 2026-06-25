@@ -214,6 +214,7 @@ def main() -> None:
     _add_cpd_parser(subparsers)
     _add_unitcell_parser(subparsers)
     _add_defect_parser(subparsers)
+    _add_cache_parser(subparsers)
     _add_batch_parser(subparsers)
 
     args = parser.parse_args()
@@ -247,6 +248,8 @@ def main() -> None:
         _run_pipeline(config)
     elif args.command == "batch":
         _handle_batch(args)
+    elif args.command == "cache":
+        _handle_cache(args)
 
 
 def _add_defect_parser(subparsers) -> None:
@@ -442,6 +445,66 @@ _PRIORITY_MAP: dict[str, str] = {
 }
 
 
+def _add_cache_parser(subparsers) -> None:
+    """Add ``cache`` subcommand with actions."""
+    p = subparsers.add_parser("cache", help="Manage calculation caches")
+    sub = p.add_subparsers(dest="cache_action", required=True)
+
+    # status
+    sp = sub.add_parser("status", help="Show cache statistics")
+    sp.add_argument("--verbose", action="store_true", help="List all entries")
+
+    # verify
+    sub.add_parser("verify", help="Check DB vs filesystem consistency")
+
+
+def _handle_cache(args: argparse.Namespace) -> None:
+    from vasp_sop.core.cache import CALC_CACHE, _get_db
+
+    if args.cache_action == "status":
+        db = _get_db()
+
+        calc_count = db.execute("SELECT COUNT(*) FROM calc_results").fetchone()[0]
+        cpd_count = db.execute("SELECT COUNT(*) FROM cpd_results").fetchone()[0]
+        calc_with_contcar = db.execute(
+            "SELECT COUNT(*) FROM calc_results WHERE has_contcar=1"
+        ).fetchone()[0]
+
+        print(f"calc_results: {calc_count} entries ({calc_with_contcar} with CONTCAR)")
+        print(f"cpd_results:  {cpd_count} entries")
+
+        if CALC_CACHE.is_dir():
+            import shutil
+            du = shutil.disk_usage(str(CALC_CACHE))
+            print(f"disk usage:  {du.used // 1024} KB")
+
+        if args.verbose:
+            print()
+            for row in db.execute(
+                "SELECT formula, mpid, has_outcar, has_contcar, "
+                "file_count, datetime(cached_at, 'unixepoch') AS ts "
+                "FROM calc_results ORDER BY cached_at DESC"
+            ):
+                status = "O" if row["has_outcar"] else " "
+                status += "C" if row["has_contcar"] else " "
+                print(f"  {status}  {row['formula']}_mp-{row['mpid']:12s}"
+                      f"  {row['file_count']} files  {row['ts']}")
+
+    elif args.cache_action == "verify":
+        db = _get_db()
+        ok = 0
+        orphans = []
+        for row in db.execute("SELECT formula, mpid FROM calc_results"):
+            d = CALC_CACHE / f"{row['formula']}_mp-{row['mpid']}"
+            if not d.is_dir() or not (d / ".converged").is_file():
+                orphans.append(f"{row['formula']}_mp-{row['mpid']}")
+            else:
+                ok += 1
+        print(f"OK: {ok}")
+        if orphans:
+            print(f"DB orphans (DB has, files missing): {len(orphans)}")
+            for name in orphans[:10]:
+                print(f"  {name}")
 def _add_batch_parser(subparsers) -> None:
     """Add ``batch`` subcommand with actions."""
     p = subparsers.add_parser("batch", help="Multi-system batch operations")
