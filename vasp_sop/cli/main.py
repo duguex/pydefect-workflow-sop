@@ -459,14 +459,35 @@ def _add_cache_parser(subparsers) -> None:
     sp.add_argument("path", type=Path, help="Path to calculation directory")
     sp.add_argument("--formula", help="Chemical formula (auto-detected if omitted)")
     sp.add_argument("--task-id", help="Task identifier (auto-detected if omitted)")
+    sp.add_argument("--recursive", "-r", action="store_true",
+                    help="Recursively scan directory tree for OUTCARs")
 
 
 def _handle_cache(args: argparse.Namespace) -> None:
     from vasp_sop.core.cache import vasp_results_put, _get_db
     from pathlib import Path
-
     if args.cache_action == "put":
-        from vasp_sop.core.cache import vasp_results_put, _detect_cache_key, _get_db
+        from vasp_sop.core.cache import vasp_results_put
+
+        if args.recursive:
+            root = args.path.resolve()
+            if not root.is_dir():
+                print(f"Not a directory: {root}")
+                return
+            total = 0
+            skipped = 0
+            for outcar in sorted(root.rglob("OUTCAR")):
+                d = outcar.parent
+                text = outcar.read_text()
+                converged = "General timing and accounting" in text[-4096:]
+                vasp_results_put(d)
+                total += 1
+                if not converged:
+                    skipped += 1
+                    print(f"  ! {d} (not converged)")
+            print(f"Cached {total} directories ({skipped} unconverged) under {root}")
+            return
+
         path = args.path.resolve()
         outcar = path / "OUTCAR"
         if not outcar.is_file():
@@ -478,9 +499,6 @@ def _handle_cache(args: argparse.Namespace) -> None:
         status = "converged" if converged else "not converged"
         print(f"Cached {path} ({status})")
         return
-
-    if args.cache_action == "status":
-        db = _get_db()
         calc_count = db.execute("SELECT COUNT(*) FROM vasp_results").fetchone()[0]
         converged = db.execute(
             "SELECT COUNT(*) FROM vasp_results WHERE converged=1"
