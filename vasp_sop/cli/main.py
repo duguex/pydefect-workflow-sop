@@ -842,6 +842,19 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
     def _is_active(path: Path) -> bool:
         return str(path.resolve()) in _crisp_active
 
+    from vasp_sop.core.cache import calc_results_put as _cache_put
+
+    def _cache_phase_results(wd: Path) -> None:
+        """Cache completed VASP calculation (target or competing phase)."""
+        wd_name = wd.name
+        if "_mp-" not in wd_name:
+            return
+        try:
+            formula, mpid = wd_name.split("_mp-", 1)
+            _cache_put(formula, mpid, wd)
+        except Exception as exc:
+            logger.warning("Failed to cache %s: %s", wd_name, exc)
+
     # ── Helpers ─────────────────────────────────────────────────────
 
     def _target_dir(s: dict) -> Path | None:
@@ -920,7 +933,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
             wd = Path(wd_str)
             if check_converged(wd):
                 move_crisp_outputs(wd)
-                _cache_target_vasp(wd)
+                _cache_phase_results(wd)
                 del active[wd_str]
                 logger.info("Completed: %s", wd.name)
 
