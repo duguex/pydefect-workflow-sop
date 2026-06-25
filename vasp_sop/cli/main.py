@@ -636,7 +636,7 @@ def _batch_progress(root: Path) -> None:
         if not d.is_dir() or d.name.startswith("."):
             continue
         cpd_dirs = [p for p in (d / "cpd").iterdir() if p.is_dir()] if (d / "cpd").is_dir() else []
-        uc_dirs = [p for p in (d / "unitcell").iterdir() if p.is_dir()] if (d / "unitcell").is_dir() else []
+        uc_dirs = [p for p in (d / "unitcell").iterdir() if p.is_dir() and p.name != "structure_opt"] if (d / "unitcell").is_dir() else []
         df_dirs = [p for p in (d / "defect").iterdir() if p.is_dir()] if (d / "defect").is_dir() else []
 
         cpd_ok = sum(1 for p in cpd_dirs if has_outcar(p))
