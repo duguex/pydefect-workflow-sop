@@ -478,6 +478,10 @@ def _handle_cache(args: argparse.Namespace) -> None:
             skipped = 0
             for outcar in sorted(root.rglob("OUTCAR")):
                 d = outcar.parent
+                # Skip trivial subdirectories like output/ when the
+                # parent directory already has its own OUTCAR.
+                if d.name == "output" and (d.parent / "OUTCAR").is_file():
+                    continue
                 text = outcar.read_text()
                 converged = "General timing and accounting" in text[-4096:]
                 vasp_results_put(d)
