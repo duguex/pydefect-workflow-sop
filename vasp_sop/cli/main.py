@@ -458,9 +458,12 @@ def _add_cache_parser(subparsers) -> None:
     sp = sub.add_parser("put", help="Cache a VASP calculation directory")
     sp.add_argument("path", type=Path, help="Path to calculation directory")
     sp.add_argument("--formula", help="Chemical formula (auto-detected if omitted)")
-    sp.add_argument("--task-id", help="Task identifier (auto-detected if omitted)")
+    sp.add_argument("--task-name", help="Task name (auto-detected if omitted)")
     sp.add_argument("--recursive", "-r", action="store_true",
                     help="Recursively scan directory tree for OUTCARs")
+
+    # verify
+    sub.add_parser("verify", help="Check DB vs filesystem consistency")
 
 
 def _handle_cache(args: argparse.Namespace) -> None:
@@ -499,10 +502,12 @@ def _handle_cache(args: argparse.Namespace) -> None:
             return
         text = outcar.read_text()
         converged = "General timing and accounting" in text[-4096:]
-        vasp_results_put(path, formula=args.formula, task_id=getattr(args, "task_id", None))
+        vasp_results_put(path, formula=args.formula, task_name=getattr(args, "task_name", None))
         status = "converged" if converged else "not converged"
         print(f"Cached {path} ({status})")
         return
+    if args.cache_action == "status":
+        db = _get_db()
         calc_count = db.execute("SELECT COUNT(*) FROM vasp_results").fetchone()[0]
         converged = db.execute(
             "SELECT COUNT(*) FROM vasp_results WHERE converged=1"
@@ -516,7 +521,7 @@ def _handle_cache(args: argparse.Namespace) -> None:
         if args.verbose:
             print()
             for row in db.execute(
-                "SELECT formula, task_id, total_energy, converged, n_sites, "
+                "SELECT formula, content_hash, total_energy, converged, n_sites, "
                 "formula_pretty, space_group, source_dir, "
                 "datetime(cached_at, 'unixepoch') AS ts "
                 "FROM vasp_results ORDER BY cached_at DESC"
@@ -526,7 +531,7 @@ def _handle_cache(args: argparse.Namespace) -> None:
                 sg = row["space_group"] or "?"
                 ns = str(row["n_sites"] or "?")
                 src = row["source_dir"] or "?"
-                print(f"  {c} {row['formula']:12s} {row['task_id']:12s}"
+                print(f"  {c} {row['formula']:12s} {row['content_hash']:12s}"
                       f"  E={e}  {ns:>4s} sites  {sg:8s}"
                       f"  {row['ts']}  {src}")
 
@@ -534,11 +539,11 @@ def _handle_cache(args: argparse.Namespace) -> None:
         db = _get_db()
         ok = 0
         incomplete = []
-        for row in db.execute("SELECT formula, task_id, converged, outcar_json FROM vasp_results"):
+        for row in db.execute("SELECT formula, content_hash, converged, outcar_json FROM vasp_results"):
             if row["converged"] and row["outcar_json"] is not None:
                 ok += 1
             else:
-                incomplete.append(f"{row['formula']}/{row['task_id']}")
+                incomplete.append(f"{row['formula']}/{row['content_hash']}")
         print(f"OK: {ok}")
         if incomplete:
             print(f"Incomplete (missing outcar_json or not converged): {len(incomplete)}")
@@ -848,7 +853,7 @@ def _advance_one_system(s: dict, active: dict, *,
             f, m = s["formula"], s["mpid"]
             if f and m:
                 try:
-                    vasp_results_put(_target_dir(s), f, m)
+                    vasp_results_put(_target_dir(s))
                 except Exception:
                     pass
         except Exception as exc:
@@ -1105,7 +1110,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
             if not check_converged(pd):
                 continue
             formula, mpid = pd.name.split("_mp-", 1)
-            _cache_put(pd, formula, mpid)
+            _cache_put(pd, formula=formula, task_name=f"{formula}_mp-{mpid}")
     if backfilled:
         logger.info("Backfilled %d already-converged phase results into cache.", backfilled)
 

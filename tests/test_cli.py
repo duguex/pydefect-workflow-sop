@@ -420,12 +420,13 @@ class TestCachePut:
         from vasp_sop.cli.main import _handle_cache
         import argparse
         args = argparse.Namespace(cache_action="put", path=d,
-                                   formula=None, task_id=None, recursive=False)
+                                   formula=None, task_name=None, recursive=False)
         _handle_cache(args)
         captured = capsys.readouterr().out
         assert "converged" in captured
-        from vasp_sop.core.cache import vasp_results_get
-        assert vasp_results_get("GaN", "804") is not None
+        from vasp_sop.core.cache import vasp_results_get, _detect_calc_info
+        _, ch, _ = _detect_calc_info(d)
+        assert vasp_results_get("GaN", ch) is not None
 
 
     def test_cache_put_explicit_formula_and_task_id(self, tmp_path, monkeypatch, capsys):
@@ -442,10 +443,11 @@ class TestCachePut:
         from vasp_sop.cli.main import _handle_cache
         import argparse
         args = argparse.Namespace(cache_action="put", path=d,
-                                   formula="GaN", task_id="999", recursive=False)
+                                   formula="GaN", task_name="999", recursive=False)
         _handle_cache(args)
-        from vasp_sop.core.cache import vasp_results_get
-        assert vasp_results_get("GaN", "999") is not None
+        from vasp_sop.core.cache import vasp_results_get, _detect_calc_info
+        _, ch, _ = _detect_calc_info(d)
+        assert vasp_results_get("GaN", ch) is not None
 
     def test_cache_put_recursive(self, tmp_path, monkeypatch, capsys):
         """cache put -r finds and caches all OUTCARs."""
@@ -471,10 +473,12 @@ class TestCachePut:
         from vasp_sop.cli.main import _handle_cache
         import argparse
         args = argparse.Namespace(cache_action="put", path=tmp_path,
-                                   formula=None, task_id=None, recursive=True)
+                                   formula=None, task_name=None, recursive=True)
         _handle_cache(args)
         captured = capsys.readouterr().out
         assert "Cached 4 directories" in captured
-        from vasp_sop.core.cache import vasp_results_get
-        assert vasp_results_get("GaN", "804") is not None
-        assert vasp_results_get("Other", "101") is not None
+        from vasp_sop.core.cache import vasp_results_get, _detect_calc_info
+        _, ch1, _ = _detect_calc_info(tmp_path / "sys_A/cpd/GaN_mp-804")
+        _, ch2, _ = _detect_calc_info(tmp_path / "sys_A/cpd/Other_mp-101")
+        assert vasp_results_get("GaN", ch1) is not None
+        assert vasp_results_get("Other", ch2) is not None

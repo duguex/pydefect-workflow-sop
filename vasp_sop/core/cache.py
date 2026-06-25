@@ -58,7 +58,8 @@ def _init_db(db: sqlite3.Connection) -> None:
     db.executescript("""
         CREATE TABLE IF NOT EXISTS vasp_results (
             formula         TEXT NOT NULL,
-            task_id         TEXT NOT NULL,
+            content_hash    TEXT NOT NULL,
+            task_name       TEXT,
             cached_at       REAL NOT NULL,
 
             total_energy    REAL,
@@ -77,7 +78,7 @@ def _init_db(db: sqlite3.Connection) -> None:
             tags            TEXT,
             source_dir      TEXT,
 
-            PRIMARY KEY (formula, task_id)
+            PRIMARY KEY (formula, content_hash)
         );
     """)
 
@@ -124,6 +125,47 @@ def _incar_fingerprint(src_dir: Path) -> str:
         if v is not None:
             parts.append(f"{k}={v}")
     return "|".join(parts) if parts else "default"
+
+def _content_hash(src_dir: Path) -> str:
+    """Return a stable content hash for a VASP calculation directory.
+
+    Combines structure composition, KPOINTS grid, and INCAR fingerprint
+    into a compact, repeatable string.  Two directories with identical
+    inputs produce the same hash -> cache dedup across projects.
+    """
+    # Structure component
+    struct_tag = "unknown"
+    for cand in (src_dir / "CONTCAR", src_dir / "POSCAR"):
+        if cand.is_file():
+            try:
+                struct = Structure.from_file(str(cand))
+                comp = struct.composition
+                struct_tag = comp.formula.replace(" ", "")
+                break
+            except Exception:
+                continue
+
+    # KPOINTS component
+    kpoints_path = src_dir / "KPOINTS"
+    kpoints_tag = "nokpt"
+    if kpoints_path.is_file():
+        try:
+            kpts = Kpoints.from_file(str(kpoints_path))
+            style = kpts.style
+            grid = kpts.kpts[0] if kpts.kpts else (0, 0, 0)
+            if style == Kpoints.supported_modes.Gamma and max(grid) <= 1:
+                kpoints_tag = "gamma"
+            elif style == Kpoints.supported_modes.Line_mode:
+                kpoints_tag = "band-structure"
+            else:
+                kpoints_tag = "".join(str(k) for k in grid[:3])
+        except Exception:
+            pass
+
+    # INCAR component
+    incar_fp = _incar_fingerprint(src_dir)
+
+    return f"{struct_tag}_{kpoints_tag}_{incar_fp}"
 
 
 def _extract_tags(
@@ -233,41 +275,45 @@ def _extract_tags(
 
     return ",".join(tags) if tags else "default"
 
-def _detect_cache_key(src_dir: Path) -> tuple[str, str]:
-    """Auto-detect (formula, task_id) from a VASP output directory.
+def _detect_calc_info(src_dir: Path) -> tuple[str, str, str]:
+    """Auto-detect (formula, content_hash, task_name) from a VASP dir.
 
-    Strategy (first match wins):
-    1. If ``src_dir.name`` contains ``_mp-``, split on it: ``formula_mp-N``
-       → ``(formula, "N")``.
-    2. Otherwise try CONTCAR/POSCAR for the reduced formula, then use
-       ``src_dir.name`` as *task_id*.
-    3. Fall back to ``("unknown", src_dir.name)``.
+    Returns:
+        formula: reduced formula from POSCAR or "unknown"
+        content_hash: stable input fingerprint for dedup
+        task_name: human-readable name (dir name or ``formula_mp-mpid``)
     """
     name = src_dir.name
+    formula: str | None = None
     if "_mp-" in name:
         parts = name.split("_mp-", 1)
-        return parts[0], parts[1]
-    formula: str | None = None
-    for cand in (src_dir / "CONTCAR", src_dir / "POSCAR"):
-        if cand.is_file():
-            try:
-                struct = Structure.from_file(str(cand))
-                formula = struct.composition.reduced_formula
-                break
-            except Exception:
-                continue
-    return (formula or "unknown", name)
+        formula = parts[0]
+        task_name = name
+    else:
+        task_name = name
+        for cand in (src_dir / "CONTCAR", src_dir / "POSCAR"):
+            if cand.is_file():
+                try:
+                    struct = Structure.from_file(str(cand))
+                    formula = struct.composition.reduced_formula
+                    break
+                except Exception:
+                    continue
+    formula = formula or "unknown"
+    ch = _content_hash(src_dir)
+    return formula, ch, task_name
 
 
 def vasp_results_put(
     src_dir: Path,
     formula: str | None = None,
-    task_id: str | None = None,
+    content_hash: str | None = None,
+    task_name: str | None = None,
 ) -> None:
     """Parse VASP results from *src_dir* and store in SQLite.
 
-    When *formula* or *task_id* are omitted they are auto-detected from
-    the directory contents (see :func:`_detect_cache_key`).
+    When *formula*, *content_hash*, or *task_name* are omitted they are
+    auto-detected from the directory contents (see :func:`_detect_calc_info`).
 
     Uses regex for robust total_energy/converged extraction (works even with
     truncated OUTCAR), then tries pymatgen Outcar/Vasprun for full structured
@@ -280,15 +326,11 @@ def vasp_results_put(
     """
 
 
-    if formula is None or task_id is None:
-        f, tid = _detect_cache_key(src_dir)
+    if formula is None or content_hash is None or task_name is None:
+        f, ch, tn = _detect_calc_info(src_dir)
         formula = formula or f
-        task_id = task_id or tid
-        # Append INCAR fingerprint for non-MP directories (defect, unitcell)
-        # to distinguish the same structure with different calculation params.
-        # Competing phases (_mp-N) already have unique IDs via mpid.
-        if "_mp-" not in src_dir.name:
-            task_id = f"{task_id}_{ _incar_fingerprint(src_dir)}"
+        content_hash = content_hash or ch
+        task_name = task_name or tn
 
     outcar_path = src_dir / "OUTCAR"
     if not outcar_path.is_file():
@@ -387,13 +429,13 @@ def vasp_results_put(
     db = _get_db()
     db.execute(
         """INSERT OR REPLACE INTO vasp_results
-           (formula, task_id, cached_at,
+           (formula, content_hash, task_name, cached_at,
             total_energy, converged,
             outcar_json, vasprun_json,
             structure_json, incar_json, kpoints_json,
             n_sites, formula_pretty, space_group, tags, source_dir)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (formula, task_id, time.time(),
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (formula, content_hash, task_name, time.time(),
          total_energy, converged,
          outcar_json, vasprun_json,
          structure_json, incar_json, kpoints_json,
@@ -402,28 +444,37 @@ def vasp_results_put(
     )
     db.commit()
     logger.debug("Cached %s/%s: energy=%s  sites=%s  sg=%s",
-                 formula, task_id, total_energy or "?", n_sites or "?", space_group or "?")
+                 formula, task_name, total_energy or "?", n_sites or "?", space_group or "?")
 
 
-def vasp_results_get(formula: str, task_id: str) -> dict[str, Any] | None:
-    """Return full calc result dict from cache, or None if not cached."""
+def vasp_results_get(formula: str, key: str) -> dict[str, Any] | None:
+    """Return full calc result dict from cache, or None if not cached.
+
+    *key* is tried first as ``content_hash``, then as ``task_name``
+    for backward compatibility with old-style (formula, mpid) lookups.
+    """
     db = _get_db()
     row = db.execute(
-        "SELECT * FROM vasp_results WHERE formula=? AND task_id=? AND converged=1",
-        (formula, task_id),
+        "SELECT * FROM vasp_results WHERE formula=? AND content_hash=? AND converged=1",
+        (formula, key),
     ).fetchone()
+    if row is None:
+        row = db.execute(
+            "SELECT * FROM vasp_results WHERE formula=? AND task_name=? AND converged=1",
+            (formula, key),
+        ).fetchone()
     if row is None:
         return None
     return dict(row)
 
 
-def vasp_results_delete(formula: str, task_id: str) -> None:
-    """Remove cached entry."""
+def vasp_results_delete(formula: str, content_hash: str) -> None:
+    """Remove cached entry by formula + content_hash."""
     db = _get_db()
-    db.execute("DELETE FROM vasp_results WHERE formula=? AND task_id=?",
-               (formula, task_id))
+    db.execute("DELETE FROM vasp_results WHERE formula=? AND content_hash=?",
+               (formula, content_hash))
     db.commit()
-    logger.debug("Deleted cache for %s/%s", formula, task_id)
+    logger.debug("Deleted cache for %s/%s", formula, content_hash)
 
 
 

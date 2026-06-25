@@ -255,15 +255,16 @@ class TestCacheAutoDetect:
     def _isolate(self, tmp_path):
         _cache.override_cache_root(tmp_path / ".vasp_sop")
 
-    # ── _detect_cache_key ────────────────────────────────────────────
+    # ── _detect_calc_info ─────────────────────────────────────────────
 
     def test_detect_mp_naming(self, tmp_path: Path):
         """_mp- in dir name → (formula, mpid)."""
         d = tmp_path / "GaN_mp-804"
         d.mkdir()
-        f, tid = _cache._detect_cache_key(d)
+        f, ch, tn = _cache._detect_calc_info(d)
         assert f == "GaN"
-        assert tid == "804"
+        assert ch != ""
+        assert tn == "GaN_mp-804"
 
     def test_detect_no_mp_with_poscar(self, tmp_path: Path):
         """No _mp- but POSCAR present → formula from structure."""
@@ -273,17 +274,19 @@ class TestCacheAutoDetect:
             "NaCl\n1.0\n5.64 0 0\n0 5.64 0\n0 0 5.64\nNa Cl\n1 1\nDirect\n"
             "0 0 0\n0.5 0.5 0.5\n"
         )
-        f, tid = _cache._detect_cache_key(d)
+        f, ch, tn = _cache._detect_calc_info(d)
         assert f == "NaCl"
-        assert tid == "Va_Na_0"
+        assert ch != ""
+        assert tn == "Va_Na_0"
 
     def test_detect_no_mp_no_poscar(self, tmp_path: Path):
         """No _mp- and no POSCAR → formula unknown."""
         d = tmp_path / "some_dir"
         d.mkdir()
-        f, tid = _cache._detect_cache_key(d)
+        f, ch, tn = _cache._detect_calc_info(d)
         assert f == "unknown"
-        assert tid == "some_dir"
+        assert ch != ""
+        assert tn == "some_dir"
 
     # ── _incar_fingerprint ───────────────────────────────────────────
 
@@ -388,7 +391,8 @@ class TestCacheAutoDetect:
             "0 0 0\n0.333 0.667 0.5\n"
         )
         _cache.vasp_results_put(d)
-        r = _cache.vasp_results_get("GaN", "804")
+        f, ch, _ = _cache._detect_calc_info(d)
+        r = _cache.vasp_results_get(f, ch)
         assert r is not None
         assert r["total_energy"] == -12.0
         assert r["converged"] == 1
@@ -407,10 +411,8 @@ class TestCacheAutoDetect:
         )
         (d / "INCAR").write_text("ENCUT = 400\n")
         _cache.vasp_results_put(d)
-        # task_id should be dirname + fingerprint
-        from vasp_sop.core.cache import _incar_fingerprint
-        fp = _incar_fingerprint(d)
-        r = _cache.vasp_results_get("NaCl", f"Va_Na_0_{fp}")
+        f, ch, _ = _cache._detect_calc_info(d)
+        r = _cache.vasp_results_get(f, ch)
         assert r is not None
         assert r["total_energy"] == -5.0
 
@@ -427,7 +429,8 @@ class TestCacheAutoDetect:
             "0 0 0\n0.333 0.667 0.5\n"
         )
         _cache.vasp_results_put(d)
-        r = _cache.vasp_results_get("GaN", "804")
+        f, ch, _ = _cache._detect_calc_info(d)
+        r = _cache.vasp_results_get(f, ch)
         assert r is not None
         assert r["source_dir"] == str(d.resolve())
 
@@ -495,7 +498,8 @@ class TestCacheAutoDetect:
             "0 0 0\n0.333 0.667 0.5\n"
         )
         _cache.vasp_results_put(d, formula="AlN")
-        r = _cache.vasp_results_get("AlN", "804")
+        _, ch, _ = _cache._detect_calc_info(d)
+        r = _cache.vasp_results_get("AlN", ch)
         assert r is not None
         assert r["total_energy"] == -12.0
 
@@ -511,8 +515,9 @@ class TestCacheAutoDetect:
             "GaN\n1.0\n3.19 0 0\n0 3.19 0\n0 0 5.19\nGa N\n1 1\nDirect\n"
             "0 0 0\n0.333 0.667 0.5\n"
         )
-        _cache.vasp_results_put(d, task_id="custom_id")
-        r = _cache.vasp_results_get("GaN", "custom_id")
+        _cache.vasp_results_put(d, task_name="custom_id")
+        f, ch, tn = _cache._detect_calc_info(d)
+        r = _cache.vasp_results_get("GaN", ch)
         assert r is not None
 
 
