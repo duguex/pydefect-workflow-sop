@@ -333,6 +333,26 @@ class TestCacheAutoDetect:
         tags = _cache._extract_tags(kpoints=k)
         assert "444" in tags
 
+    def test_extract_tags_line_mode_kpoints(self):
+        """Line_mode KPOINTS → 'band-structure' tag."""
+        from pymatgen.io.vasp import Kpoints
+        k = Kpoints(kpts=[[0, 0, 0], [0.5, 0.5, 0.5]],
+                     style=Kpoints.supported_modes.Line_mode)
+        tags = _cache._extract_tags(kpoints=k)
+        assert "band-structure" in tags
+
+    def test_extract_tags_space_group(self):
+        """Space group from sga NOT included in simplified tags."""
+        from pymatgen.core import Lattice, Structure
+        from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
+        s = Structure(Lattice.cubic(5.43), ["Si"]*2, [[0, 0, 0], [0.25, 0.25, 0.25]])
+        sga = SpacegroupAnalyzer(s)
+        sg = sga.get_space_group_symbol()
+        tags = _cache._extract_tags(structure=s, sga=sga)
+        # Simplified tags use composition string, not space group
+        assert sg not in tags
+        assert "Si2" in tags
+
     def test_extract_tags_incar_gga_and_spin(self):
         """PBE + spin → tags contain PBE and spin."""
         from pymatgen.io.vasp import Incar

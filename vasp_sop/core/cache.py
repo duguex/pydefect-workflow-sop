@@ -149,12 +149,15 @@ def _extract_tags(
         tags.append(comp.formula.replace(" ", ""))
 
     # ── KPOINTS tags ─────────────────────────────────────────────────
-    # "gamma" for Gamma-only (single k-point), otherwise the grid string.
+    # "gamma" for Gamma-only (single k-point), grid string for regular
+    # mesh, "band-structure" for line-mode band paths.
     if kpoints is not None:
         style = kpoints.style
         kpts = kpoints.kpts[0] if kpoints.kpts else (0, 0, 0)
         if style == Kpoints.supported_modes.Gamma and max(kpts) <= 1:
             tags.append("gamma")
+        elif style == Kpoints.supported_modes.Line_mode:
+            tags.append("band-structure")
         else:
             tags.append("".join(str(k) for k in kpts[:3]))
 
