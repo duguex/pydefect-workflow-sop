@@ -27,20 +27,16 @@ def _calc_cache() -> Path:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Redirect all cache paths into tmp_path, away from ~/.vasp_sop."""
-    cr = tmp_path / ".vasp_sop"
-    monkeypatch.setattr("vasp_sop.core.cache.CACHE_ROOT", cr)
-    monkeypatch.setattr("vasp_sop.core.cache.MP_CACHE", cr / "mp_cache")
-    monkeypatch.setattr("vasp_sop.core.cache.POSCAR_CACHE",
-                        cr / "mp_cache" / "poscars")
-    monkeypatch.setattr("vasp_sop.core.cache.CALC_CACHE", cr / "calc_cache")
-    # Also patch references already bound in materials.mp
-    monkeypatch.setattr("vasp_sop.materials.mp.MP_CACHE", cr / "mp_cache")
-    monkeypatch.setattr("vasp_sop.materials.mp.POSCAR_CACHE",
-                        cr / "mp_cache" / "poscars")
-
-
+def _isolate_cache(tmp_path: Path) -> None:
+    """Redirect all cache paths into tmp_path."""
+    from vasp_sop.core.cache import override_cache_root
+    override_cache_root(tmp_path / ".vasp_sop")
+    # override_cache_root sets cache.MP_CACHE, but mp.py imported the old
+    # value at module load time via ``from cache import MP_CACHE``.
+    # Directly patch both modules so all code paths see the new path.
+    import vasp_sop.materials.mp as _mp_mod
+    _mp_mod.MP_CACHE = tmp_path / ".vasp_sop" / "mp_cache"
+    _mp_mod.POSCAR_CACHE = _mp_mod.MP_CACHE / "poscars"
 # ══════════════════════════════════════════════════════════════════════════
 #  Combined MP download cache  (mp_combo_*)
 # ══════════════════════════════════════════════════════════════════════════
@@ -178,14 +174,15 @@ class TestMpComboCache:
 class TestCalcResultsCache:
     """Tests for calc_results_get / calc_results_put."""
 
-    def test_calc_results_get_hit(self):
-        """Returns cache path when OUTCAR exists."""
-        d = _calc_cache() / "GaN_mp-804"
-        d.mkdir(parents=True)
-        (d / "OUTCAR").write_text("outcar data\n")
-
+    def test_calc_results_get_hit(self, tmp_path: Path):
+        """Returns cache path when OUTCAR exists (put then get)."""
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "OUTCAR").write_text("outcar data\n")
+        _cache.calc_results_put("GaN", "804", src)
         result = _cache.calc_results_get("GaN", "804")
-        assert result == d
+        assert result is not None
+        assert (result / "OUTCAR").is_file()
 
     def test_calc_results_get_miss_no_dir(self):
         """Returns None when directory does not exist."""
@@ -199,54 +196,55 @@ class TestCalcResultsCache:
         assert _cache.calc_results_get("GaN", "804") is None
 
     def test_calc_results_put_copies_files(self, tmp_path: Path):
-        """calc_results_put copies expected files from src_dir."""
+        """calc_results_put copies CONTCAR and calc_results.json; NOT OUTCAR."""
         src = tmp_path / "src"
         src.mkdir()
-        for fname in ("OUTCAR", "CONTCAR", "vasprun.xml"):
+        for fname in ("OUTCAR", "CONTCAR", "vasprun.xml", "calc_results.json"):
             (src / fname).write_text(f"content {fname}\n")
 
         _cache.calc_results_put("GaN", "804", src)
 
         d = _calc_cache() / "GaN_mp-804"
         assert d.is_dir()
-        for fname in ("OUTCAR", "CONTCAR", "vasprun.xml"):
-            assert (d / fname).read_text() == f"content {fname}\n"
+        # CONTCAR and calc_results.json are cached
+        assert (d / "CONTCAR").read_text() == "content CONTCAR\n"
+        assert (d / "calc_results.json").read_text() == "content calc_results.json\n"
+        # OUTCAR and vasprun.xml are NOT cached
+        assert not (d / "OUTCAR").exists()
+        assert not (d / "vasprun.xml").exists()
+        # .converged stamp exists
+        assert (d / ".converged").is_file()
 
     def test_calc_results_put_missing_src_files(self, tmp_path: Path):
-        """Only existing source files are copied; missing ones are skipped."""
+        """Only existing source files are copied; missing ones skipped."""
         src = tmp_path / "src"
         src.mkdir()
-        (src / "OUTCAR").write_text("only outcar\n")
+        (src / "CONTCAR").write_text("contcar\n")
 
         _cache.calc_results_put("GaN", "804", src)
 
         d = _calc_cache() / "GaN_mp-804"
-        assert (d / "OUTCAR").read_text() == "only outcar\n"
-        assert not (d / "CONTCAR").exists()
-        assert not (d / "vasprun.xml").exists()
+        assert (d / "CONTCAR").read_text() == "contcar\n"
         assert not (d / "calc_results.json").exists()
+        assert (d / ".converged").is_file()
 
     def test_calc_results_put_with_output_subdir(self, tmp_path: Path):
-        """output/ subdir files are copied; when both exist, output/ wins."""
+        """output/ subdir files take priority."""
         src = tmp_path / "src"
         src.mkdir()
-        # Top-level OUTCAR
-        (src / "OUTCAR").write_text("top-level outcar\n")
-        # output/ subdir with both files
+        (src / "CONTCAR").write_text("top-level contcar\n")
         output = src / "output"
         output.mkdir()
-        (output / "OUTCAR").write_text("output outcar\n")
         (output / "CONTCAR").write_text("output contcar\n")
 
         _cache.calc_results_put("GaN", "804", src)
 
         d = _calc_cache() / "GaN_mp-804"
-        # output/ version overwrites top-level
-        assert (d / "OUTCAR").read_text() == "output outcar\n"
         assert (d / "CONTCAR").read_text() == "output contcar\n"
+        assert (d / ".converged").is_file()
 
     def test_calc_results_put_empty_dir(self, tmp_path: Path):
-        """An empty src_dir produces an empty cache dir (no error)."""
+        """Empty src_dir still produces .converged stamp."""
         src = tmp_path / "empty"
         src.mkdir()
 
@@ -254,8 +252,8 @@ class TestCalcResultsCache:
 
         d = _calc_cache() / "GaN_mp-804"
         assert d.is_dir()
-        # Nothing copied into it
-        assert list(d.iterdir()) == []
+        # Only .converged is created
+        assert list(d.iterdir()) == [d / ".converged"]
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -266,14 +264,15 @@ class TestCalcResultsCache:
 class TestCalcCpdCache:
     """Tests for calc_cpd_get / calc_cpd_put."""
 
-    def test_cpd_get_hit(self):
-        """Returns cache path when target_vertices.yaml exists."""
-        d = _calc_cache() / "GaN_mp-804_cpd"
-        d.mkdir(parents=True)
-        (d / "target_vertices.yaml").write_text("tv: data\n")
-
+    def test_cpd_get_hit(self, tmp_path: Path):
+        """Returns cache path when target_vertices exists (put then get)."""
+        src = tmp_path / "cpd_src"
+        src.mkdir()
+        (src / "target_vertices.yaml").write_text("tv: data\n")
+        _cache.calc_cpd_put("GaN", "804", src)
         result = _cache.calc_cpd_get("GaN", "804")
-        assert result == d
+        assert result is not None
+        assert (result / "target_vertices.yaml").is_file()
 
     def test_cpd_get_miss_no_dir(self):
         """Returns None when directory does not exist."""
@@ -329,6 +328,7 @@ class TestCacheTargetResults:
         target_dir = tmp_path / "target"
         target_dir.mkdir()
         (target_dir / "OUTCAR").write_text("outcar data\n")
+        (target_dir / "CONTCAR").write_text("contcar data\n")
 
         cpd_root = tmp_path / "cpd"
         cpd_root.mkdir()
@@ -338,7 +338,11 @@ class TestCacheTargetResults:
 
         calc_d = _calc_cache() / "GaN_mp-804"
         cpd_d = _calc_cache() / "GaN_mp-804_cpd"
-        assert (calc_d / "OUTCAR").read_text() == "outcar data\n"
+        # OUTCAR is NOT cached; CONTCAR and .converged are
+        assert (calc_d / "CONTCAR").read_text() == "contcar data\n"
+        assert (calc_d / ".converged").is_file()
+        assert not (calc_d / "OUTCAR").exists()
+        # CPD results unchanged
         assert (cpd_d / "target_vertices.yaml").read_text() == "tv: data\n"
 
 

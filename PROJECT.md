@@ -2,7 +2,7 @@
 
 ---
 
-## 0. 设计哲学
+## 0. 设计哲学 / 操作规范
 
 0. **最小工作量, Be wise**
 1. **避免重复造轮子**
@@ -10,8 +10,6 @@
 3. **规模化测试前进行最小验证**
 4. **确定性程序优于 LLM agent 自由发挥**
 5. **慎防 plan 没有细节**
-
----
 
 ## 1. 项目目标
 
@@ -34,36 +32,14 @@
 6. ASE — 通用材料计算
 7. Materials Project — 材料数据库
 8. phonopy — 声子性质
-9. crisp — MCP 计算资源管理
+9. **crisp** — 计算资源管理。所有作业操作必须通过 `crisp` CLI（`crisp submit / cancel -n TASK_NAME / jobs`），不得直接 `scancel`/`sbatch`。Agent 操作前需加载 skill://crisp。
 10. VASP — DFT 程序
-
----
+11. SQLite — 计算结果缓存后端。`~/.vasp_sop/cache.db` + `calc_cache/`。只缓存 CONTCAR + calc_results.json（~10KB），不缓存完整 OUTCAR（~100MB）。
 
 ## 3. 点缺陷计算业务逻辑
 
 ### 3.1 物理目标
-
-对半导体/绝缘体中每个点缺陷（空位、替代、填隙）在不同电荷态下，计算**形成能**和**转变能级**，判断哪些缺陷主导载流子浓度和补偿。
-
 ### 3.2 形成能公式
-
-```
-E_f[D^q] = E_D[defect^q] - E_D[perfect]
-           - Σ Δn_i μ_i
-           + q (E_VBM + ε_F)
-           + corrections
-```
-
-| 项 | 来源 |
-|---|---|
-| E_D(perfect) | 完美超胞 VASP（→ 自洽总能） |
-| E_D(defect^q) | 缺陷超胞 VASP（→ 自洽总能） |
-| μ_i（化学势） | CPD 阶段（→ target_vertices.yaml） |
-| E_VBM（价带顶） | Unitcell band（→ unitcell.yaml） |
-| ε_F（费米能级） | 横轴变量 |
-| corrections | eFNV 后处理（镜像电荷修正） |
-
----
 
 ### 3.3 三个阶段
 
@@ -112,15 +88,12 @@ Defect → 缺陷计算 → defect_energy_summary.json
 **输入**：CONTCAR（结构优化后）、unitcell.yaml、target_vertices.yaml、standard_energies.yaml
 
 **本地步骤（秒级）**：
-1. `pydefect s` 构建超胞（需 CONTCAR）
+1. 构建超胞：`plan.yaml` 中 `supercell.tool` 控制超胞工具
+   - `doped`（默认）：`get_ideal_supercell_matrix(min_image_distance=10Å)` → 50-150 原子
+   - `pydefect`：`pydefect s --min_atoms 200 --max_atoms 600` → 200-600 原子
 2. `pydefect ds` 枚举缺陷 → defect_in.yaml
-3. `pydefect_vasp de` 生成缺陷结构目录
+3. `pydefect_vasp de` 生成缺陷结构目录（含 perfect 和所有电荷态）
 4. （若 interstitials）`pydefect_util ai` 从 DOS extrema 确定填隙位（需 DOS 结果）
-
-**VASP 计算**：
-5. perfect 超胞（需 CONTCAR）
-6. 各缺陷电荷态（需缺陷结构目录，**不需要等 perfect**）
-7. （若 interstitials）填隙缺陷 VASP（需 DOS 完成后确定填隙位）
 
 **后处理**：
 8. `pydefect_vasp cr` → calc_results.json
@@ -194,8 +167,23 @@ Wave 3:    后处理 (本地)
 
 ---
 
-## 4. TODO
+## 4. CLI 参考
 
-1. 整理资源、文档，理清逻辑
-2. 不同计算sop 输入生成 输出检查
-3. 不同计算如何对接 如何编排 如何自动化
+### 4.1 batch run
+
+```bash
+cd /path/to/project_root
+
+# Dry-run: build defect structures and generate VASP inputs, no submission
+vasp-sop batch run . --dry-run
+
+# Real run: build + submit VASP (CPD → unitcell → defect)
+vasp-sop batch run .
+
+# Dry-run with custom poll interval (default 60s)
+vasp-sop batch run . --poll 30 --dry-run
+```
+
+`--dry-run` 会并行（14 进程）处理所有体系，输出本应提交的 VASP 作业列表后退出。
+
+## 5. TODO

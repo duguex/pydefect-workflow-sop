@@ -52,7 +52,7 @@ DEFAULT_PLAN: dict = {
         "hubbard_u": False,
         "pp": [],
     },
-    "supercell": {"min_atoms": 200, "max_atoms": 600},
+    "supercell": {"tool": "doped", "min_distance": 10.0},
     "defects": {
         "interstitials": False,
         "complex_n": 1,
@@ -88,6 +88,8 @@ class PipelineConfig:
     hubbard_u: bool = False
     potcar_overrides: list[str] = field(default_factory=list)
 
+    supercell_tool: str = "doped"
+    supercell_min_distance: float = 10.0
     supercell_min_atoms: int = 200
     supercell_max_atoms: int = 600
 
@@ -107,6 +109,10 @@ class PipelineConfig:
             raise ValueError("formula must be non-empty, e.g. 'GaN'.")
         if self.supercell_min_atoms < 1:
             raise ValueError("supercell_min_atoms must be >= 1.")
+        if self.supercell_tool not in ("pydefect", "doped"):
+            raise ValueError(
+                f"supercell_tool must be 'pydefect' or 'doped', got {self.supercell_tool!r}."
+            )
         if self.supercell_max_atoms < self.supercell_min_atoms:
             raise ValueError(
                 f"supercell_max_atoms ({self.supercell_max_atoms}) must be >= "
@@ -157,6 +163,8 @@ class PipelineConfig:
             potcar_overrides=params.get("pp", []),
             supercell_min_atoms=sc.get("min_atoms", 200),
             supercell_max_atoms=sc.get("max_atoms", 600),
+            supercell_tool=sc.get("tool", "doped"),
+            supercell_min_distance=sc.get("min_distance", 10.0),
             interstitial=d.get("interstitials", False),
             interstitial_indices=list(d.get("interstitial_indices", [])),
             complex_defect_order=d.get("complex_n", 1),
@@ -183,10 +191,11 @@ class PipelineConfig:
                 "hubbard_u": self.hubbard_u,
                 "pp": list(self.potcar_overrides),
             },
-            "supercell": {
-                "min_atoms": self.supercell_min_atoms,
-                "max_atoms": self.supercell_max_atoms,
-            },
+            "supercell": {"tool": self.supercell_tool}
+            | ({"min_atoms": self.supercell_min_atoms, "max_atoms": self.supercell_max_atoms}
+               if self.supercell_tool == "pydefect" else {})
+            | ({"min_distance": self.supercell_min_distance}
+               if self.supercell_tool == "doped" else {}),
             "defects": {
                 "interstitials": self.interstitial,
                 "interstitial_indices": list(self.interstitial_indices),
