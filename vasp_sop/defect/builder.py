@@ -47,7 +47,7 @@ def build_all(
 
 
 def _build_supercell(defect_root: Path, uc_contcar: Path, config: PipelineConfig) -> None:
-    """Construct the supercell via pydefect."""
+    """Construct the supercell — dispatches to pydefect or doped based on config."""
     sc_info = defect_root / "supercell_info.json"
     if sc_info.is_file():
         logger.info("Supercell info already exists, skipping supercell construction.")
@@ -56,12 +56,102 @@ def _build_supercell(defect_root: Path, uc_contcar: Path, config: PipelineConfig
     import time as _time
     # Ensure NFS visibility before subprocess.run(cwd=...)
     _time.sleep(0.5)
+
+    if config.supercell_tool == "doped":
+        _build_supercell_doped(defect_root, uc_contcar, config)
+    else:
+        _build_supercell_pydefect(defect_root, uc_contcar, config)
+
+
+def _build_supercell_pydefect(defect_root: Path, uc_contcar: Path, config: PipelineConfig) -> None:
+    """Construct the supercell via pydefect CLI."""
     cmd = (
         f"pydefect s -p {uc_contcar} "
         f"--max_atoms {config.supercell_max_atoms} "
         f"--min_atoms {config.supercell_min_atoms}"
     )
     run_local(cmd, cwd=defect_root, timeout=600)
+
+
+def _build_supercell_doped(defect_root: Path, uc_contcar: Path, config: PipelineConfig) -> None:
+    """Construct the supercell via doped, bypassing pydefect's atom-count floor.
+
+    Uses ``doped.generation.get_ideal_supercell_matrix`` to find a small matrix,
+    builds the supercell, then writes a pydefect-compatible ``supercell_info.json``.
+    """
+    try:
+        from doped.generation import get_ideal_supercell_matrix
+    except ImportError:
+        logger.warning("doped not available, falling back to pydefect supercell.")
+        _build_supercell_pydefect(defect_root, uc_contcar, config)
+        return
+
+    from pymatgen.core.structure import Structure
+
+    import numpy as np
+
+    uc = Structure.from_file(str(uc_contcar))
+    min_image_distance = config.supercell_min_distance
+    matrix = get_ideal_supercell_matrix(
+        uc, min_image_distance=min_image_distance,
+    )
+
+    if matrix is None:
+        logger.warning(
+            "get_ideal_supercell_matrix returned None for %s, "
+            "falling back to pydefect supercell.",
+            uc_contcar,
+        )
+        _build_supercell_pydefect(defect_root, uc_contcar, config)
+        return
+
+    sc = uc * matrix
+
+    # ── Build symmetry-based site groups ──────────────────────────────
+    from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
+    from vise.util.structure_symmetrizer import Site
+
+    sga = SpacegroupAnalyzer(sc, symprec=0.1)
+    spg = sga.get_space_group_symbol()
+    ds = sga.get_symmetry_dataset()
+
+    # Track (element, wyckoff) -> assigned name so we group correctly
+    sites: dict[str, Site] = {}
+    site_keys: dict[tuple[str, str], str] = {}
+    group_counter: dict[str, int] = {}
+    for i in range(sc.num_sites):
+        el = str(sc[i].specie.symbol)
+        wyck = ds.wyckoffs[i]
+        eq = int(ds.equivalent_atoms[i])
+        site_sym = ds.site_symmetry_symbols[i]
+        key = (el, wyck)
+        if key not in site_keys:
+            n = group_counter.get(el, 0) + 1
+            group_counter[el] = n
+            name = f"{el}{n}"
+            site_keys[key] = name
+            sites[name] = Site(
+                element=el,
+                wyckoff_letter=wyck,
+                site_symmetry=site_sym,
+                equivalent_atoms=[eq],
+            )
+        else:
+            name = site_keys[key]
+            sites[name].equivalent_atoms.append(eq)
+
+    # ── Build pydefect-compatible SupercellInfo ───────────────────────
+    from pydefect.input_maker.supercell_info import SupercellInfo
+
+    sc_info = SupercellInfo(
+        structure=sc,
+        space_group=spg,
+        transformation_matrix=matrix.tolist(),
+        sites=sites,
+        interstitials=[],
+        unitcell_structure=uc,
+    )
+    sc_info.to_json_file(str(defect_root / "supercell_info.json"))
 
 
 def _handle_interstitials(defect_root: Path, config: PipelineConfig) -> None:
@@ -136,15 +226,24 @@ def _generate_structures(defect_root: Path) -> None:
 
 
 def _generate_vasp_inputs(defect_root: Path, config: PipelineConfig) -> None:
-    """Generate VASP inputs for every defect directory (including perfect)."""
-    for child in defect_root.iterdir():
-        if not child.is_dir():
-            continue
-        prepare_inputs(
-            child, config,
-            kspacing=0.1, task_type="defect",
-            extra_uis="SIGMA 0.02 LORBIT 11",
-        )
+    """Generate VASP inputs for every defect directory (including perfect), in parallel."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from vasp_sop.vasp.io import prepare_inputs
+
+    dirs = [child for child in defect_root.iterdir() if child.is_dir()]
+    if not dirs:
+        return
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        fut_map = {pool.submit(prepare_inputs, d, config,
+                                kspacing=0.1, task_type="defect",
+                                extra_uis="SIGMA 0.02 LORBIT 11"): d
+                   for d in dirs}
+        for fut in as_completed(fut_map):
+            try:
+                fut.result()
+            except Exception:
+                pass
 
 
 def construct_complex_defects(defect_root: Path, config: PipelineConfig) -> None:
