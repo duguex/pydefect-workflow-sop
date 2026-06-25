@@ -97,6 +97,32 @@ def _safe_outcar_dict(outcar: Outcar) -> dict[str, Any]:
 
 
 
+
+_INCAR_FINGERPRINT_KEYS = ("ENCUT", "PREC", "ISMEAR", "SIGMA", "ISIF",
+                           "LDAU", "LDAUTYPE", "LDAUU", "LDAUJ", "LDAUL",
+                           "GGA", "IVDW", "LASPH", "METAGGA")
+
+
+def _incar_fingerprint(src_dir: Path) -> str:
+    """Return a compact parameter fingerprint for the INCAR in *src_dir*.
+
+    Reads key INCAR tags that affect VASP results and produces a short
+    string.  Returns ``"default"`` when no INCAR is present.
+    """
+    incar_path = src_dir / "INCAR"
+    if not incar_path.is_file():
+        return "default"
+    try:
+        incar = Incar.from_file(str(incar_path))
+    except Exception:
+        return "default"
+    parts = []
+    for k in _INCAR_FINGERPRINT_KEYS:
+        v = incar.get(k)
+        if v is not None:
+            parts.append(f"{k}={v}")
+    return "|".join(parts) if parts else "default"
+
 def _detect_cache_key(src_dir: Path) -> tuple[str, str]:
     """Auto-detect (formula, task_id) from a VASP output directory.
 
@@ -142,10 +168,17 @@ def vasp_results_put(
     - Zero-field splitting tensor (spin-spin contribution, custom table parse)
     These extended fields are merged into ``outcar.data`` before serialization.
     """
+
+
     if formula is None or task_id is None:
         f, tid = _detect_cache_key(src_dir)
         formula = formula or f
         task_id = task_id or tid
+        # Append INCAR fingerprint for non-MP directories (defect, unitcell)
+        # to distinguish the same structure with different calculation params.
+        # Competing phases (_mp-N) already have unique IDs via mpid.
+        if "_mp-" not in src_dir.name:
+            task_id = f"{task_id}_{ _incar_fingerprint(src_dir)}"
 
     outcar_path = src_dir / "OUTCAR"
     if not outcar_path.is_file():
