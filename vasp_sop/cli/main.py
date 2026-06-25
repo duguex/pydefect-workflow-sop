@@ -806,7 +806,7 @@ def _advance_one_system(s: dict, active: dict, *,
             f, m = s["formula"], s["mpid"]
             if f and m:
                 try:
-                    vasp_results_put(f, m, _target_dir(s))
+                    vasp_results_put(_target_dir(s), f, m)
                 except Exception:
                     pass
         except Exception as exc:
@@ -974,15 +974,11 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
     from vasp_sop.core.cache import vasp_results_put as _cache_put
 
     def _cache_phase_results(wd: Path) -> None:
-        """Cache completed VASP calculation (target or competing phase)."""
-        wd_name = wd.name
-        if "_mp-" not in wd_name:
-            return
+        """Cache completed VASP calculation."""
         try:
-            formula, mpid = wd_name.split("_mp-", 1)
-            _cache_put(formula, mpid, wd)
+            _cache_put(wd)
         except Exception as exc:
-            logger.warning("Failed to cache %s: %s", wd_name, exc)
+            logger.warning("Failed to cache %s: %s", wd.name, exc)
 
     # ── Helpers ─────────────────────────────────────────────────────
 

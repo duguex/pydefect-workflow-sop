@@ -162,7 +162,7 @@ class TestCachePutGet:
         (src / "CONTCAR").write_text(
             "H\n1.0\n10 0 0\n0 10 0\n0 0 10\nH\n1\nDirect\n0 0 0\n"
         )
-        vasp_results_put("TestMe", "42", src)
+        vasp_results_put(src, "TestMe", "42")
         cached = vasp_results_get("TestMe", "42")
         assert cached is not None
         assert cached["total_energy"] == -10.0
@@ -180,14 +180,14 @@ class TestCachePutGet:
             " free  energy    TOTEN  =    -10.0 eV\n"
             " General timing and accounting\n"
         )
-        vasp_results_put("First", "1", src1)
+        vasp_results_put(src1, "First", "1")
         src2 = tmp_path / "src2"
         src2.mkdir()
         (src2 / "OUTCAR").write_text(
             " free  energy    TOTEN  =    -10.0 eV\n"
             " General timing and accounting\n"
         )
-        vasp_results_put("Second", "2", src2)
+        vasp_results_put(src2, "Second", "2")
         assert vasp_results_get("First", "1") is not None
         assert vasp_results_get("Second", "2") is not None
 

@@ -190,7 +190,7 @@ class TestVaspResultsCache:
         (src / "CONTCAR").write_text(
             "H\n1.0\n10 0 0\n0 10 0\n0 0 10\nH\n1\nDirect\n0 0 0\n"
         )
-        _cache.vasp_results_put("GaN", "804", src)
+        _cache.vasp_results_put(src, "GaN", "804")
         result = _cache.vasp_results_get("GaN", "804")
         assert result is not None
         assert result["total_energy"] == -9.18
@@ -205,7 +205,7 @@ class TestVaspResultsCache:
         """Returns None when no OUTCAR in src_dir (nothing cached)."""
         src = tmp_path / "empty"
         src.mkdir()
-        _cache.vasp_results_put("GaN", "804", src)
+        _cache.vasp_results_put(src, "GaN", "804")
         assert _cache.vasp_results_get("GaN", "804") is None
 
     def test_vasp_results_put_stores_parsed_data(self, tmp_path: Path):
@@ -217,7 +217,7 @@ class TestVaspResultsCache:
         (src / "CONTCAR").write_text(
             "H\n1.0\n10 0 0\n0 10 0\n0 0 10\nH\n1\nDirect\n0 0 0\n"
         )
-        _cache.vasp_results_put("GaN", "804", src)
+        _cache.vasp_results_put(src, "GaN", "804")
 
         result = _cache.vasp_results_get("GaN", "804")
         assert result is not None
@@ -231,7 +231,7 @@ class TestVaspResultsCache:
         src = tmp_path / "src"
         src.mkdir()
         self._write_minimal_outcar(src)
-        _cache.vasp_results_put("GaN", "804", src)
+        _cache.vasp_results_put(src, "GaN", "804")
 
         result = _cache.vasp_results_get("GaN", "804")
         assert result is not None
@@ -244,7 +244,7 @@ class TestVaspResultsCache:
         """No OUTCAR produces no cache entry."""
         src = tmp_path / "empty"
         src.mkdir()
-        _cache.vasp_results_put("GaN", "804", src)
+        _cache.vasp_results_put(src, "GaN", "804")
         assert _cache.vasp_results_get("GaN", "804") is None
 
 
