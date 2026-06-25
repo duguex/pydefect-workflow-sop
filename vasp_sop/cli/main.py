@@ -466,8 +466,17 @@ def _handle_cache(args: argparse.Namespace) -> None:
     from pathlib import Path
 
     if args.cache_action == "put":
-        vasp_results_put(args.path.resolve(), formula=args.formula, task_id=getattr(args, "task_id", None))
-        print(f"Cached {args.path.resolve()}")
+        from vasp_sop.core.cache import vasp_results_put, _detect_cache_key, _get_db
+        path = args.path.resolve()
+        outcar = path / "OUTCAR"
+        if not outcar.is_file():
+            print(f"No OUTCAR in {path}, skipping.")
+            return
+        text = outcar.read_text()
+        converged = "General timing and accounting" in text[-4096:]
+        vasp_results_put(path, formula=args.formula, task_id=getattr(args, "task_id", None))
+        status = "converged" if converged else "not converged"
+        print(f"Cached {path} ({status})")
         return
 
     if args.cache_action == "status":
