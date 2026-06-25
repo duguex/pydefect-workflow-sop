@@ -990,6 +990,21 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
     if dry_run:
         print("Dry-run mode: will build defect structures and generate inputs, NO VASP submission.\n")
 
+    # ── Backfill cache: cache already-converged phase results ──────
+    backfilled = 0
+    for s in sys_list:
+        cpd_root = s["root"] / _CPD
+        for pd in cpd_root.iterdir():
+            if not pd.is_dir() or "_mp-" not in pd.name:
+                continue
+            if not check_converged(pd):
+                continue
+            formula, mpid = pd.name.split("_mp-", 1)
+            _cache_put(formula, mpid, pd)
+            backfilled += 1
+    if backfilled:
+        logger.info("Backfilled %d already-converged phase results into cache.", backfilled)
+
     while True:
         # 1. Poll active jobs
         for wd_str in list(active):
