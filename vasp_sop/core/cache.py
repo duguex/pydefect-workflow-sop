@@ -125,16 +125,68 @@ def _incar_fingerprint(src_dir: Path) -> str:
     return "|".join(parts) if parts else "default"
 
 
-def _extract_tags(incar: Incar | None) -> str:
+def _extract_tags(
+    incar: Incar | None = None,
+    kpoints: Kpoints | None = None,
+    structure: Structure | None = None,
+    sga: SpacegroupAnalyzer | None = None,
+) -> str:
     """Return comma-separated semantic tags for a VASP calculation.
 
-    Maps INCAR parameters to human-readable categories (functional type,
-    method, physics, properties) based on VASP INCAR conventions.
-    Returns empty string when *incar* is None.
+    Combines information from INCAR (functional, method, physics),
+    KPOINTS (k-mesh scheme, density), and POSCAR/CONTCAR (structure
+    type, space group, cell size).
+
+    Returns empty string when no info is available.
     """
-    if incar is None:
-        return ""
     tags: list[str] = []
+
+    # ── Structure tags ───────────────────────────────────────────────
+    if sga is not None:
+        sg = sga.get_space_group_symbol()
+        if sg:
+            tags.append(sg)
+    if structure is not None:
+        nelem = len(structure.composition)
+        if nelem == 1:
+            tags.append("element")
+        elif nelem == 2:
+            tags.append("binary")
+        elif nelem == 3:
+            tags.append("ternary")
+        elif nelem >= 4:
+            tags.append("quaternary+")
+        n = structure.num_sites
+        if n > 100:
+            tags.append("large-cell")
+        elif n > 30:
+            tags.append("medium-cell")
+        else:
+            tags.append("small-cell")
+
+    # ── KPOINTS tags ─────────────────────────────────────────────────
+    if kpoints is not None:
+        style = kpoints.style
+        if style == Kpoints.supported_modes.Gamma:
+            tags.append("gamma-centered")
+        elif style == Kpoints.supported_modes.Monkhorst:
+            tags.append("monkhorst-pack")
+        elif style == Kpoints.supported_modes.Line_mode:
+            tags.append("band-structure")
+        elif style == Kpoints.supported_modes.Cartesian:
+            tags.append("cartesian-kmesh")
+        elif style == Kpoints.supported_modes.Reciprocal:
+            tags.append("reciprocal-kmesh")
+        kpts = kpoints.kpts[0] if kpoints.kpts else (0, 0, 0)
+        max_k = max(kpts)
+        if max_k > 6:
+            tags.append("dense-kmesh")
+        elif max_k <= 3:
+            tags.append("coarse-kmesh")
+
+    # ── INCAR tags ───────────────────────────────────────────────────
+    if incar is None:
+        return ",".join(tags) if tags else ""
 
     gga = (incar.get("GGA") or "").strip().upper()
     metagga = (incar.get("METAGGA") or "").strip().upper()
@@ -150,18 +202,28 @@ def _extract_tags(incar: Incar | None) -> str:
     loptics = bool(incar.get("LOPTICS"))
     lcalcpol = bool(incar.get("LCALCPOL"))
     ldipol = bool(incar.get("LDIPOL"))
+    encut = incar.get("ENCUT", 0)
 
     # Functional
     if gga == "PE":
         tags.append("PBE")
     elif gga == "PS":
         tags.append("PBEsol")
+    elif gga:
+        tags.append(gga)
     if metagga == "SCAN":
         tags.append("SCAN")
     elif metagga == "R2SCAN":
         tags.append("R2SCAN")
     elif metagga:
         tags.append(f"metaGGA({metagga})")
+
+    # ENCUT tier
+    if encut:
+        if encut >= 600:
+            tags.append("high-encut")
+        elif encut <= 300:
+            tags.append("low-encut")
 
     # Hybrid
     if hfcalc:
@@ -310,6 +372,8 @@ def vasp_results_put(
     n_sites: int | None = None
     formula_pretty: str | None = None
     space_group: str | None = None
+    struct: Structure | None = None
+    _sga: SpacegroupAnalyzer | None = None
     for cand in (src_dir / "CONTCAR", src_dir / "POSCAR"):
         if cand.is_file():
             try:
@@ -317,8 +381,8 @@ def vasp_results_put(
                 structure_json = json.dumps(struct.as_dict())
                 n_sites = struct.num_sites
                 formula_pretty = struct.composition.reduced_formula
-                sga = SpacegroupAnalyzer(struct, symprec=0.1)
-                space_group = sga.get_space_group_symbol()
+                _sga = SpacegroupAnalyzer(struct, symprec=0.1)
+                space_group = _sga.get_space_group_symbol()
             except Exception as exc:
                 logger.warning("Failed to parse structure in %s: %s", cand, exc)
             break
@@ -332,9 +396,8 @@ def vasp_results_put(
             incar_json = json.dumps(incar.as_dict())
         except Exception as exc:
             logger.warning("Failed to parse INCAR in %s: %s", src_dir, exc)
-
-    tags = _extract_tags(incar)
-
+    kpts: Kpoints | None = None
+    tags = _extract_tags(incar=incar, kpoints=kpts, structure=struct, sga=_sga)
     kpoints_json: str | None = None
     kpoints_path = src_dir / "KPOINTS"
     if kpoints_path.is_file():
