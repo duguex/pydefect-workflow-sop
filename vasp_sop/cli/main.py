@@ -454,12 +454,21 @@ def _add_cache_parser(subparsers) -> None:
     sp = sub.add_parser("status", help="Show cache statistics")
     sp.add_argument("--verbose", action="store_true", help="List all entries")
 
-    # verify
-    sub.add_parser("verify", help="Check DB vs filesystem consistency")
+    # put
+    sp = sub.add_parser("put", help="Cache a VASP calculation directory")
+    sp.add_argument("path", type=Path, help="Path to calculation directory")
+    sp.add_argument("--formula", help="Chemical formula (auto-detected if omitted)")
+    sp.add_argument("--task-id", help="Task identifier (auto-detected if omitted)")
 
 
 def _handle_cache(args: argparse.Namespace) -> None:
-    from vasp_sop.core.cache import _get_db
+    from vasp_sop.core.cache import vasp_results_put, _get_db
+    from pathlib import Path
+
+    if args.cache_action == "put":
+        vasp_results_put(args.path.resolve(), formula=args.formula, task_id=getattr(args, "task_id", None))
+        print(f"Cached {args.path.resolve()}")
+        return
 
     if args.cache_action == "status":
         db = _get_db()
@@ -473,12 +482,11 @@ def _handle_cache(args: argparse.Namespace) -> None:
 
         print(f"vasp_results: {calc_count} entries  ({converged} converged, {with_energy} with energy)")
 
-
         if args.verbose:
             print()
             for row in db.execute(
-                "SELECT formula, mpid, total_energy, converged, n_sites, "
-                "formula_pretty, space_group, "
+                "SELECT formula, task_id, total_energy, converged, n_sites, "
+                "formula_pretty, space_group, source_dir, "
                 "datetime(cached_at, 'unixepoch') AS ts "
                 "FROM vasp_results ORDER BY cached_at DESC"
             ):
@@ -486,24 +494,27 @@ def _handle_cache(args: argparse.Namespace) -> None:
                 e = f"{row['total_energy']:.4f}" if row["total_energy"] is not None else "?"
                 sg = row["space_group"] or "?"
                 ns = str(row["n_sites"] or "?")
-                print(f"  {c} {row['formula']:12s} mp-{row['mpid']:12s}"
+                src = row["source_dir"] or "?"
+                print(f"  {c} {row['formula']:12s} {row['task_id']:12s}"
                       f"  E={e}  {ns:>4s} sites  {sg:8s}"
-                      f"  {row['ts']}")
+                      f"  {row['ts']}  {src}")
 
     elif args.cache_action == "verify":
         db = _get_db()
         ok = 0
         incomplete = []
-        for row in db.execute("SELECT formula, mpid, converged, outcar_json FROM vasp_results"):
+        for row in db.execute("SELECT formula, task_id, converged, outcar_json FROM vasp_results"):
             if row["converged"] and row["outcar_json"] is not None:
                 ok += 1
             else:
-                incomplete.append(f"{row['formula']}_mp-{row['mpid']}")
+                incomplete.append(f"{row['formula']}/{row['task_id']}")
         print(f"OK: {ok}")
         if incomplete:
             print(f"Incomplete (missing outcar_json or not converged): {len(incomplete)}")
             for name in incomplete[:10]:
                 print(f"  {name}")
+    else:
+        print(f"Unknown cache action: {args.cache_action}")
 def _add_batch_parser(subparsers) -> None:
     """Add ``batch`` subcommand with actions."""
     p = subparsers.add_parser("batch", help="Multi-system batch operations")
