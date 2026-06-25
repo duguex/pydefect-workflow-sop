@@ -75,6 +75,7 @@ def _init_db(db: sqlite3.Connection) -> None:
             formula_pretty  TEXT,
             space_group     TEXT,
             tags            TEXT,
+            source_dir      TEXT,
 
             PRIMARY KEY (formula, task_id)
         );
@@ -387,13 +388,14 @@ def vasp_results_put(
             total_energy, converged,
             outcar_json, vasprun_json,
             structure_json, incar_json, kpoints_json,
-            n_sites, formula_pretty, space_group, tags)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            n_sites, formula_pretty, space_group, tags, source_dir)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (formula, task_id, time.time(),
          total_energy, converged,
          outcar_json, vasprun_json,
          structure_json, incar_json, kpoints_json,
-         n_sites, formula_pretty, space_group, tags),
+         n_sites, formula_pretty, space_group, tags,
+         str(src_dir.resolve())),
     )
     db.commit()
     logger.debug("Cached %s/%s: energy=%s  sites=%s  sg=%s",
@@ -420,16 +422,6 @@ def vasp_results_delete(formula: str, task_id: str) -> None:
     db.commit()
     logger.debug("Deleted cache for %s/%s", formula, task_id)
 
-def vasp_results_get(formula: str, task_id: str) -> dict[str, Any] | None:
-    """Return full calc result dict from cache, or None if not cached."""
-    db = _get_db()
-    row = db.execute(
-        "SELECT * FROM vasp_results WHERE formula=? AND task_id=? AND converged=1",
-        (formula, task_id),
-    ).fetchone()
-    if row is None:
-        return None
-    return dict(row)
 
 
 
