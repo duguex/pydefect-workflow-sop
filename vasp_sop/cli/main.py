@@ -1101,8 +1101,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
             if not check_converged(pd):
                 continue
             formula, mpid = pd.name.split("_mp-", 1)
-            _cache_put(formula, mpid, pd)
-            backfilled += 1
+            _cache_put(pd, formula, mpid)
     if backfilled:
         logger.info("Backfilled %d already-converged phase results into cache.", backfilled)
 
