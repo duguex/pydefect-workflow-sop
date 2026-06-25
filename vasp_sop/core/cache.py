@@ -74,6 +74,7 @@ def _init_db(db: sqlite3.Connection) -> None:
             n_sites         INTEGER,
             formula_pretty  TEXT,
             space_group     TEXT,
+            tags            TEXT,
 
             PRIMARY KEY (formula, task_id)
         );
@@ -122,6 +123,76 @@ def _incar_fingerprint(src_dir: Path) -> str:
         if v is not None:
             parts.append(f"{k}={v}")
     return "|".join(parts) if parts else "default"
+
+
+def _extract_tags(incar: Incar | None) -> str:
+    """Return comma-separated semantic tags for a VASP calculation.
+
+    Maps INCAR parameters to human-readable categories (functional type,
+    method, physics, properties) based on VASP INCAR conventions.
+    Returns empty string when *incar* is None.
+    """
+    if incar is None:
+        return ""
+    tags: list[str] = []
+
+    gga = (incar.get("GGA") or "").strip().upper()
+    metagga = (incar.get("METAGGA") or "").strip().upper()
+    hfcalc = bool(incar.get("LHFCALC"))
+    hfscreen = incar.get("HFSCREEN", 0)
+    ldau = bool(incar.get("LDAU"))
+    ivdw = incar.get("IVDW", 0)
+    spin = incar.get("ISPIN", 1)
+    lsorbit = bool(incar.get("LSORBIT"))
+    ibrion = incar.get("IBRION", 0)
+    nfree = incar.get("NFREE", 0)
+    lepsilon = bool(incar.get("LEPSILON"))
+    loptics = bool(incar.get("LOPTICS"))
+    lcalcpol = bool(incar.get("LCALCPOL"))
+    ldipol = bool(incar.get("LDIPOL"))
+
+    # Functional
+    if gga == "PE":
+        tags.append("PBE")
+    elif gga == "PS":
+        tags.append("PBEsol")
+    if metagga == "SCAN":
+        tags.append("SCAN")
+    elif metagga == "R2SCAN":
+        tags.append("R2SCAN")
+    elif metagga:
+        tags.append(f"metaGGA({metagga})")
+
+    # Hybrid
+    if hfcalc:
+        tags.append("hybrid")
+        tags.append("HSE" if hfscreen > 0 else "PBE0")
+
+    # Methods
+    if ldau:
+        tags.append("DFT+U")
+    if ivdw:
+        tags.append("DFT-D")
+
+    # Physics
+    if spin == 2:
+        tags.append("spin")
+    if lsorbit:
+        tags.append("spin-orbit")
+
+    # Calculation types
+    if ibrion in (5, 6, 7, 8) or nfree >= 2:
+        tags.append("phonon")
+    if loptics:
+        tags.append("optics")
+    if lepsilon:
+        tags.append("dielectric")
+    if lcalcpol:
+        tags.append("polarization")
+    if ldipol:
+        tags.append("dipole")
+
+    return ",".join(tags) if tags else "default"
 
 def _detect_cache_key(src_dir: Path) -> tuple[str, str]:
     """Auto-detect (formula, task_id) from a VASP output directory.
@@ -252,6 +323,7 @@ def vasp_results_put(
                 logger.warning("Failed to parse structure in %s: %s", cand, exc)
             break
 
+    incar: Incar | None = None
     incar_json: str | None = None
     incar_path = src_dir / "INCAR"
     if incar_path.is_file():
@@ -260,6 +332,8 @@ def vasp_results_put(
             incar_json = json.dumps(incar.as_dict())
         except Exception as exc:
             logger.warning("Failed to parse INCAR in %s: %s", src_dir, exc)
+
+    tags = _extract_tags(incar)
 
     kpoints_json: str | None = None
     kpoints_path = src_dir / "KPOINTS"
@@ -277,13 +351,13 @@ def vasp_results_put(
             total_energy, converged,
             outcar_json, vasprun_json,
             structure_json, incar_json, kpoints_json,
-            n_sites, formula_pretty, space_group)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            n_sites, formula_pretty, space_group, tags)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (formula, task_id, time.time(),
          total_energy, converged,
          outcar_json, vasprun_json,
          structure_json, incar_json, kpoints_json,
-         n_sites, formula_pretty, space_group),
+         n_sites, formula_pretty, space_group, tags),
     )
     db.commit()
     logger.debug("Cached %s/%s: energy=%s  sites=%s  sg=%s",
