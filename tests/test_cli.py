@@ -395,3 +395,34 @@ class TestAdvanceDryRunPostprocess:
         assert "unitcell.yaml" in captured
         assert "standard_energies.yaml" in captured
         assert "CONTCAR" in captured
+
+
+class TestCachePut:
+    """Tests for cache put CLI command."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_cache(self, tmp_path: Path) -> None:
+        from vasp_sop.core.cache import override_cache_root
+        override_cache_root(tmp_path / ".vasp_sop")
+
+    def test_cache_put_auto_detect(self, tmp_path, monkeypatch, capsys):
+        """cache put with auto-detected formula/task_id."""
+        d = tmp_path / "GaN_mp-804"
+        d.mkdir()
+        (d / "OUTCAR").write_text(
+            " free  energy    TOTEN  =    -12.0 eV\n"
+            " General timing and accounting\n"
+        )
+        (d / "CONTCAR").write_text(
+            "GaN\n1.0\n3.19 0 0\n0 3.19 0\n0 0 5.19\nGa N\n1 1\nDirect\n"
+            "0 0 0\n0.333 0.667 0.5\n"
+        )
+        from vasp_sop.cli.main import _handle_cache
+        import argparse
+        args = argparse.Namespace(cache_action="put", path=d,
+                                   formula=None, task_id=None, recursive=False)
+        _handle_cache(args)
+        captured = capsys.readouterr().out
+        assert "converged" in captured
+        from vasp_sop.core.cache import vasp_results_get
+        assert vasp_results_get("GaN", "804") is not None

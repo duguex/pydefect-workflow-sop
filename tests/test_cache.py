@@ -248,8 +248,168 @@ class TestVaspResultsCache:
         assert _cache.vasp_results_get("GaN", "804") is None
 
 
+class TestCacheAutoDetect:
+    """Tests for auto-detection and tag extraction."""
 
+    @pytest.fixture(autouse=True)
+    def _isolate(self, tmp_path):
+        _cache.override_cache_root(tmp_path / ".vasp_sop")
 
+    # ── _detect_cache_key ────────────────────────────────────────────
+
+    def test_detect_mp_naming(self, tmp_path: Path):
+        """_mp- in dir name → (formula, mpid)."""
+        d = tmp_path / "GaN_mp-804"
+        d.mkdir()
+        f, tid = _cache._detect_cache_key(d)
+        assert f == "GaN"
+        assert tid == "804"
+
+    def test_detect_no_mp_with_poscar(self, tmp_path: Path):
+        """No _mp- but POSCAR present → formula from structure."""
+        d = tmp_path / "Va_Na_0"
+        d.mkdir()
+        (d / "POSCAR").write_text(
+            "NaCl\n1.0\n5.64 0 0\n0 5.64 0\n0 0 5.64\nNa Cl\n1 1\nDirect\n"
+            "0 0 0\n0.5 0.5 0.5\n"
+        )
+        f, tid = _cache._detect_cache_key(d)
+        assert f == "NaCl"
+        assert tid == "Va_Na_0"
+
+    def test_detect_no_mp_no_poscar(self, tmp_path: Path):
+        """No _mp- and no POSCAR → formula unknown."""
+        d = tmp_path / "some_dir"
+        d.mkdir()
+        f, tid = _cache._detect_cache_key(d)
+        assert f == "unknown"
+        assert tid == "some_dir"
+
+    # ── _incar_fingerprint ───────────────────────────────────────────
+
+    def test_incar_fingerprint_no_incar(self, tmp_path: Path):
+        """No INCAR file → 'default'."""
+        assert _cache._incar_fingerprint(tmp_path) == "default"
+
+    def test_incar_fingerprint_matches_keys(self, tmp_path: Path):
+        """INCAR with known tags → compact string."""
+        (tmp_path / "INCAR").write_text("ENCUT = 520\nISIF = 3\nISPIN = 2\n")
+        fp = _cache._incar_fingerprint(tmp_path)
+        assert "ENCUT=520.0" in fp
+        assert "ISIF=3" in fp
+        assert "|" in fp
+
+    def test_incar_fingerprint_irrelevant_tags_ignored(self, tmp_path: Path):
+        """Tags not in fingerprint keys are excluded."""
+        (tmp_path / "INCAR").write_text("ENCUT = 400\nSYSTEM = test\n")
+        fp = _cache._incar_fingerprint(tmp_path)
+        assert "ENCUT=400.0" in fp
+        assert "SYSTEM" not in fp
+
+    # ── _extract_tags ────────────────────────────────────────────────
+
+    def test_extract_tags_no_input(self):
+        """No inputs → empty string."""
+        assert _cache._extract_tags() == ""
+
+    def test_extract_tags_structure_only(self):
+        """Only structure → composition tag."""
+        from pymatgen.core import Lattice, Structure
+        s = Structure(Lattice.cubic(5.64), ["Na", "Cl"], [[0, 0, 0], [0.5, 0.5, 0.5]])
+        tags = _cache._extract_tags(structure=s)
+        assert "Na1Cl1" in tags
+
+    def test_extract_tags_gamma_kpoints(self):
+        """Gamma-only KPOINTS → 'gamma' tag."""
+        from pymatgen.io.vasp import Kpoints
+        k = Kpoints(kpts=[[1, 1, 1]], style=Kpoints.supported_modes.Gamma)
+        tags = _cache._extract_tags(kpoints=k)
+        assert "gamma" in tags
+
+    def test_extract_tags_grid_kpoints(self):
+        """Regular mesh KPOINTS → grid string tag."""
+        from pymatgen.io.vasp import Kpoints
+        k = Kpoints(kpts=[[4, 4, 4]], style=Kpoints.supported_modes.Monkhorst)
+        tags = _cache._extract_tags(kpoints=k)
+        assert "444" in tags
+
+    def test_extract_tags_incar_gga_and_spin(self):
+        """PBE + spin → tags contain PBE and spin."""
+        from pymatgen.io.vasp import Incar
+        tags = _cache._extract_tags(incar=Incar({"GGA": "PE", "ISPIN": 2}))
+        assert "PBE" in tags
+        assert "spin" in tags
+
+    def test_extract_tags_incar_hybrid_hse(self):
+        """HSE → hybrid and specific type."""
+        from pymatgen.io.vasp import Incar
+        tags = _cache._extract_tags(incar=Incar({"LHFCALC": True, "HFSCREEN": 0.2}))
+        assert "hybrid" in tags
+        assert "HSE" in tags
+
+    def test_extract_tags_incar_ldau(self):
+        """LDAU → DFT+U tag."""
+        from pymatgen.io.vasp import Incar
+        tags = _cache._extract_tags(incar=Incar({"LDAU": True}))
+        assert "DFT+U" in tags
+
+    # ── vasp_results_put auto-detect ─────────────────────────────────
+
+    def test_put_auto_detect_mp_dir(self, tmp_path: Path):
+        """vasp_results_put with auto-detect from _mp- naming."""
+        d = tmp_path / "GaN_mp-804"
+        d.mkdir()
+        (d / "OUTCAR").write_text(
+            " free  energy    TOTEN  =    -12.0 eV\n"
+            " General timing and accounting\n"
+        )
+        (d / "CONTCAR").write_text(
+            "GaN\n1.0\n3.19 0 0\n0 3.19 0\n0 0 5.19\nGa N\n1 1\nDirect\n"
+            "0 0 0\n0.333 0.667 0.5\n"
+        )
+        _cache.vasp_results_put(d)
+        r = _cache.vasp_results_get("GaN", "804")
+        assert r is not None
+        assert r["total_energy"] == -12.0
+        assert r["converged"] == 1
+
+    def test_put_auto_detect_defect_dir(self, tmp_path: Path):
+        """vasp_results_put with auto-detect from POSCAR."""
+        d = tmp_path / "Va_Na_0"
+        d.mkdir()
+        (d / "OUTCAR").write_text(
+            " free  energy    TOTEN  =    -5.0 eV\n"
+            " General timing and accounting\n"
+        )
+        (d / "POSCAR").write_text(
+            "NaCl\n1.0\n5.64 0 0\n0 5.64 0\n0 0 5.64\nNa Cl\n1 1\nDirect\n"
+            "0 0 0\n0.5 0.5 0.5\n"
+        )
+        (d / "INCAR").write_text("ENCUT = 400\n")
+        _cache.vasp_results_put(d)
+        # task_id should be dirname + fingerprint
+        from vasp_sop.core.cache import _incar_fingerprint
+        fp = _incar_fingerprint(d)
+        r = _cache.vasp_results_get("NaCl", f"Va_Na_0_{fp}")
+        assert r is not None
+        assert r["total_energy"] == -5.0
+
+    def test_put_sets_source_dir(self, tmp_path: Path):
+        """Cached entry contains source_dir pointing to src dir."""
+        d = tmp_path / "GaN_mp-804"
+        d.mkdir()
+        (d / "OUTCAR").write_text(
+            " free  energy    TOTEN  =    -12.0 eV\n"
+            " General timing and accounting\n"
+        )
+        (d / "CONTCAR").write_text(
+            "GaN\n1.0\n3.19 0 0\n0 3.19 0\n0 0 5.19\nGa N\n1 1\nDirect\n"
+            "0 0 0\n0.333 0.667 0.5\n"
+        )
+        _cache.vasp_results_put(d)
+        r = _cache.vasp_results_get("GaN", "804")
+        assert r is not None
+        assert r["source_dir"] == str(d.resolve())
 # ══════════════════════════════════════════════════════════════════════════
 #  MP phase list cache  (dead code but test for completeness)
 # ══════════════════════════════════════════════════════════════════════════
