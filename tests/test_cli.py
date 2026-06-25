@@ -142,12 +142,14 @@ class TestAdvanceOneSystem:
 
 
 class TestCachePutGet:
+    _cr: Path | None = None
 
-    def test_roundtrip(self, tmp_path: Path, monkeypatch):
-        """Store and retrieve calc results from cache."""
-        cr = tmp_path / ".vasp_sop"
-        monkeypatch.setattr("vasp_sop.core.cache.CACHE_ROOT", cr)
-        monkeypatch.setattr("vasp_sop.core.cache.CALC_CACHE", cr / "calc_cache")
+    @pytest.fixture(autouse=True)
+    def _isolate_cache(self, tmp_path: Path) -> None:
+        from vasp_sop.core.cache import override_cache_root
+        override_cache_root(tmp_path / ".vasp_sop")
+
+    def test_roundtrip(self, tmp_path: Path):
         from vasp_sop.core.cache import calc_results_put, calc_results_get
         src = tmp_path / "src"
         src.mkdir()
@@ -156,23 +158,15 @@ class TestCachePutGet:
         calc_results_put("TestMe", "42", src)
         cached = calc_results_get("TestMe", "42")
         assert cached is not None
-        # OUTCAR stub was written by get()
         assert (cached / "OUTCAR").is_file()
         assert (cached / "CONTCAR").is_file()
         assert (cached / ".converged").is_file()
 
-    def test_get_missing_returns_none(self, tmp_path, monkeypatch):
-        cr = tmp_path / ".vasp_sop"
-        monkeypatch.setattr("vasp_sop.core.cache.CACHE_ROOT", cr)
-        monkeypatch.setattr("vasp_sop.core.cache.CALC_CACHE", cr / "calc_cache")
+    def test_get_missing_returns_none(self):
         from vasp_sop.core.cache import calc_results_get
         assert calc_results_get("Never", "cached") is None
 
-    def test_put_does_not_delete_others(self, tmp_path, monkeypatch):
-        """calc_results_put should NOT delete other cache entries."""
-        cr = tmp_path / ".vasp_sop"
-        monkeypatch.setattr("vasp_sop.core.cache.CACHE_ROOT", cr)
-        monkeypatch.setattr("vasp_sop.core.cache.CALC_CACHE", cr / "calc_cache")
+    def test_put_does_not_delete_others(self, tmp_path: Path):
         from vasp_sop.core.cache import calc_results_put, calc_results_get
         src1 = tmp_path / "src1"
         src1.mkdir()
