@@ -182,6 +182,7 @@ def _content_hash(src_dir: Path) -> str:
             pass
 
     # INCAR component
+    incar_fp = _incar_fingerprint(src_dir)
     # POTCAR component
     potcar_fp = _potcar_fingerprint(src_dir)
 
