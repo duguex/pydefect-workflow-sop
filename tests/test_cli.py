@@ -426,3 +426,55 @@ class TestCachePut:
         assert "converged" in captured
         from vasp_sop.core.cache import vasp_results_get
         assert vasp_results_get("GaN", "804") is not None
+
+
+    def test_cache_put_explicit_formula_and_task_id(self, tmp_path, monkeypatch, capsys):
+        """cache put with explicit --formula and --task-id."""
+        d = tmp_path / "some_dir"
+        d.mkdir()
+        (d / "OUTCAR").write_text(
+            " free  energy    TOTEN  =    -10.0 eV\n"
+            " General timing and accounting\n"
+        )
+        (d / "CONTCAR").write_text(
+            "H\n1.0\n10 0 0\n0 10 0\n0 0 10\nH\n1\nDirect\n0 0 0\n"
+        )
+        from vasp_sop.cli.main import _handle_cache
+        import argparse
+        args = argparse.Namespace(cache_action="put", path=d,
+                                   formula="GaN", task_id="999", recursive=False)
+        _handle_cache(args)
+        from vasp_sop.core.cache import vasp_results_get
+        assert vasp_results_get("GaN", "999") is not None
+
+    def test_cache_put_recursive(self, tmp_path, monkeypatch, capsys):
+        """cache put -r finds and caches all OUTCARs."""
+        dirs = ["sys_A/cpd/GaN_mp-804", "sys_A/cpd/Other_mp-101",
+                "sys_B/defect/Va_Na_0", "sys_B/unitcell/band"]
+        for rel in dirs:
+            p = tmp_path / rel
+            p.mkdir(parents=True)
+            (p / "OUTCAR").write_text(
+                " free  energy    TOTEN  =    -5.0 eV\n"
+                " General timing and accounting\n"
+            )
+            if "defect" in rel or "unitcell" in rel:
+                (p / "POSCAR").write_text(
+                    "NaCl\n1.0\n5.64 0 0\n0 5.64 0\n0 0 5.64\nNa Cl\n1 1\nDirect\n"
+                    "0 0 0\n0.5 0.5 0.5\n"
+                )
+            else:
+                (p / "CONTCAR").write_text(
+                    "GaN\n1.0\n3.19 0 0\n0 3.19 0\n0 0 5.19\nGa N\n1 1\nDirect\n"
+                    "0 0 0\n0.333 0.667 0.5\n"
+                )
+        from vasp_sop.cli.main import _handle_cache
+        import argparse
+        args = argparse.Namespace(cache_action="put", path=tmp_path,
+                                   formula=None, task_id=None, recursive=True)
+        _handle_cache(args)
+        captured = capsys.readouterr().out
+        assert "Cached 4 directories" in captured
+        from vasp_sop.core.cache import vasp_results_get
+        assert vasp_results_get("GaN", "804") is not None
+        assert vasp_results_get("Other", "101") is not None

@@ -410,7 +410,92 @@ class TestCacheAutoDetect:
         r = _cache.vasp_results_get("GaN", "804")
         assert r is not None
         assert r["source_dir"] == str(d.resolve())
-# ══════════════════════════════════════════════════════════════════════════
+
+    # ── _extract_tags — more INCAR variants ─────────────────────────
+
+    def test_extract_tags_pbesol(self):
+        """PBEsol functional tag."""
+        from pymatgen.io.vasp import Incar
+        tags = _cache._extract_tags(incar=Incar({"GGA": "PS"}))
+        assert "PBEsol" in tags
+
+    def test_extract_tags_scan(self):
+        """SCAN metaGGA tag."""
+        from pymatgen.io.vasp import Incar
+        tags = _cache._extract_tags(incar=Incar({"METAGGA": "SCAN"}))
+        assert "SCAN" in tags
+
+    def test_extract_tags_phonon(self):
+        """Phonon calculation tag."""
+        from pymatgen.io.vasp import Incar
+        tags = _cache._extract_tags(incar=Incar({"IBRION": 6, "NFREE": 2}))
+        assert "phonon" in tags
+
+    def test_extract_tags_dielectric(self):
+        """Dielectric property tag."""
+        from pymatgen.io.vasp import Incar
+        tags = _cache._extract_tags(incar=Incar({"LEPSILON": True, "LOPTICS": True}))
+        assert "dielectric" in tags
+        assert "optics" in tags
+
+    def test_extract_tags_encut_tiers(self):
+        """High and low ENCUT tier tags."""
+        from pymatgen.io.vasp import Incar
+        low = _cache._extract_tags(incar=Incar({"ENCUT": 250}))
+        high = _cache._extract_tags(incar=Incar({"ENCUT": 700}))
+        assert "low-encut" in low
+        assert "high-encut" in high
+
+    def test_extract_tags_combined(self):
+        """Full realistic scenario: structure + KPOINTS + INCAR."""
+        from pymatgen.io.vasp import Incar, Kpoints
+        from pymatgen.core import Lattice, Structure
+        s = Structure(Lattice.cubic(5.64), ["Na", "Cl"], [[0, 0, 0], [0.5, 0.5, 0.5]])
+        k = Kpoints(kpts=[[4, 4, 4]], style=Kpoints.supported_modes.Monkhorst)
+        i = Incar({"GGA": "PE", "ISPIN": 2, "LDAU": True, "ENCUT": 400})
+        tags = _cache._extract_tags(incar=i, kpoints=k, structure=s)
+        assert "Na1Cl1" in tags
+        assert "444" in tags
+        assert "PBE" in tags
+        assert "spin" in tags
+        assert "DFT+U" in tags
+
+    # ── partial auto-detect ──────────────────────────────────────────
+
+    def test_put_explicit_formula_auto_task_id(self, tmp_path: Path):
+        """Only formula given, task_id auto-detected."""
+        d = tmp_path / "GaN_mp-804"
+        d.mkdir()
+        (d / "OUTCAR").write_text(
+            " free  energy    TOTEN  =    -12.0 eV\n"
+            " General timing and accounting\n"
+        )
+        (d / "CONTCAR").write_text(
+            "GaN\n1.0\n3.19 0 0\n0 3.19 0\n0 0 5.19\nGa N\n1 1\nDirect\n"
+            "0 0 0\n0.333 0.667 0.5\n"
+        )
+        _cache.vasp_results_put(d, formula="AlN")
+        r = _cache.vasp_results_get("AlN", "804")
+        assert r is not None
+        assert r["total_energy"] == -12.0
+
+    def test_put_explicit_task_id_auto_formula(self, tmp_path: Path):
+        """Only task_id given, formula auto-detected from POSCAR."""
+        d = tmp_path / "GaN_mp-804"
+        d.mkdir()
+        (d / "OUTCAR").write_text(
+            " free  energy    TOTEN  =    -12.0 eV\n"
+            " General timing and accounting\n"
+        )
+        (d / "CONTCAR").write_text(
+            "GaN\n1.0\n3.19 0 0\n0 3.19 0\n0 0 5.19\nGa N\n1 1\nDirect\n"
+            "0 0 0\n0.333 0.667 0.5\n"
+        )
+        _cache.vasp_results_put(d, task_id="custom_id")
+        r = _cache.vasp_results_get("GaN", "custom_id")
+        assert r is not None
+
+
 #  MP phase list cache  (dead code but test for completeness)
 # ══════════════════════════════════════════════════════════════════════════
 
