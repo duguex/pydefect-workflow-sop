@@ -142,47 +142,20 @@ def _extract_tags(
     tags: list[str] = []
 
     # ── Structure tags ───────────────────────────────────────────────
-    if sga is not None:
-        sg = sga.get_space_group_symbol()
-        if sg:
-            tags.append(sg)
+    # Use composition string, e.g. "Na16Cl16", as a compact structure tag.
     if structure is not None:
-        nelem = len(structure.composition)
-        if nelem == 1:
-            tags.append("element")
-        elif nelem == 2:
-            tags.append("binary")
-        elif nelem == 3:
-            tags.append("ternary")
-        elif nelem >= 4:
-            tags.append("quaternary+")
-        n = structure.num_sites
-        if n > 100:
-            tags.append("large-cell")
-        elif n > 30:
-            tags.append("medium-cell")
-        else:
-            tags.append("small-cell")
+        comp = structure.composition
+        tags.append(comp.formula.replace(" ", ""))
 
     # ── KPOINTS tags ─────────────────────────────────────────────────
+    # "gamma" for Gamma-only (single k-point), otherwise the grid string.
     if kpoints is not None:
         style = kpoints.style
-        if style == Kpoints.supported_modes.Gamma:
-            tags.append("gamma-centered")
-        elif style == Kpoints.supported_modes.Monkhorst:
-            tags.append("monkhorst-pack")
-        elif style == Kpoints.supported_modes.Line_mode:
-            tags.append("band-structure")
-        elif style == Kpoints.supported_modes.Cartesian:
-            tags.append("cartesian-kmesh")
-        elif style == Kpoints.supported_modes.Reciprocal:
-            tags.append("reciprocal-kmesh")
         kpts = kpoints.kpts[0] if kpoints.kpts else (0, 0, 0)
-        max_k = max(kpts)
-        if max_k > 6:
-            tags.append("dense-kmesh")
-        elif max_k <= 3:
-            tags.append("coarse-kmesh")
+        if style == Kpoints.supported_modes.Gamma and max(kpts) <= 1:
+            tags.append("gamma")
+        else:
+            tags.append("".join(str(k) for k in kpts[:3]))
 
     # ── INCAR tags ───────────────────────────────────────────────────
     if incar is None:
