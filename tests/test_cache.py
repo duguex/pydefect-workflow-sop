@@ -521,6 +521,86 @@ class TestCacheAutoDetect:
         assert r is not None
 
 
+class TestCacheLookup:
+    """Tests for cache_lookup — the unified completion check."""
+
+    def test_cache_lookup_hit(self, tmp_path: Path):
+        """POSCAR+OUTCAR cached → returns result dict with total_energy."""
+        d = tmp_path / "test_system"
+        d.mkdir()
+        (d / "OUTCAR").write_text(
+            " free  energy    TOTEN  =    -12.34 eV\n"
+            " General timing and accounting\n"
+        )
+        (d / "CONTCAR").write_text(
+            "GaN\n1.0\n3.19 0 0\n0 3.19 0\n0 0 5.19\nGa N\n1 1\nDirect\n"
+            "0 0 0\n0.333 0.667 0.5\n"
+        )
+        (d / "INCAR").write_text("ENCUT = 520\nISIF = 3\n")
+        (d / "KPOINTS").write_text("K-Points\n0\nGamma\n4 4 4\n")
+        _cache.vasp_results_put(d)
+        result = _cache.cache_lookup(d)
+        assert result is not None
+        assert result["total_energy"] == -12.34
+        assert result["converged"] == 1
+
+    def test_cache_lookup_miss(self, tmp_path: Path):
+        """Directory with VASP files but never cached → None."""
+        d = tmp_path / "uncached"
+        d.mkdir()
+        (d / "OUTCAR").write_text(
+            " free  energy    TOTEN  =    -5.0 eV\n"
+            " General timing and accounting\n"
+        )
+        (d / "CONTCAR").write_text(
+            "GaN\n1.0\n3.19 0 0\n0 3.19 0\n0 0 5.19\nGa N\n1 1\nDirect\n"
+            "0 0 0\n0.333 0.667 0.5\n"
+        )
+        # No vasp_results_put called — cache is empty
+        assert _cache.cache_lookup(d) is None
+
+    def test_cache_lookup_empty_dir(self, tmp_path: Path):
+        """Empty directory with no VASP files and no cache → None."""
+        d = tmp_path / "empty"
+        d.mkdir()
+        assert _cache.cache_lookup(d) is None
+
+    def test_cache_lookup_mp_naming(self, tmp_path: Path):
+        """_mp- directory correctly resolves via content_hash."""
+        d = tmp_path / "GaN_mp-804"
+        d.mkdir()
+        (d / "OUTCAR").write_text(
+            " free  energy    TOTEN  =    -15.0 eV\n"
+            " General timing and accounting\n"
+        )
+        (d / "CONTCAR").write_text(
+            "GaN\n1.0\n3.19 0 0\n0 3.19 0\n0 0 5.19\nGa N\n1 1\nDirect\n"
+            "0 0 0\n0.333 0.667 0.5\n"
+        )
+        _cache.vasp_results_put(d)
+        result = _cache.cache_lookup(d)
+        assert result is not None
+        assert result["total_energy"] == -15.0
+
+    def test_cache_lookup_after_delete(self, tmp_path: Path):
+        """Lookup returns None after entry is deleted."""
+        d = tmp_path / "deleteme"
+        d.mkdir()
+        (d / "OUTCAR").write_text(
+            " free  energy    TOTEN  =    -8.0 eV\n"
+            " General timing and accounting\n"
+        )
+        (d / "CONTCAR").write_text(
+            "GaN\n1.0\n3.19 0 0\n0 3.19 0\n0 0 5.19\nGa N\n1 1\nDirect\n"
+            "0 0 0\n0.333 0.667 0.5\n"
+        )
+        _cache.vasp_results_put(d)
+        assert _cache.cache_lookup(d) is not None
+        f, ch, _ = _cache._detect_calc_info(d)
+        _cache.vasp_results_delete(f, ch)
+        assert _cache.cache_lookup(d) is None
+
+
 #  MP phase list cache  (dead code but test for completeness)
 # ══════════════════════════════════════════════════════════════════════════
 

@@ -467,7 +467,7 @@ def _add_cache_parser(subparsers) -> None:
 
 
 def _handle_cache(args: argparse.Namespace) -> None:
-    from vasp_sop.core.cache import vasp_results_put, _get_db
+    from vasp_sop.core.cache import cache_lookup, vasp_results_put, _get_db
     from pathlib import Path
     if args.cache_action == "put":
         from vasp_sop.core.cache import vasp_results_put
@@ -477,22 +477,69 @@ def _handle_cache(args: argparse.Namespace) -> None:
             if not root.is_dir():
                 print(f"Not a directory: {root}")
                 return
-            total = 0
-            skipped = 0
+
+            from tqdm import tqdm
+            from concurrent.futures import ProcessPoolExecutor, as_completed
+
+            # Phase 1: collect all OUTCAR dirs (single-pass rglob)
+            all_dirs: list[Path] = []
             for outcar in sorted(root.rglob("OUTCAR")):
                 d = outcar.parent
-                # Skip trivial subdirectories like output/ when the
-                # parent directory already has its own OUTCAR.
                 if d.name == "output" and (d.parent / "OUTCAR").is_file():
                     continue
-                text = outcar.read_text()
-                converged = "General timing and accounting" in text[-4096:]
-                vasp_results_put(d)
-                total += 1
-                if not converged:
-                    skipped += 1
-                    print(f"  ! {d} (not converged)")
-            print(f"Cached {total} directories ({skipped} unconverged) under {root}")
+                all_dirs.append(d)
+
+            if not all_dirs:
+                print("No OUTCARs found.")
+                return
+
+            # Phase 2: classify in parallel (cache check + convergence check)
+            # Threads are fine here — I/O bound (NFS tail reads + SQLite).
+            from concurrent.futures import ThreadPoolExecutor
+            to_cache: list[Path] = []
+            unconverged: list[Path] = []
+
+            def _classify(d: Path) -> tuple[str, Path]:
+                if cache_lookup(d) is not None:
+                    return "cached", d
+                text = (d / "OUTCAR").read_text()
+                if "General timing and accounting" in text[-4096:]:
+                    return "converged", d
+                return "unconverged", d
+
+            with ThreadPoolExecutor(max_workers=16) as pool:
+                futures = {pool.submit(_classify, d): d for d in all_dirs}
+                with tqdm(total=len(all_dirs), desc="Scanning", unit=" dirs") as pbar:
+                    for future in as_completed(futures):
+                        status, d = future.result()
+                        if status == "converged":
+                            to_cache.append(d)
+                        elif status == "unconverged":
+                            unconverged.append(d)
+                        pbar.update(1)
+
+            # Phase 3: report unconverged
+            for d in unconverged:
+                print(f"  ! {d} (not converged)")
+
+            # Phase 4: parallel cache converged
+            if to_cache:
+                n_cached = 0
+                with ProcessPoolExecutor(max_workers=16) as pool:
+                    futures = {pool.submit(vasp_results_put, d): d for d in to_cache}
+                    with tqdm(total=len(to_cache), desc="Caching", unit=" dirs") as pbar:
+                        for future in as_completed(futures):
+                            try:
+                                future.result()
+                                n_cached += 1
+                            except Exception as exc:
+                                d = futures[future]
+                                print(f"\n  ! {d} (cache failed: {exc})")
+                            pbar.update(1)
+                print(f"Cached {n_cached} directories under {root}")
+
+            if unconverged:
+                print(f"Skipped {len(unconverged)} unconverged directories")
             return
 
         path = args.path.resolve()
@@ -628,8 +675,9 @@ def _batch_progress(root: Path) -> None:
     """Print per-system completion percentage (completed / total pipeline dirs)."""
     import subprocess, json
 
-    def has_outcar(p: Path) -> bool:
-        return (p / "OUTCAR").is_file() or (p / "output" / "OUTCAR").is_file()
+    from vasp_sop.core.cache import cache_lookup
+    def is_done(p: Path) -> bool:
+        return cache_lookup(p) is not None
 
     rows: list[tuple[int, str, int, int, int, int, int, int]] = []
     for d in sorted(root.iterdir()):
@@ -639,9 +687,9 @@ def _batch_progress(root: Path) -> None:
         uc_dirs = [p for p in (d / "unitcell").iterdir() if p.is_dir() and p.name != "structure_opt"] if (d / "unitcell").is_dir() else []
         df_dirs = [p for p in (d / "defect").iterdir() if p.is_dir()] if (d / "defect").is_dir() else []
 
-        cpd_ok = sum(1 for p in cpd_dirs if has_outcar(p))
-        uc_ok = sum(1 for p in uc_dirs if has_outcar(p))
-        df_ok = sum(1 for p in df_dirs if has_outcar(p))
+        cpd_ok = sum(1 for p in cpd_dirs if is_done(p))
+        uc_ok = sum(1 for p in uc_dirs if is_done(p))
+        df_ok = sum(1 for p in df_dirs if is_done(p))
 
         nc, nu, nd = len(cpd_dirs), len(uc_dirs), len(df_dirs)
         total = nc + nu + nd
@@ -701,12 +749,6 @@ def _batch_status(root: Path) -> None:
     )
 
 
-def _is_cached(pd: Path) -> bool:
-    if "_mp-" not in pd.name:
-        return False
-    formula, mpid = pd.name.split("_mp-", 1)
-    from vasp_sop.core.cache import vasp_results_get
-    return vasp_results_get(formula, mpid) is not None
 
 
 def _crisp_active_dirs(*, skip: bool = False) -> set[str]:
@@ -742,7 +784,7 @@ def _advance_one_system(s: dict, active: dict, *,
     from vasp_sop.defect import cpd as _cpd
     from vasp_sop.defect.builder import build_all as _build_defects
     from vasp_sop.defect.analysis import analyze as _analyze_defects
-    from vasp_sop.core.cache import vasp_results_get as _crg, vasp_results_put
+    from vasp_sop.core.cache import cache_lookup, vasp_results_get as _crg, vasp_results_put
     _logger = logging.getLogger(__name__)
     _CPD = "cpd"; _UC = "unitcell"; _DF = "defect"
 
@@ -777,14 +819,14 @@ def _advance_one_system(s: dict, active: dict, *,
             if pd.is_dir() and pd.name != td.name and pd.name not in ("combos", "mp_flag")
             and input_ready(pd)
             and not check_converged(pd)
-            and not _is_cached(pd)
+            and cache_lookup(pd) is None
         )
 
     def _phase(s: dict) -> str:
         td = _target_dir(s)
         if td is None:
             return "NO_TARGET"
-        if not check_converged(td):
+        if cache_lookup(td) is None:
             return "TARGET"
         if _competing_dirs(s):
             return "COMPETING"
@@ -797,7 +839,7 @@ def _advance_one_system(s: dict, active: dict, *,
         if not uc_has_inputs:
             return "UC_DF"
         uc_pending = any(
-            not check_converged(uc_root / t) for t in uc_tasks
+            cache_lookup(uc_root / t) is None for t in uc_tasks
             if (uc_root / t / "INCAR").is_file()
         )
         df_root = s["root"] / _DF
@@ -976,11 +1018,11 @@ def _advance_one_system(s: dict, active: dict, *,
                     _submit_or_skip(child, f"df-{child.name}", s["name"])
 
             uc_all_done = all(
-                check_converged(uc_root / t) or not (uc_root / t / "INCAR").is_file()
+                cache_lookup(uc_root / t) is not None or not (uc_root / t / "INCAR").is_file()
                 for t in ("band", "dos", "dielectric")
             )
             df_vasp_done = all(
-                check_converged(child) or not input_ready(child)
+                cache_lookup(child) is not None or not input_ready(child)
                 for child in df_root.iterdir() if child.is_dir()
             ) if df_root.is_dir() else True
 
@@ -1060,7 +1102,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
     def _is_active(path: Path) -> bool:
         return str(path.resolve()) in _crisp_active
 
-    from vasp_sop.core.cache import vasp_results_put as _cache_put
+    from vasp_sop.core.cache import cache_lookup, backfill_all, vasp_results_put as _cache_put
 
     def _cache_phase_results(wd: Path) -> None:
         """Cache completed VASP calculation."""
@@ -1089,14 +1131,14 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
             and input_ready(pd)
             and not check_converged(pd)
             and not _is_active(pd)
-            and not _is_cached(pd)
+            and cache_lookup(pd) is None
         )
 
     def _phase(s: dict) -> str:
         td = _target_dir(s)
         if td is None:
             return "NO_TARGET"
-        if not check_converged(td):
+        if cache_lookup(td) is None:
             return "TARGET"
         if _competing_dirs(s):
             return "COMPETING"
@@ -1109,7 +1151,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
         if not uc_has_inputs:
             return "UC_DF"  # unitcell not yet prepared
         uc_pending = any(
-            not check_converged(uc_root / t) for t in uc_tasks
+            cache_lookup(uc_root / t) is None for t in uc_tasks
             if (uc_root / t / "INCAR").is_file()
         )
         df_root = s["root"] / _DF
@@ -1149,12 +1191,19 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
         for pd in cpd_root.iterdir():
             if not pd.is_dir() or "_mp-" not in pd.name:
                 continue
+            if cache_lookup(pd) is not None:
+                continue  # already cached
             if not check_converged(pd):
-                continue
+                continue  # not converged on disk
             formula, mpid = pd.name.split("_mp-", 1)
             _cache_put(pd, formula=formula, task_name=f"{formula}_mp-{mpid}")
+            backfilled += 1
     if backfilled:
         logger.info("Backfilled %d already-converged phase results into cache.", backfilled)
+    # Walk ALL directories for any additional converged calculations not yet cached
+    extra = backfill_all(root)
+    if extra:
+        logger.info("Backfilled %d additional calculations from full tree scan.", extra)
 
     while True:
         # 1. Poll active jobs

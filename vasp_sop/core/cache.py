@@ -489,6 +489,20 @@ def vasp_results_get(formula: str, key: str) -> dict[str, Any] | None:
     return dict(row)
 
 
+def cache_lookup(src_dir: Path) -> dict[str, Any] | None:
+    """Return cached result dict for *src_dir*, or None if not cached.
+
+    Computes content_hash and formula from directory contents, then
+    looks up the VASP results cache. Returns None for uncached or
+    unconverged calculations.
+
+    This is the single source of truth for "is this VASP calculation
+    done?" — prefer over filesystem checks like ``check_converged``.
+    """
+    formula, ch, _ = _detect_calc_info(src_dir)
+    return vasp_results_get(formula, ch)
+
+
 def vasp_results_delete(formula: str, content_hash: str) -> None:
     """Remove cached entry by formula + content_hash."""
     db = _get_db()
@@ -500,3 +514,52 @@ def vasp_results_delete(formula: str, content_hash: str) -> None:
 
 
 
+
+
+def scan_converged_dirs(root: Path, *, skip_cached: bool = True) -> list[Path]:
+    """Scan *root* recursively for directories with converged OUTCARs.
+
+    Returns a sorted list of directories containing converged OUTCARs.
+    When *skip_cached* is True (default), directories already in the
+    cache are excluded.  Skips ``output/`` subdirectories when the
+    parent already has an OUTCAR.
+    """
+    dirs: list[Path] = []
+    for outcar in sorted(root.rglob("OUTCAR")):
+        d = outcar.parent
+        if d.name == "output" and (d.parent / "OUTCAR").is_file():
+            continue  # skip nested output/ subdirs
+        if skip_cached and cache_lookup(d) is not None:
+            continue  # already cached
+        text = outcar.read_text()
+        if "General timing and accounting" not in text[-4096:]:
+            continue  # not converged
+        dirs.append(d)
+    return dirs
+
+
+def backfill_all(root: Path, max_workers: int = 16) -> int:
+    """Cache all converged VASP calculations under *root* not already cached.
+
+    Scans the tree first to collect directories with converged OUTCARs,
+    then processes them in parallel via ``ProcessPoolExecutor`` (true CPU
+    parallelism for pymatgen parsing, each worker opens its own SQLite
+    connection; WAL mode handles concurrent access).
+    Returns the number of new cache entries.
+    """
+    dirs = scan_converged_dirs(root)
+    if not dirs:
+        return 0
+
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    count = 0
+    with ProcessPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(vasp_results_put, d): d for d in dirs}
+        for future in as_completed(futures):
+            try:
+                future.result()
+                count += 1
+            except Exception as exc:
+                d = futures[future]
+                logger.warning("Failed to cache %s: %s", d, exc)
+    return count

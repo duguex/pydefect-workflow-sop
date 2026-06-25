@@ -112,6 +112,8 @@ class TestAdvanceOneSystem:
     def _patch_heavy(self, monkeypatch, tmp_path: Path):
         from vasp_sop.core.cache import override_cache_root
         override_cache_root(tmp_path / ".vasp_sop")
+        monkeypatch.setattr("vasp_sop.core.cache.cache_lookup",
+                            lambda p: {"total_energy": 0.0} if "NaCl_mp-12345" in str(p) else None)
         monkeypatch.setattr("vasp_sop.defect.builder.build_all", lambda *a, **kw: None)
         monkeypatch.setattr("vasp_sop.vasp.io.check_converged",
                             lambda p: "NaCl_mp-12345" in str(p))
@@ -304,6 +306,8 @@ class TestAdvanceDryRunPostprocess:
     def _patch_heavy(self, monkeypatch, tmp_path: Path):
         from vasp_sop.core.cache import override_cache_root
         override_cache_root(tmp_path / ".vasp_sop")
+        monkeypatch.setattr("vasp_sop.core.cache.cache_lookup",
+                            lambda p: {"total_energy": 0.0} if "NaCl_mp-12345" in str(p) else None)
         monkeypatch.setattr("vasp_sop.defect.builder.build_all", lambda *a, **kw: None)
         monkeypatch.setattr("vasp_sop.vasp.io.check_converged",
                             lambda p: "NaCl_mp-12345" in str(p))
