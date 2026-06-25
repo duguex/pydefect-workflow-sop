@@ -723,12 +723,7 @@ def _advance_one_system(s: dict, active: dict, *,
             if f and m:
                 cached = _crg(f, m)
             if cached:
-                import shutil as _sh
-                for fn in ("OUTCAR", "CONTCAR", "vasprun.xml"):
-                    src = cached / fn
-                    if src.is_file():
-                        _sh.copy2(str(src), str(td / fn))
-                _logger.info("%s restored from calc cache", s["name"])
+                _logger.info("%s target restored from calc cache", s["name"])
                 import json as _json
                 submit_info = {"task_name": "cached", "work_dir": str(td.resolve())}
                 with open((s["root"] / _CPD / ".target_submit.json"), "w") as _f:
@@ -745,11 +740,6 @@ def _advance_one_system(s: dict, active: dict, *,
                 _cf, _cm = cd.name.split("_mp-", 1)
                 _cached = _crg(_cf, _cm)
                 if _cached:
-                    import shutil as _sh
-                    for _fn in ("OUTCAR", "CONTCAR", "vasprun.xml"):
-                        _src = _cached / _fn
-                        if _src.is_file():
-                            _sh.copy2(str(_src), str(cd / _fn))
                     _logger.info("%s restored from calc cache", cd.name)
                     continue
             _submit_or_skip(cd, f"phase:{cd.name}", s["name"])
@@ -773,7 +763,6 @@ def _advance_one_system(s: dict, active: dict, *,
             _logger.error("%s CPD failed: %s", s["name"], exc)
             print(f"  ✗ {s['name']:<18} CPD post-processing FAILED")
         return
-
     if p == "UC_DF":
         try:
             td = _target_dir(s)

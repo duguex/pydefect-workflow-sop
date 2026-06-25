@@ -153,14 +153,18 @@ class TestCachePutGet:
         from vasp_sop.core.cache import calc_results_put, calc_results_get
         src = tmp_path / "src"
         src.mkdir()
-        (src / "CONTCAR").write_text("final structure\n")
-        (src / "calc_results.json").write_text('{"energy": -10.0}\n')
+        (src / "OUTCAR").write_text(
+            " free  energy    TOTEN  =    -10.0 eV\n"
+            " General timing and accounting\n"
+        )
+        (src / "CONTCAR").write_text(
+            "H\n1.0\n10 0 0\n0 10 0\n0 0 10\nH\n1\nDirect\n0 0 0\n"
+        )
         calc_results_put("TestMe", "42", src)
         cached = calc_results_get("TestMe", "42")
         assert cached is not None
-        assert (cached / "OUTCAR").is_file()
-        assert (cached / "CONTCAR").is_file()
-        assert (cached / ".converged").is_file()
+        assert cached["total_energy"] == -10.0
+        assert cached["converged"] == 1
 
     def test_get_missing_returns_none(self):
         from vasp_sop.core.cache import calc_results_get
@@ -170,11 +174,17 @@ class TestCachePutGet:
         from vasp_sop.core.cache import calc_results_put, calc_results_get
         src1 = tmp_path / "src1"
         src1.mkdir()
-        (src1 / "OUTCAR").write_text("converged\n")
+        (src1 / "OUTCAR").write_text(
+            " free  energy    TOTEN  =    -10.0 eV\n"
+            " General timing and accounting\n"
+        )
         calc_results_put("First", "1", src1)
         src2 = tmp_path / "src2"
         src2.mkdir()
-        (src2 / "OUTCAR").write_text("converged\n")
+        (src2 / "OUTCAR").write_text(
+            " free  energy    TOTEN  =    -10.0 eV\n"
+            " General timing and accounting\n"
+        )
         calc_results_put("Second", "2", src2)
         assert calc_results_get("First", "1") is not None
         assert calc_results_get("Second", "2") is not None
