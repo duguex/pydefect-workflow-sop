@@ -600,6 +600,14 @@ def _add_batch_parser(subparsers) -> None:
         help="Build defect structures and generate inputs only; do NOT submit any VASP jobs.",
     )
 
+    # progress
+    pp = sub.add_parser("progress", help="Show per-system completion percentage")
+    pp.add_argument(
+        "root", type=Path,
+        help="Project root directory containing system subdirectories",
+    )
+
+
 
 def _handle_batch(args: argparse.Namespace) -> None:
     if args.batch_action == "status":
@@ -610,8 +618,42 @@ def _handle_batch(args: argparse.Namespace) -> None:
         _batch_submit(args.root.resolve(), all_phases=args.all_phases)
     elif args.batch_action == "run":
         _batch_run(args.root.resolve(), poll_interval=args.poll, dry_run=args.dry_run)
+    elif args.batch_action == "progress":
+        _batch_progress(args.root.resolve())
 
 
+
+
+def _batch_progress(root: Path) -> None:
+    """Print per-system completion percentage (completed / total pipeline dirs)."""
+    import subprocess, json
+
+    def has_outcar(p: Path) -> bool:
+        return (p / "OUTCAR").is_file() or (p / "output" / "OUTCAR").is_file()
+
+    rows: list[tuple[int, str, int, int, int, int, int, int]] = []
+    for d in sorted(root.iterdir()):
+        if not d.is_dir() or d.name.startswith("."):
+            continue
+        cpd_dirs = [p for p in (d / "cpd").iterdir() if p.is_dir()] if (d / "cpd").is_dir() else []
+        uc_dirs = [p for p in (d / "unitcell").iterdir() if p.is_dir()] if (d / "unitcell").is_dir() else []
+        df_dirs = [p for p in (d / "defect").iterdir() if p.is_dir()] if (d / "defect").is_dir() else []
+
+        cpd_ok = sum(1 for p in cpd_dirs if has_outcar(p))
+        uc_ok = sum(1 for p in uc_dirs if has_outcar(p))
+        df_ok = sum(1 for p in df_dirs if has_outcar(p))
+
+        nc, nu, nd = len(cpd_dirs), len(uc_dirs), len(df_dirs)
+        total = nc + nu + nd
+        done = cpd_ok + uc_ok + df_ok
+
+        pct = 100 if (d / "defect" / "defect_energy_summary.json").exists() else (
+            int(done / total * 100) if total else 0
+        )
+        if nc + nu + nd > 0 or pct == 100:
+            rows.append((pct, d.name, nc, nu, nd, cpd_ok, uc_ok, df_ok))
+    for pct, name, nc, nu, nd, cpd_ok, uc_ok, df_ok in rows:
+        print(f"{name:22s}  {pct:3d}%  {cpd_ok:>2d}/{nc:<3d}  {uc_ok:>2d}/{nu:<3d}  {df_ok:>3d}/{nd:<3d}")
 
 def _batch_status(root: Path) -> None:
     """Scan *root* for vasp-sop systems and print status table."""
