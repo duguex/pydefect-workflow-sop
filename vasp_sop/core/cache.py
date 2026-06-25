@@ -126,12 +126,31 @@ def _incar_fingerprint(src_dir: Path) -> str:
             parts.append(f"{k}={v}")
     return "|".join(parts) if parts else "default"
 
+
+def _potcar_fingerprint(src_dir: Path) -> str:
+    """Return a compact POTCAR fingerprint for the calculation.
+
+    Reads the header line (``PAW_PBE X\\d+ 01Jan2000``) of each POTCAR
+    block and extracts the element+version identifier (e.g. ``Ba_sv``,
+    ``Ga_d``).  Returns ``"nopot"`` when no POTCAR file is found.
+    """
+    potcar_path = src_dir / "POTCAR"
+    if not potcar_path.is_file():
+        return "nopot"
+    import re as _re
+    try:
+        text = potcar_path.read_text()
+        pp_ids = _re.findall(r"PAW_\w+\s+(\S+)", text)
+        return ",".join(pp_ids) if pp_ids else "unknown"
+    except Exception:
+        return "unknown"
+
 def _content_hash(src_dir: Path) -> str:
     """Return a stable content hash for a VASP calculation directory.
 
-    Combines structure composition, KPOINTS grid, and INCAR fingerprint
-    into a compact, repeatable string.  Two directories with identical
-    inputs produce the same hash -> cache dedup across projects.
+    Combines structure composition, KPOINTS grid, INCAR fingerprint,
+    and POTCAR identifiers into a compact, repeatable string.
+    Two directories with identical inputs produce the same hash.
     """
     # Structure component
     struct_tag = "unknown"
@@ -163,9 +182,10 @@ def _content_hash(src_dir: Path) -> str:
             pass
 
     # INCAR component
-    incar_fp = _incar_fingerprint(src_dir)
+    # POTCAR component
+    potcar_fp = _potcar_fingerprint(src_dir)
 
-    return f"{struct_tag}_{kpoints_tag}_{incar_fp}"
+    return f"{struct_tag}_{kpoints_tag}_{incar_fp}_{potcar_fp}"
 
 
 def _extract_tags(
