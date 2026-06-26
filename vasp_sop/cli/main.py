@@ -1200,10 +1200,32 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
             backfilled += 1
     if backfilled:
         logger.info("Backfilled %d already-converged phase results into cache.", backfilled)
-    # Startup backfill is intentionally scoped to competing phase dirs
-    # only; the polling loop below handles incremental caching of all
-    # completed calculations.  Use ``vasp-sop cache put -r`` for a
-    # full-tree backfill if needed.
+    # ── Sweep for orphan crisp outputs ──────────────────────────
+    # Previously completed crisp jobs may have OUTCARs stuck in
+    # ``output/`` subdirectories.  Move and cache them so the
+    # pipeline sees completed calculations without re-submitting.
+    orphaned = 0
+    for s in sys_list:
+        for root_dir in (s["root"] / _UC, s["root"] / _DF):
+            if not root_dir.is_dir():
+                continue
+            for child in root_dir.iterdir():
+                if not child.is_dir():
+                    continue
+                output_dir = child / "output"
+                if not output_dir.is_dir():
+                    continue
+                if not (output_dir / "OUTCAR").is_file():
+                    continue
+                text = (output_dir / "OUTCAR").read_text()
+                if "General timing and accounting" not in text[-4096:]:
+                    continue
+                # Converged OUTCAR in output/ — move and cache
+                move_crisp_outputs(child)
+                _cache_phase_results(child)
+                orphaned += 1
+    if orphaned:
+        logger.info("Processed %d orphaned crisp outputs.", orphaned)
 
     while True:
         # 1. Poll active jobs
