@@ -1102,7 +1102,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
     def _is_active(path: Path) -> bool:
         return str(path.resolve()) in _crisp_active
 
-    from vasp_sop.core.cache import cache_lookup, backfill_all, vasp_results_put as _cache_put
+    from vasp_sop.core.cache import cache_lookup, vasp_results_put as _cache_put
 
     def _cache_phase_results(wd: Path) -> None:
         """Cache completed VASP calculation."""
@@ -1200,10 +1200,10 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
             backfilled += 1
     if backfilled:
         logger.info("Backfilled %d already-converged phase results into cache.", backfilled)
-    # Walk ALL directories for any additional converged calculations not yet cached
-    extra = backfill_all(root)
-    if extra:
-        logger.info("Backfilled %d additional calculations from full tree scan.", extra)
+    # Startup backfill is intentionally scoped to competing phase dirs
+    # only; the polling loop below handles incremental caching of all
+    # completed calculations.  Use ``vasp-sop cache put -r`` for a
+    # full-tree backfill if needed.
 
     while True:
         # 1. Poll active jobs
