@@ -1217,12 +1217,11 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
                     continue
                 if not (output_dir / "OUTCAR").is_file():
                     continue
-                text = (output_dir / "OUTCAR").read_text()
-                if "General timing and accounting" not in text[-4096:]:
-                    continue
-                # Converged OUTCAR in output/ — move and cache
+                # Converged OUTCAR in output/ — move outputs
                 move_crisp_outputs(child)
-                _cache_phase_results(child)
+                # Cache if not already cached (avoids redundant pymatgen)
+                if cache_lookup(child) is None:
+                    _cache_phase_results(child)
                 orphaned += 1
     if orphaned:
         logger.info("Processed %d orphaned crisp outputs.", orphaned)
