@@ -14,6 +14,7 @@ import json
 import logging
 import sqlite3
 import time
+import threading
 from pathlib import Path
 from typing import Any, Optional
 
@@ -44,13 +45,17 @@ def override_cache_root(p: Path) -> None:
 # ══════════════════════════════════════════════════════════════════════════
 
 
+_db_lock = threading.Lock()
+
+
 def _get_db() -> sqlite3.Connection:
     CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(str(CACHE_ROOT / "cache.db"), timeout=10)
     db.row_factory = sqlite3.Row
-    db.execute("PRAGMA journal_mode=WAL")
-    db.execute("PRAGMA synchronous=NORMAL")
-    _init_db(db)
+    with _db_lock:
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA synchronous=NORMAL")
+        _init_db(db)
     return db
 
 

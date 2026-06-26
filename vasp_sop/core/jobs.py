@@ -13,6 +13,7 @@ the ``crisp`` CLI is available on ``PATH``.
 from __future__ import annotations
 
 import json
+import os
 import logging
 import subprocess
 import time
@@ -253,6 +254,17 @@ def run_local(
 
     Raises RuntimeError on non‑zero exit, TimeoutError on timeout.
     """
+    # Ensure conda environment bins come before ~/.local/bin in the
+    # subprocess PATH, otherwise a stale system-wide CLI (e.g. vise)
+    # may use an incompatible Python/numpy version.
+    env = None
+    _path = os.environ.get("PATH", "")
+    if ".local/bin" in _path:
+        parts = _path.split(":")
+        local_dirs = [p for p in parts if ".local/bin" in p]
+        conda_dirs = [p for p in parts if "conda" in p and "bin" in p]
+        other_dirs = [p for p in parts if p not in local_dirs and p not in conda_dirs]
+        env = {**os.environ, "PATH": ":".join(conda_dirs + other_dirs + local_dirs)}
     try:
         result = subprocess.run(
             cmd,
@@ -261,6 +273,7 @@ def run_local(
             text=True,
             timeout=timeout,
             shell=shell,
+            env=env,
         )
     except subprocess.TimeoutExpired as e:
         raise TimeoutError(
