@@ -462,16 +462,31 @@ def _add_cache_parser(subparsers) -> None:
     sp.add_argument("--recursive", "-r", action="store_true",
                     help="Recursively scan directory tree for OUTCARs")
 
+    # query
+    sp = sub.add_parser("query", help="Semantic cross-project cache query")
+    sp.add_argument("--formula", "-f", help="Filter by chemical formula")
+    sp.add_argument("--functional", help="Filter by functional (e.g. PBE, HSE, SCAN)")
+    sp.add_argument("--calc-type", help="Filter by calc type (e.g. Static, Relax)")
+    sp.add_argument("--tags", help="Filter by tags (e.g. DFT+U, spin)")
+    sp.add_argument("--bandgap-min", type=float, help="Minimum bandgap (eV)")
+    sp.add_argument("--limit", type=int, default=50, help="Max results")
+
+    # migrate
+    sp = sub.add_parser("migrate", help="Migrate from old SQLite cache to JSONStore")
+    sp.add_argument("--force", action="store_true",
+                    help="Force migration even if JSONStore already has data")
+
     # verify
-    sub.add_parser("verify", help="Check DB vs filesystem consistency")
+    sub.add_parser("verify", help="Check store consistency")
 
 
 def _handle_cache(args: argparse.Namespace) -> None:
-    from vasp_sop.core.cache import cache_lookup, vasp_results_put, _get_db
+    from vasp_sop.core.cache import (
+        cache_lookup, vasp_results_put, query, list_cache,
+        cache_stats, migrate_from_sqlite,
+    )
     from pathlib import Path
     if args.cache_action == "put":
-        from vasp_sop.core.cache import vasp_results_put
-
         if args.recursive:
             root = args.path.resolve()
             if not root.is_dir():
@@ -494,7 +509,7 @@ def _handle_cache(args: argparse.Namespace) -> None:
                 return
 
             # Phase 2: classify in parallel (cache check + convergence check)
-            # Threads are fine here — I/O bound (NFS tail reads + SQLite).
+            # Threads are fine here — I/O bound (NFS tail reads).
             from concurrent.futures import ThreadPoolExecutor
             to_cache: list[Path] = []
             unconverged: list[Path] = []
@@ -516,27 +531,45 @@ def _handle_cache(args: argparse.Namespace) -> None:
                             to_cache.append(d)
                         elif status == "unconverged":
                             unconverged.append(d)
+                        # "cached": skip silently
                         pbar.update(1)
+
+            # Phase 2.5: report cached count
+            cached_count = len(all_dirs) - len(to_cache) - len(unconverged)
+            if cached_count:
+                print(f"  {cached_count} directories already cached, skipped.")
 
             # Phase 3: report unconverged
             for d in unconverged:
                 print(f"  ! {d} (not converged)")
 
-            # Phase 4: parallel cache converged
+            # Phase 4: parallel cache converged (parse in workers, write once)
             if to_cache:
-                n_cached = 0
+                from vasp_sop.core.cache import _parse_and_build
+                results = []
                 with ProcessPoolExecutor(max_workers=16) as pool:
-                    futures = {pool.submit(vasp_results_put, d): d for d in to_cache}
+                    futures = {pool.submit(_parse_and_build, d): d for d in to_cache}
                     with tqdm(total=len(to_cache), desc="Caching", unit=" dirs") as pbar:
                         for future in as_completed(futures):
                             try:
-                                future.result()
-                                n_cached += 1
+                                results.append(future.result())
                             except Exception as exc:
                                 d = futures[future]
-                                print(f"\n  ! {d} (cache failed: {exc})")
+                                print(f"\n  ! {d} (parse failed: {exc})")
                             pbar.update(1)
-                print(f"Cached {n_cached} directories under {root}")
+
+                from vasp_sop.core.cache import _get_stores
+                meta_store, blob_store = _get_stores()
+                meta_docs, blob_docs = [], []
+                for r in results:
+                    meta_docs.append(r["meta"])
+                    if r.get("blob"):
+                        blob_docs.append(r["blob"])
+                if meta_docs:
+                    meta_store.update(meta_docs)
+                if blob_docs:
+                    blob_store.update(blob_docs)
+                print(f"Cached {len(meta_docs)} directories under {root}")
 
             if unconverged:
                 print(f"Skipped {len(unconverged)} unconverged directories")
@@ -549,53 +582,70 @@ def _handle_cache(args: argparse.Namespace) -> None:
             return
         text = outcar.read_text()
         converged = "General timing and accounting" in text[-4096:]
-        vasp_results_put(path, formula=args.formula, task_name=getattr(args, "task_name", None))
+        vasp_results_put(path, formula=args.formula,
+                         task_name=getattr(args, "task_name", None))
         status = "converged" if converged else "not converged"
         print(f"Cached {path} ({status})")
         return
-    if args.cache_action == "status":
-        db = _get_db()
-        calc_count = db.execute("SELECT COUNT(*) FROM vasp_results").fetchone()[0]
-        converged = db.execute(
-            "SELECT COUNT(*) FROM vasp_results WHERE converged=1"
-        ).fetchone()[0]
-        with_energy = db.execute(
-            "SELECT COUNT(*) FROM vasp_results WHERE total_energy IS NOT NULL"
-        ).fetchone()[0]
 
-        print(f"vasp_results: {calc_count} entries  ({converged} converged, {with_energy} with energy)")
+    if args.cache_action == "status":
+        stats = cache_stats()
+        print(f"vasp_results: {stats['total_entries']} entries  "
+              f"({stats['converged_entries']} converged)  "
+              f"{len(stats['formulas'])} unique formulas")
+        if stats["formulas"]:
+            print(f"Formulas: {', '.join(stats['formulas'][:20])}")
 
         if args.verbose:
             print()
-            for row in db.execute(
-                "SELECT formula, content_hash, total_energy, converged, n_sites, "
-                "formula_pretty, space_group, source_dir, "
-                "datetime(cached_at, 'unixepoch') AS ts "
-                "FROM vasp_results ORDER BY cached_at DESC"
-            ):
-                c = "C" if row["converged"] else " "
-                e = f"{row['total_energy']:.4f}" if row["total_energy"] is not None else "?"
-                sg = row["space_group"] or "?"
-                ns = str(row["n_sites"] or "?")
-                src = row["source_dir"] or "?"
-                print(f"  {c} {row['formula']:12s} {row['content_hash']:12s}"
+            for entry in list_cache(limit=200):
+                c = "C" if entry.get("converged") else " "
+                e = f"{entry.get('total_energy', 0):.4f}" if entry.get("total_energy") is not None else "?"
+                sg = entry.get("space_group") or "?"
+                ns = str(entry.get("n_sites") or "?")
+                src = entry.get("source_dir") or "?"
+                import datetime
+                ts = datetime.datetime.fromtimestamp(
+                    entry.get("cached_at", 0)
+                ).strftime("%Y-%m-%d %H:%M:%S")
+                print(f"  {c} {entry['formula']:12s} {entry.get('content_hash', '')[:12]:12s}"
                       f"  E={e}  {ns:>4s} sites  {sg:8s}"
-                      f"  {row['ts']}  {src}")
+                      f"  {ts}  {src}")
+
+    elif args.cache_action == "query":
+        results = query(
+            formula=args.formula,
+            functional=args.functional,
+            calc_type=args.calc_type,
+            tags_contains=args.tags,
+            bandgap_min=args.bandgap_min,
+            limit=args.limit,
+        )
+        print(f"{len(results)} results:")
+        for r in results:
+            e = f"{r.get('total_energy', 0):.4f}" if r.get('total_energy') is not None else "?"
+            bg = f"{r.get('bandgap', 0):.2f}" if r.get('bandgap') is not None else "?"
+            print(f"  {r['formula']:12s}  E={e}  gap={bg}eV"
+                  f"  {r.get('calc_type') or '':10s}  tags={r.get('tags', '')}")
+
+    elif args.cache_action == "migrate":
+        stats = cache_stats()
+        if stats["total_entries"] > 0 and not args.force:
+            print(f"JSONStore already has {stats['total_entries']} entries. "
+                  f"Use --force to overwrite.")
+            return
+        n = migrate_from_sqlite()
+        print(f"Migrated {n} records from SQLite cache.db.")
 
     elif args.cache_action == "verify":
-        db = _get_db()
-        ok = 0
-        incomplete = []
-        for row in db.execute("SELECT formula, content_hash, converged, outcar_json FROM vasp_results"):
-            if row["converged"] and row["outcar_json"] is not None:
-                ok += 1
-            else:
-                incomplete.append(f"{row['formula']}/{row['content_hash']}")
-        print(f"OK: {ok}")
-        if incomplete:
-            print(f"Incomplete (missing outcar_json or not converged): {len(incomplete)}")
-            for name in incomplete[:10]:
-                print(f"  {name}")
+        stats = cache_stats()
+        print(f"Total entries: {stats['total_entries']}")
+        print(f"Converged: {stats['converged_entries']}")
+        print(f"Unique formulas: {stats['unique_formulas']}")
+        for formula in stats["formulas"]:
+            entries = query(formula=formula, limit=1)
+            ok = "OK" if entries else "NO_BLOB"
+            print(f"  {formula:12s}  {ok}")
     else:
         print(f"Unknown cache action: {args.cache_action}")
 def _add_batch_parser(subparsers) -> None:
@@ -772,8 +822,7 @@ def _crisp_active_dirs(*, skip: bool = False) -> set[str]:
             if j.get("status") in alive and j.get("local_dir")}
 
 
-def _advance_one_system(s: dict, active: dict, *,
-                         dry_run: bool = False) -> None:
+def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
     """Advance one system by one cycle (subprocess-safe for ProcessPoolExecutor)."""
     # Re-imports needed for subprocess workers
     import logging
@@ -784,7 +833,10 @@ def _advance_one_system(s: dict, active: dict, *,
     from vasp_sop.defect import cpd as _cpd
     from vasp_sop.defect.builder import build_all as _build_defects
     from vasp_sop.defect.analysis import analyze as _analyze_defects
-    from vasp_sop.core.cache import cache_lookup, vasp_results_get as _crg, vasp_results_put
+    from vasp_sop.core.cache import (
+        cache_lookup, vasp_results_get as _crg, vasp_results_put,
+        mark_submitted, is_submitted,
+    )
     _logger = logging.getLogger(__name__)
     _CPD = "cpd"; _UC = "unitcell"; _DF = "defect"
 
@@ -795,7 +847,7 @@ def _advance_one_system(s: dict, active: dict, *,
             return None
         try:
             job = submit_vasp(path.resolve())
-            active[str(path.resolve())] = label
+            mark_submitted(str(path.resolve()), job.task_name)
             print(f"  → {sys_name:<18} {label}: {job.task_name}")
             return job
         except Exception as exc:
@@ -819,6 +871,7 @@ def _advance_one_system(s: dict, active: dict, *,
             if pd.is_dir() and pd.name != td.name and pd.name not in ("combos", "mp_flag")
             and input_ready(pd)
             and not check_converged(pd)
+            and not is_submitted(str(pd.resolve()))
             and cache_lookup(pd) is None
         )
 
@@ -898,7 +951,7 @@ def _advance_one_system(s: dict, active: dict, *,
                 print(f"  [dry-run] {s['name']:<18} would submit: {' '.join(parts)}")
     if p == "TARGET":
         td = _target_dir(s)
-        if td and str(td.resolve()) not in active and not check_converged(td):
+        if td and not is_submitted(str(td.resolve())) and not check_converged(td):
             f, m = s["formula"], s["mpid"]
             cached = None
             if f and m:
@@ -915,7 +968,7 @@ def _advance_one_system(s: dict, active: dict, *,
 
     if p == "COMPETING":
         for cd in _competing_dirs(s):
-            if str(cd.resolve()) in active:
+            if is_submitted(str(cd.resolve())):
                 continue
             if "_mp-" in cd.name:
                 _cf, _cm = cd.name.split("_mp-", 1)
@@ -1000,7 +1053,7 @@ def _advance_one_system(s: dict, active: dict, *,
                     continue
                 if check_converged(task_dir):
                     continue
-                if str(task_dir.resolve()) in active:
+                if is_submitted(str(task_dir.resolve())):
                     continue
                 prepare_inputs(task_dir, s["config"], task_type=task)
                 _submit_or_skip(task_dir, f"uc-{task}", s["name"])
@@ -1013,7 +1066,7 @@ def _advance_one_system(s: dict, active: dict, *,
                         continue
                     if check_converged(child):
                         continue
-                    if str(child.resolve()) in active:
+                    if is_submitted(str(child.resolve())):
                         continue
                     _submit_or_skip(child, f"df-{child.name}", s["name"])
 
@@ -1093,14 +1146,32 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
     print(f"Batch run: {len(sys_list)} systems\n")
 
 
-    # ── Query crisp for active jobs (prevent re-submit on restart) ──
-    # Skip the subprocess in dry-run (no submission, no need to query).
-    _crisp_active = _crisp_active_dirs(skip=dry_run)
-    if _crisp_active:
-        logger.info("Found %d active crisp tasks, will skip their directories", len(_crisp_active))
+    # ── Populate submission DB from crisp + filesystem ────────────────
+    if not dry_run:
+        from vasp_sop.core.cache import mark_submitted, cache_lookup as _cl
+        _crisp_active = _crisp_active_dirs(skip=False)
+        if _crisp_active:
+            logger.info("Found %d active crisp tasks, recording in submission DB.",
+                        len(_crisp_active))
+            for p in _crisp_active:
+                mark_submitted(p, "restored")
 
-    def _is_active(path: Path) -> bool:
-        return str(path.resolve()) in _crisp_active
+        # Also mark all unconverged input-ready dirs per system — they were
+        # submitted in a previous run but outputs never synced back.
+        for s in sys_list:
+            for root_dir in (s["root"] / _CPD, s["root"] / _UC, s["root"] / _DF):
+                if not root_dir.is_dir():
+                    continue
+                for child in root_dir.iterdir():
+                    if not child.is_dir():
+                        continue
+                    if check_converged(child):
+                        continue
+                    if not input_ready(child):
+                        continue
+                    if _cl(child) is not None:
+                        continue
+                    mark_submitted(str(child.resolve()), "pre-existing")
 
     from vasp_sop.core.cache import cache_lookup, vasp_results_put as _cache_put
 
@@ -1125,12 +1196,13 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
     def _competing_dirs(s: dict) -> list[Path]:
         td = _target_dir(s)
         cpd_dir = s["root"] / _CPD
+        from vasp_sop.core.cache import is_submitted as _sub
         return sorted(
             pd for pd in cpd_dir.iterdir()
             if pd.is_dir() and pd.name != td.name and pd.name not in ("combos", "mp_flag")
             and input_ready(pd)
             and not check_converged(pd)
-            and not _is_active(pd)
+            and not _sub(str(pd.resolve()))
             and cache_lookup(pd) is None
         )
 
@@ -1172,6 +1244,8 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
         try:
             job = submit_vasp(path.resolve())
             active[str(path.resolve())] = label
+            from vasp_sop.core.cache import mark_submitted
+            mark_submitted(str(path.resolve()), job.task_name)
             print(f"  → {sys_name:<18} {label}: {job.task_name}")
             return job
         except Exception as exc:
@@ -1233,6 +1307,8 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
             if check_converged(wd):
                 move_crisp_outputs(wd)
                 _cache_phase_results(wd)
+                from vasp_sop.core.cache import clear_submission
+                clear_submission(wd_str)
                 del active[wd_str]
                 logger.info("Completed: %s", wd.name)
 
@@ -1256,7 +1332,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
         import functools as _ft
         _worker = _ft.partial(_advance_one_system, dry_run=dry_run)
         with _PPE(max_workers=14) as _pool:
-            list(_pool.map(_worker, sys_list, [active]*len(sys_list)))
+            list(_pool.map(_worker, sys_list))
         if dry_run:
             print("\nDry-run complete. No VASP jobs were submitted.")
             break
