@@ -33,13 +33,14 @@ CALC_CACHE: Path = CACHE_ROOT / "calc_cache"  # kept for backward compat
 def override_cache_root(p: Path) -> None:
     """Swap cache root (for testing)."""
     global CACHE_ROOT, MP_CACHE, POSCAR_CACHE, CALC_CACHE, _meta_store, _blob_store, _SUBMISSION_DB
-    CACHE_ROOT = p
-    MP_CACHE = CACHE_ROOT / "mp_cache"
-    POSCAR_CACHE = MP_CACHE / "poscars"
-    CALC_CACHE = CACHE_ROOT / "calc_cache"
-    _meta_store = None
-    _blob_store = None
-    _SUBMISSION_DB = None
+    with _stores_lock:
+        CACHE_ROOT = p
+        MP_CACHE = CACHE_ROOT / "mp_cache"
+        POSCAR_CACHE = MP_CACHE / "poscars"
+        CALC_CACHE = CACHE_ROOT / "calc_cache"
+        _meta_store = None
+        _blob_store = None
+        _SUBMISSION_DB = None
 
 
 # ── Store singletons (lazy-init) ───────────────────────────────────────
@@ -826,16 +827,17 @@ _SUBMISSION_DB: sqlite3.Connection | None = None
 def _submission_db() -> sqlite3.Connection:
     """Return the submission-tracking SQLite connection (WAL mode)."""
     global _SUBMISSION_DB
-    if _SUBMISSION_DB is None:
-        CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-        db = sqlite3.connect(str(CACHE_ROOT / "submissions.db"), timeout=10)
-        db.execute("PRAGMA journal_mode=WAL")
-        db.execute("""CREATE TABLE IF NOT EXISTS submitted (
-            dir_path TEXT PRIMARY KEY,
-            task_name TEXT NOT NULL,
-            submitted_at REAL NOT NULL
-        )""")
-        _SUBMISSION_DB = db
+    with _stores_lock:
+        if _SUBMISSION_DB is None:
+            CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+            db = sqlite3.connect(str(CACHE_ROOT / "submissions.db"), timeout=10)
+            db.execute("PRAGMA journal_mode=WAL")
+            db.execute("""CREATE TABLE IF NOT EXISTS submitted (
+                dir_path TEXT PRIMARY KEY,
+                task_name TEXT NOT NULL,
+                submitted_at REAL NOT NULL
+            )""")
+            _SUBMISSION_DB = db
     return _SUBMISSION_DB
 
 
