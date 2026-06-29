@@ -1262,6 +1262,8 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
     backfilled = 0
     for s in sys_list:
         cpd_root = s["root"] / _CPD
+        if not cpd_root.is_dir():
+            continue
         for pd in cpd_root.iterdir():
             if not pd.is_dir() or "_mp-" not in pd.name:
                 continue
