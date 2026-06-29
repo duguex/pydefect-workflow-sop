@@ -217,6 +217,17 @@ def compute_chemical_potentials(
                 composition_energies, config.molecule_corrections
             )
 
+    # ── Binary compound shortcut ──────────────────────────────────
+    # pydefect's sre/cv/pc pipeline doesn't handle 2-element systems
+    # (1D chem-pot diagram). Use direct computation instead.
+    n_elements = len(target_composition.elements)
+    if n_elements <= 2 and not target_vertices.is_file():
+        logger.info("Binary compound (%d elements): using direct chem-pot computation.",
+                     n_elements)
+        _write_binary_target_vertices(cpd_root, target_composition, str(target_composition))
+        return
+
+
     # ── relative_energies.yaml / standard_energies.yaml ──────────────
     if not target_vertices.is_file():
         run_local("pydefect sre", cwd=cpd_root)
@@ -433,3 +444,67 @@ def _write_synthetic_chem_pot_diag(
     }
     with open(cpd_root / _CHEM_POT_DIAG, "w") as f:
         json.dump(data, f, indent=2)
+
+def _write_binary_target_vertices(
+    cpd_root: Path,
+    target_composition: Composition,
+    formula: str,
+) -> None:
+    """Write synthetic CPD output for binary compounds.
+
+    pydefect's sre/cv/pc pipeline cannot handle 2-element systems
+    (1D chem-pot diagram). Compute chemical potentials directly from
+    competing-phase total energies instead.
+    """
+    import yaml
+    comp_energies_path = cpd_root / _COMPOSITION_ENERGIES
+    se_path = cpd_root / _STANDARD_ENERGIES
+    target_vertices = cpd_root / _TARGET_VERTICES
+
+    if not comp_energies_path.is_file():
+        logger.warning("Binary CPD: %s not found, cannot compute chem pots.",
+                       _COMPOSITION_ENERGIES)
+        return
+
+    comp_energies = yaml.safe_load(comp_energies_path.read_text()) or {}
+
+    # Build standard_energies.yaml
+    std_energies = {}
+    for phase, data in comp_energies.items():
+        energy = data.get("energy", 0.0)
+        comp = Composition(phase)
+        n = comp.num_atoms if comp.num_atoms > 0 else 1
+        std_energies[phase] = {
+            "energy": energy,
+            "energy_per_atom": energy / n,
+        }
+
+    with open(se_path, "w") as f:
+        yaml.dump(std_energies, f, default_flow_style=None)
+    logger.info("Binary CPD: wrote %s with %d phases",
+                _STANDARD_ENERGIES, len(std_energies))
+
+    # Write synthetic target_vertices.yaml
+    data = {
+        "target": formula,
+        formula: {
+            "chem_pot": 0.0,
+            "competing_phases": list(std_energies.keys()),
+            "impurity_phases": [],
+        },
+    }
+    with open(target_vertices, "w") as f:
+        yaml.dump(data, f, default_flow_style=None)
+    logger.info("Binary CPD: wrote synthetic %s for %s", _TARGET_VERTICES, formula)
+
+    # Write synthetic chem_pot_diag.json
+    import json
+    diag = {
+        "target_composition": formula,
+        "competing_phases": list(std_energies.keys()),
+        "vertices": [[0.0]],
+        "target_vertices": [[0.0]],
+    }
+    with open(cpd_root / _CHEM_POT_DIAG, "w") as f:
+        json.dump(diag, f, indent=2)
+    logger.info("Binary CPD: wrote synthetic %s", _CHEM_POT_DIAG)

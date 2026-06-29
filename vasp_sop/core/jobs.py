@@ -223,8 +223,11 @@ def wait_all(jobs: list[VaspJob], poll_interval: int = 60) -> None:
                     j.work_dir.name, rc, len(pending),
                 )
                 if rc != 0:
+                    for other_job, other_proc in list(pending):
+                        other_proc.terminate()
                     raise RuntimeError(
-                        f"VASP failed in {j.work_dir} (exit code {rc})."
+                        f"VASP failed in {j.work_dir} (exit code {rc}); "
+                        f"terminated {len(pending)} pending jobs."
                     )
         if pending:
             time.sleep(poll_interval)

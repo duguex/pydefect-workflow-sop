@@ -93,7 +93,19 @@ def run_vasp(defect_root: Path) -> None:
                     )
                     restart_from_contcar(d)
                 else:
-                    logger.warning("Skipping %s: stalled (max_f=%.4f)", dirname, cur_f)
+                    # Stalled: auto-recover with POTIM increase
+                    stalled.discard(dirname)
+                    logger.warning("Recovering stalled %s (max_f=%.4f)", dirname, cur_f)
+                    incar_path = d / "INCAR"
+                    if incar_path.is_file():
+                        from pymatgen.io.vasp.inputs import Incar
+                        incar = Incar.from_file(str(incar_path))
+                        current_potim = incar.get("POTIM", 0.5)
+                        new_potim = min(current_potim * 1.5, 5.0)
+                        incar["POTIM"] = new_potim
+                        incar.write_file(str(incar_path))
+                        logger.info("  POTIM %.2f -> %.2f for %s", current_potim, new_potim, dirname)
+                    restart_from_contcar(d)
 
         # Only submit non-stalled jobs
         active = [d for d in dirs if d.name not in stalled]

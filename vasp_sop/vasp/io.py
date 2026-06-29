@@ -102,7 +102,7 @@ def check_converged(path: Path) -> bool:
     if idx < 0:
         return False
     head = text[:16384]
-    m_efg = _re.search(r"EDIFFG\s*=\s*([-\d.]+)", head)
+    m_efg = _re.search(r"EDIFFG\s*=\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", head)
     efg = abs(float(m_efg.group(1))) if m_efg else 0.03
     max_f = 0.0
     for line in text[idx:].splitlines()[2:]:

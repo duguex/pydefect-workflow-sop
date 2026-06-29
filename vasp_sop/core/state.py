@@ -182,8 +182,11 @@ class StateStore:
 
     @staticmethod
     def save(state: PipelineState) -> None:
-        """Persist *state* to ``.pipeline_state.json``."""
+        """Persist *state* to ``.pipeline_state.json`` (atomic write)."""
+        import os as _os
         path = StateStore.state_path(state.root)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
+        tmp = path.with_suffix(".json.tmp")
+        with open(tmp, "w") as f:
             json.dump(_to_dict(state), f, indent=2)
+        _os.replace(tmp, path)
