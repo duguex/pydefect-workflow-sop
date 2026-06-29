@@ -344,7 +344,7 @@ def _parse_vasp_dir(src_dir: Path) -> dict[str, Any]:
         if doc.output and doc.output.structure:
             a, b, c = doc.output.structure.lattice.abc
 
-        return {
+        result = {
             "converged": doc.state == "successful",
             "total_energy": doc.output.energy if doc.output else None,
             "bandgap": doc.output.bandgap if doc.output else None,
@@ -357,6 +357,10 @@ def _parse_vasp_dir(src_dir: Path) -> dict[str, Any]:
             "tags": _tags_from_doc(doc),
             "parsed_by": "TaskDoc",
         }
+        # If TaskDoc returned no energy, fall through to regex instead of
+        # returning bad data that causes vasp_results_put to skip caching.
+        if result["total_energy"] is not None:
+            return result
     except Exception as exc:
         logger.debug("TaskDoc parse failed for %s: %s, falling back to regex",
                        src_dir, exc)
@@ -371,9 +375,9 @@ def _parse_vasp_dir(src_dir: Path) -> dict[str, Any]:
     text = outcar_path.read_text()
     total_energy: float | None = None
     converged = False
-    m_e = _re.search(r"free\s+energy\s+TOTEN\s*=\s*([-\d.]+)", text)
-    if m_e:
-        total_energy = float(m_e.group(1))
+    all_e = _re.findall(r"free\s+energy\s+TOTEN\s*=\s*([-\d.]+)", text)
+    if all_e:
+        total_energy = float(all_e[-1])
     if "General timing and accounting" in text[-4096:]:
         converged = True
 
@@ -394,9 +398,9 @@ def _parse_vasp_dir(src_dir: Path) -> dict[str, Any]:
                 _sga = SpacegroupAnalyzer(struct, symprec=0.1)
                 space_group = _sga.get_space_group_symbol()
                 a, b, c = struct.lattice.abc
+                break
             except Exception:
-                pass
-            break
+                continue
 
     incar: Incar | None = None
     incar_path = src_dir / "INCAR"
@@ -463,10 +467,10 @@ def _build_blob(src_dir: Path) -> dict[str, Any]:
             blob["outcar_dict"] = _sanitize_dict(d)
         except Exception:
             text = outcar_path.read_text()
-            m = _re.search(r"free\s+energy\s+TOTEN\s*=\s*([-\d.]+)", text)
-            if m:
+            all_e = _re.findall(r"free\s+energy\s+TOTEN\s*=\s*([-\d.]+)", text)
+            if all_e:
                 blob["outcar_dict"] = {
-                    "final_energy": float(m.group(1)),
+                    "final_energy": float(all_e[-1]),
                     "converged": "General timing and accounting" in text[-4096:],
                 }
 
@@ -483,9 +487,9 @@ def _build_blob(src_dir: Path) -> dict[str, Any]:
             try:
                 struct = Structure.from_file(str(cand))
                 blob["structure_dict"] = _sanitize_dict(struct.as_dict())
+                break
             except Exception:
-                pass
-            break
+                continue
 
     incar_path = src_dir / "INCAR"
     if incar_path.is_file():
@@ -544,7 +548,7 @@ def vasp_results_put(
         "bandgap": parsed.get("bandgap"),
         "converged": int(parsed["converged"]),
         "calc_type": parsed.get("calc_type"),
-        "n_sites": parsed.get("nsites"),
+        "nsites": parsed.get("nsites"),
         "formula_pretty": parsed.get("formula_pretty"),
         "space_group": parsed.get("space_group"),
         "a": parsed.get("a", 0.0),
@@ -579,6 +583,11 @@ def vasp_results_get(formula: str, key: str) -> dict[str, Any] | None:
     if row is None:
         row = meta_store.query_one(
             {"formula": formula, "task_name": key, "converged": 1}
+        )
+    if row is None:
+        # Also try task_name = f"{formula}_mp-{key}" (callers pass bare mpid)
+        row = meta_store.query_one(
+            {"formula": formula, "task_name": f"{formula}_mp-{key}", "converged": 1}
         )
     if row is None:
         return None
@@ -644,14 +653,15 @@ def query(
     if calc_type:
         criteria["calc_type"] = {"$regex": calc_type}
     if tags_contains:
+        safe = _re.escape(tags_contains)
         if "tags" in criteria:
-            existing = criteria["tags"]
+            existing = criteria.pop("tags")
             criteria["$and"] = [
                 {"tags": existing},
-                {"tags": {"$regex": tags_contains}},
+                {"tags": {"$regex": safe}},
             ]
         else:
-            criteria["tags"] = {"$regex": tags_contains}
+            criteria["tags"] = {"$regex": safe}
     if bandgap_min is not None:
         criteria["bandgap"] = {"$gte": bandgap_min}
     if lattice_max is not None:
@@ -711,13 +721,9 @@ def backfill_all(root: Path, max_workers: int = 16) -> int:
             except Exception as exc:
                 logger.warning("Failed to parse %s: %s", d, exc)
 
+    # Filter out None results (e.g. lattice-filtered entries)
+    results = [r for r in results if r is not None]
     meta_store, blob_store = _get_stores()
-    meta_docs: list[dict] = []
-    blob_docs: list[dict] = []
-    for r in results:
-        meta_docs.append(r["meta"])
-        if r.get("blob"):
-            blob_docs.append(r["blob"])
 
     if meta_docs:
         meta_store.update(meta_docs)
@@ -747,9 +753,13 @@ def _parse_and_build(src_dir: Path) -> dict[str, Any]:
         "bandgap": parsed.get("bandgap"),
         "converged": int(parsed.get("converged", False)),
         "calc_type": parsed.get("calc_type"),
-        "n_sites": parsed.get("nsites"),
+        "nsites": parsed.get("nsites"),
         "formula_pretty": parsed.get("formula_pretty"),
         "space_group": parsed.get("space_group"),
+        "a": parsed.get("a", 0.0),
+        "b": parsed.get("b", 0.0),
+        "c": parsed.get("c", 0.0),
+        "max_abc": parsed.get("max_abc", 0.0),
         "tags": parsed.get("tags", ""),
         "source_dir": str(src_dir.resolve()),
         "parsed_by": parsed.get("parsed_by", "unknown"),
@@ -830,7 +840,12 @@ def migrate_from_sqlite() -> int:
                 except (json.JSONDecodeError, TypeError):
                     pass
         if blob_fields:
-            blob_docs.append({"content_hash": ch, **blob_fields})
+            import json as _json
+            from monty.json import MontyEncoder
+            blob_docs.append({
+                "content_hash": ch,
+                "blob_json": _json.dumps(blob_fields, cls=MontyEncoder),
+            })
 
         count += 1
 

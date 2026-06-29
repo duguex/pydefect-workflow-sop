@@ -102,15 +102,7 @@ def _check_calc_cache(target_dir: Path) -> bool:
     else:
         blob_data = blob
 
-    from pymatgen.io.vasp.outputs import Outcar
     from pymatgen.core.structure import Structure
-
-    if "outcar_dict" in blob_data:
-        try:
-            outcar = Outcar.from_dict(blob_data["outcar_dict"])
-            outcar.write_file(str(target_dir / "OUTCAR"))
-        except Exception as exc:
-            logger.warning("Failed to restore OUTCAR from blob: %s", exc)
 
     if "structure_dict" in blob_data:
         try:

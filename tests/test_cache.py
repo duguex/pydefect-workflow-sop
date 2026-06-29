@@ -195,7 +195,7 @@ class TestVaspResultsCache:
         assert result is not None
         assert result["total_energy"] == -9.18
         assert result["converged"] == 1
-        assert result["n_sites"] == 1
+        assert result["nsites"] == 1
 
     def test_vasp_results_get_miss_no_dir(self):
         """Returns None when not cached."""
@@ -223,7 +223,7 @@ class TestVaspResultsCache:
         assert result is not None
         assert result["total_energy"] == -9.18
         assert result["converged"] == 1
-        assert result["n_sites"] == 1
+        assert result["nsites"] == 1
         assert result["incar_json"] is not None
 
     def test_vasp_results_put_missing_src_files(self, tmp_path: Path):

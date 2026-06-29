@@ -613,7 +613,7 @@ def _handle_cache(args: argparse.Namespace) -> None:
                 c = "C" if entry.get("converged") else " "
                 e = f"{entry.get('total_energy', 0):.4f}" if entry.get("total_energy") is not None else "?"
                 sg = entry.get("space_group") or "?"
-                ns = str(entry.get("n_sites") or "?")
+                ns = str(entry.get("nsites") or "?")
                 src = entry.get("source_dir") or "?"
                 import datetime
                 ts = datetime.datetime.fromtimestamp(
