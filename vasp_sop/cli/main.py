@@ -140,7 +140,7 @@ def _handle_vasp(args: argparse.Namespace) -> None:
         from vasp_sop.core.config import PipelineConfig
         wd = args.work_dir.resolve()
         config = PipelineConfig(
-            formula="", root=Path.cwd(), functional=args.functional,
+            formula="fix", root=Path.cwd(), functional=args.functional,
         )
         prepare_inputs(wd, config)
         print(f"VASP inputs generated in {wd}")
