@@ -223,11 +223,17 @@ def build_unitcell_yaml(uc_root: Path, config: PipelineConfig) -> None:
         )
 
     if dielectric_dir.is_dir():
-        run_local("cd dielectric && vise pdf", cwd=uc_root)
+        try:
+            run_local("cd dielectric && vise pdf", cwd=uc_root)
+        except Exception:
+            logger.warning("vise pdf failed (likely no band gap), skipping dielectric plot.")
 
     cmd = (
         f"pydefect_vasp u -vb {band_vasprun} -ob {band_outcar} "
         f"-odc {dielectric_outcar} -odi {dielectric_outcar} "
         f"-n '{config.formula}'"
     )
-    run_local(cmd, cwd=uc_root)
+    try:
+        run_local(cmd, cwd=uc_root)
+    except Exception:
+        logger.warning("pydefect_vasp u failed (likely zero band gap), skipping unitcell.yaml.")

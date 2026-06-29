@@ -872,8 +872,20 @@ def is_submitted(dir_path: str, *, stale_hours: float = 6.0) -> bool:
 def clear_submission(dir_path: str) -> None:
     """Remove a submission record (job completed or cancelled)."""
     db = _submission_db()
-    db.execute("DELETE FROM submitted WHERE dir_path = ?", (dir_path,))
-    db.commit()
+    with _stores_lock:
+        db.execute("DELETE FROM submitted WHERE dir_path = ?", (dir_path,))
+        db.commit()
+
+
+def _get_submitted_dirs() -> list[str]:
+    """Return all active (non-stale) submitted dir paths."""
+    db = _submission_db()
+    cutoff = time.time() - 6 * 3600
+    rows = db.execute(
+        "SELECT dir_path FROM submitted WHERE submitted_at > ?",
+        (cutoff,),
+    ).fetchall()
+    return [r[0] for r in rows]
 
 
 def clear_stale_submissions(stale_hours: float = 6.0) -> int:

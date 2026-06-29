@@ -8,6 +8,7 @@ from pathlib import Path
 
 from vasp_sop.vasp.io import check_converged, input_ready, restart_from_contcar
 from vasp_sop.core.jobs import move_crisp_outputs, submit_vasp
+from vasp_sop.vasp.errors import diagnose_failure, recommended_fix
 
 logger = logging.getLogger(__name__)
 
@@ -71,10 +72,16 @@ def run_vasp(defect_root: Path) -> None:
                 cur_f = _max_f(d)
                 if cur_f > 0 and cur_f >= old_f * 0.99:
                     stalled.add(dirname)
+                    failure = diagnose_failure(d / "OUTCAR")
                     logger.info(
-                        "No progress for %s (max_f %.4f -> %.4f), marking stalled",
+                        "Stalled %s (max_f %.4f -> %.4f)%s",
                         dirname, old_f, cur_f,
+                        f", diagnosed: {failure}" if failure else "",
                     )
+                    if failure:
+                        fix = recommended_fix(failure)
+                        if fix:
+                            logger.info("  Suggested fix for %s: %s", dirname, fix)
                 else:
                     stalled.discard(dirname)
                 prev_forces[dirname] = cur_f

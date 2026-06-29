@@ -67,24 +67,59 @@ def _resolve_target_job(target_dir: Path) -> VaspJob | None:
 def _check_calc_cache(target_dir: Path) -> bool:
     """Restore target_dir's VASP outputs from global calc cache.
 
-    Returns True if cache hit and OUTCAR/CONTCAR were restored.
+    Returns True if cache hit and OUTCAR/CONTCAR/vasprun.xml were restored.
     """
     name = target_dir.name
     if "_mp-" not in name:
         return False
     formula_pt, mpid = name.split("_mp-", 1)
 
-    from vasp_sop.core.cache import vasp_results_get
+    from vasp_sop.core.cache import vasp_results_get, _get_stores
     cached = vasp_results_get(formula_pt, mpid)
     if cached is None:
         return False
 
     logger.info("Calc cache HIT for %s (mp-%s), restoring ...", formula_pt, mpid)
-    import shutil
-    for f in ("OUTCAR", "CONTCAR", "vasprun.xml"):
-        src = cached / f
-        if src.is_file():
-            shutil.copy2(str(src), str(target_dir / f))
+
+    src_dir = cached.get("source_dir")
+    if src_dir and Path(src_dir).is_dir():
+        import shutil
+        for f in ("OUTCAR", "CONTCAR", "vasprun.xml"):
+            src = Path(src_dir) / f
+            if src.is_file():
+                shutil.copy2(str(src), str(target_dir / f))
+        return True
+
+    _, blob_store = _get_stores()
+    blob = blob_store.query_one({"content_hash": cached["content_hash"]})
+    if not blob:
+        logger.warning("No blob data for %s/%s", formula_pt, mpid)
+        return False
+
+    import json as _json
+    if "blob_json" in blob:
+        blob_data = _json.loads(blob["blob_json"])
+    else:
+        blob_data = blob
+
+    from pymatgen.io.vasp.outputs import Outcar
+    from pymatgen.core.structure import Structure
+
+    if "outcar_dict" in blob_data:
+        try:
+            outcar = Outcar.from_dict(blob_data["outcar_dict"])
+            outcar.write_file(str(target_dir / "OUTCAR"))
+        except Exception as exc:
+            logger.warning("Failed to restore OUTCAR from blob: %s", exc)
+
+    if "structure_dict" in blob_data:
+        try:
+            struct = Structure.from_dict(blob_data["structure_dict"])
+            struct.to(filename=str(target_dir / "CONTCAR"), fmt="poscar")
+        except Exception as exc:
+            logger.warning("Failed to restore CONTCAR from blob: %s", exc)
+
+    return True
 
 def run_point_defect_pipeline(
     config: PipelineConfig,

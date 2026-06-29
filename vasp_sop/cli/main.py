@@ -543,33 +543,39 @@ def _handle_cache(args: argparse.Namespace) -> None:
             for d in unconverged:
                 print(f"  ! {d} (not converged)")
 
-            # Phase 4: parallel cache converged (parse in workers, write once)
+            # Phase 4: parallel cache converged (parse in workers, write incrementally)
             if to_cache:
-                from vasp_sop.core.cache import _parse_and_build
-                results = []
+                from vasp_sop.core.cache import _parse_and_build, _get_stores
+                meta_store, blob_store = _get_stores()
+                meta_docs, blob_docs = [], []
+                total_cached = 0
                 with ProcessPoolExecutor(max_workers=16) as pool:
                     futures = {pool.submit(_parse_and_build, d): d for d in to_cache}
                     with tqdm(total=len(to_cache), desc="Caching", unit=" dirs") as pbar:
                         for future in as_completed(futures):
                             try:
-                                results.append(future.result())
+                                r = future.result()
+                                if r:
+                                    meta_docs.append(r["meta"])
+                                    if r.get("blob"):
+                                        blob_docs.append(r["blob"])
+                                if len(meta_docs) >= 100:
+                                    meta_store.update(meta_docs)
+                                    if blob_docs:
+                                        blob_store.update(blob_docs)
+                                    total_cached += len(meta_docs)
+                                    meta_docs, blob_docs = [], []
                             except Exception as exc:
                                 d = futures[future]
                                 print(f"\n  ! {d} (parse failed: {exc})")
                             pbar.update(1)
 
-                from vasp_sop.core.cache import _get_stores
-                meta_store, blob_store = _get_stores()
-                meta_docs, blob_docs = [], []
-                for r in results:
-                    meta_docs.append(r["meta"])
-                    if r.get("blob"):
-                        blob_docs.append(r["blob"])
                 if meta_docs:
                     meta_store.update(meta_docs)
-                if blob_docs:
-                    blob_store.update(blob_docs)
-                print(f"Cached {len(meta_docs)} directories under {root}")
+                    if blob_docs:
+                        blob_store.update(blob_docs)
+                    total_cached += len(meta_docs)
+                print(f"Cached {total_cached} directories under {root}")
 
             if unconverged:
                 print(f"Skipped {len(unconverged)} unconverged directories")
@@ -1148,30 +1154,13 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
 
     # ── Populate submission DB from crisp + filesystem ────────────────
     if not dry_run:
-        from vasp_sop.core.cache import mark_submitted, cache_lookup as _cl
+        from vasp_sop.core.cache import mark_submitted
         _crisp_active = _crisp_active_dirs(skip=False)
         if _crisp_active:
             logger.info("Found %d active crisp tasks, recording in submission DB.",
                         len(_crisp_active))
             for p in _crisp_active:
                 mark_submitted(p, "restored")
-
-        # Also mark all unconverged input-ready dirs per system — they were
-        # submitted in a previous run but outputs never synced back.
-        for s in sys_list:
-            for root_dir in (s["root"] / _CPD, s["root"] / _UC, s["root"] / _DF):
-                if not root_dir.is_dir():
-                    continue
-                for child in root_dir.iterdir():
-                    if not child.is_dir():
-                        continue
-                    if check_converged(child):
-                        continue
-                    if not input_ready(child):
-                        continue
-                    if _cl(child) is not None:
-                        continue
-                    mark_submitted(str(child.resolve()), "pre-existing")
 
     from vasp_sop.core.cache import cache_lookup, vasp_results_put as _cache_put
 
@@ -1303,16 +1292,19 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
         logger.info("Processed %d orphaned crisp outputs.", orphaned)
 
     while True:
-        # 1. Poll active jobs
-        for wd_str in list(active):
+        # 1. Poll from submission DB (shared with ProcessPoolExecutor workers)
+        from vasp_sop.core.cache import _get_submitted_dirs, clear_submission
+        submitted_dirs = _get_submitted_dirs()
+        running = 0
+        for wd_str in list(submitted_dirs):
             wd = Path(wd_str)
             if check_converged(wd):
                 move_crisp_outputs(wd)
                 _cache_phase_results(wd)
-                from vasp_sop.core.cache import clear_submission
                 clear_submission(wd_str)
-                del active[wd_str]
                 logger.info("Completed: %s", wd.name)
+            else:
+                running += 1
 
         # 2. Status snapshot
         phases = [_phase(s) for s in sys_list]

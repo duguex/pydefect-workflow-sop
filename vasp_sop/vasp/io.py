@@ -63,6 +63,8 @@ def prepare_inputs(
     if config.hubbard_u:
         cmd += " --options set_hubbard_u True"
     uis_flags = f"NSW 50 {extra_uis} {encut_opt}".strip()
+    if config.hubbard_u and "ISPIN" not in uis_flags:
+        uis_flags += " ISPIN 2"
     cmd += f" -uis {uis_flags}"
 
     run_local(cmd, cwd=work_dir, timeout=300)
@@ -115,7 +117,7 @@ def check_converged(path: Path) -> bool:
 
 
 def restart_from_contcar(path: Path) -> None:
-    """Copy CONTCAR → POSCAR, set ISTART=1, increase NSW for restart."""
+    """Copy CONTCAR → POSCAR and set ISTART=1 for restart."""
     contcar = path / "CONTCAR"
     if not contcar.is_file():
         return
@@ -133,11 +135,7 @@ def restart_from_contcar(path: Path) -> None:
             new_lines.append("ISTART = 1")
             has_istart = True
         elif line.strip().startswith("NSW"):
-            nsw_val = 50
-            m = _re.search(r"\d+", line)
-            if m:
-                nsw_val = min(int(m.group()) * 2, 3200)
-            new_lines.append(f"NSW = {nsw_val}")
+            new_lines.append(line)
         else:
             new_lines.append(line)
     if not has_istart:
