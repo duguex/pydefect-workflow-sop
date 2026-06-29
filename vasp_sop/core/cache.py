@@ -18,6 +18,12 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+import re as _re
+import threading
+import time
+from pathlib import Path
+from typing import Any, Optional
+
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -28,6 +34,26 @@ CACHE_ROOT: Path = Path.home() / ".vasp_sop"
 MP_CACHE: Path = CACHE_ROOT / "mp_cache"
 POSCAR_CACHE: Path = MP_CACHE / "poscars"
 CALC_CACHE: Path = CACHE_ROOT / "calc_cache"  # kept for backward compat
+
+# ── Global filters ──────────────────────────────────────────────────
+# Calculations with max lattice vector > MAX_LATTICE are skipped
+# (not cached, not submitted).  Set to None to disable.
+MAX_LATTICE: float | None = 25.0
+
+
+def lattice_too_large(src_dir: Path) -> bool:
+    """Check if max lattice vector *src_dir* exceeds MAX_LATTICE."""
+    if MAX_LATTICE is None:
+        return False
+    for cand in (src_dir / "CONTCAR", src_dir / "POSCAR"):
+        if cand.is_file():
+            try:
+                from pymatgen.core.structure import Structure
+                s = Structure.from_file(str(cand))
+                return max(s.lattice.abc) > MAX_LATTICE
+            except Exception:
+                return False
+    return False
 
 
 def override_cache_root(p: Path) -> None:
@@ -501,6 +527,12 @@ def vasp_results_put(
         logger.debug("Skipping %s: no converged result and no energy", src_dir)
         return
 
+    if parsed.get("max_abc") is not None and MAX_LATTICE is not None:
+        if parsed["max_abc"] > MAX_LATTICE:
+            logger.info("Skipping %s: max_abc=%.1f > MAX_LATTICE=%.1f",
+                        src_dir, parsed["max_abc"], MAX_LATTICE)
+            return
+
     meta_store, blob_store = _get_stores()
 
     meta_record = {
@@ -699,6 +731,13 @@ def _parse_and_build(src_dir: Path) -> dict[str, Any]:
     """Worker function for parallel backfill. Returns {meta, blob}."""
     f, ch, tn = _detect_calc_info(src_dir)
     parsed = _parse_vasp_dir(src_dir)
+
+    if parsed.get("max_abc") is not None and MAX_LATTICE is not None:
+        if parsed["max_abc"] > MAX_LATTICE:
+            logger.info("Skipping %s: max_abc=%.1f > MAX_LATTICE=%.1f",
+                        src_dir, parsed["max_abc"], MAX_LATTICE)
+            return None
+
     meta = {
         "content_hash": ch,
         "formula": f,

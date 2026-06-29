@@ -160,6 +160,12 @@ def submit_vasp(
     if not _vasp_input_ready(work_dir):
         raise RuntimeError(f"VASP input files not complete in {work_dir}.")
 
+    from vasp_sop.core.cache import MAX_LATTICE, lattice_too_large
+    if lattice_too_large(work_dir):
+        raise RuntimeError(
+            f"Lattice too large in {work_dir} "
+            f"(max_abc > {MAX_LATTICE} Å, skipped)")
+
     if _crisp_available():
         return _crisp_submit(work_dir)
     return _local_submit(work_dir, nproc, vasp_cmd)
