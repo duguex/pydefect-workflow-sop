@@ -1061,6 +1061,8 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
                     continue
                 if is_submitted(str(task_dir.resolve())):
                     continue
+                if cache_lookup(task_dir) is not None:
+                    continue
                 prepare_inputs(task_dir, s["config"], task_type=task)
                 _submit_or_skip(task_dir, f"uc-{task}", s["name"])
 
@@ -1073,6 +1075,8 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
                     if check_converged(child):
                         continue
                     if is_submitted(str(child.resolve())):
+                        continue
+                    if cache_lookup(child) is not None:
                         continue
                     _submit_or_skip(child, f"df-{child.name}", s["name"])
 
