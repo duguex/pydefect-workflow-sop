@@ -34,7 +34,11 @@
 8. phonopy — 声子性质
 9. **crisp** — 计算资源管理。所有作业操作必须通过 `crisp` CLI（`crisp submit / cancel -n TASK_NAME / jobs`），不得直接 `scancel`/`sbatch`。Agent 操作前需加载 skill://crisp。
 10. VASP — DFT 程序
-11. SQLite — 计算结果缓存后端。`~/.vasp_sop/cache.db` + `calc_cache/`。只缓存 CONTCAR + calc_results.json（~10KB），不缓存完整 OUTCAR（~100MB）。
+11. maggma JSONStore — 计算结果缓存后端。`~/.vasp_sop/meta.json` + `~/.vasp_sop/blobs.json`。
+    元数据表轻量（formula, content_hash, total_energy, bandgap, tags 等），blob 表存储 OUTCAR/vasprun/INCAR 大 JSON。
+    解析层优先使用 emmet-core 的 `TaskDoc.from_directory()`，失败回退正则。
+    支持语义查询（`cache query --formula GaN --functional HSE`），MongoDB 语法。
+    提供一个从旧 SQLite 迁移的工具（`cache migrate`）。
 
 ## 3. 点缺陷计算业务逻辑
 

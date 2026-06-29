@@ -209,7 +209,7 @@ class TestVaspResultsCache:
         assert _cache.vasp_results_get("GaN", "804") is None
 
     def test_vasp_results_put_stores_parsed_data(self, tmp_path: Path):
-        """vasp_results_put stores parsed data in SQLite, not files."""
+        """vasp_results_put stores parsed data in JSONStore via TaskDoc or regex."""
         src = tmp_path / "src"
         src.mkdir()
         self._write_minimal_outcar(src)

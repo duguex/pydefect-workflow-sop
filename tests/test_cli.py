@@ -129,7 +129,7 @@ class TestAdvanceOneSystem:
                                        type("J", (), {"task_name": "t"})()))
         from vasp_sop.cli.main import _advance_one_system
         s = _make_system_dict(competing_system)
-        _advance_one_system(s, {}, dry_run=True)
+        _advance_one_system(s, dry_run=True)
         assert len(calls) == 0
 
     def test_non_dry_submits_competing(self, competing_system, monkeypatch):
@@ -139,7 +139,7 @@ class TestAdvanceOneSystem:
                                        type("J", (), {"task_name": "t"})()))
         from vasp_sop.cli.main import _advance_one_system
         s = _make_system_dict(competing_system)
-        _advance_one_system(s, {}, dry_run=False)
+        _advance_one_system(s, dry_run=False)
         assert len(calls) >= 1
         comp_dir = str(competing_system / "cpd" / "Other_mp-99999")
         assert comp_dir in {str(p) for p in calls}
@@ -372,7 +372,7 @@ class TestAdvanceDryRunPostprocess:
 
         from vasp_sop.cli.main import _advance_one_system
         s = _make_system_dict(root)
-        _advance_one_system(s, {}, dry_run=True)
+        _advance_one_system(s, dry_run=True)
         captured = capsys.readouterr().out
         assert "would post-process" in captured
         assert analyze_calls == []
@@ -392,7 +392,7 @@ class TestAdvanceDryRunPostprocess:
 
         from vasp_sop.cli.main import _advance_one_system
         s = _make_system_dict(root)
-        _advance_one_system(s, {}, dry_run=True)
+        _advance_one_system(s, dry_run=True)
         captured = capsys.readouterr().out
         assert "post-process blocked" in captured
         # The names of the missing files should be listed in the message.

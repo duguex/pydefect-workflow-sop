@@ -1,0 +1,10 @@
+./vasp/2024_prl_PL5/highly/read_outcar_force.py
+./vasp/2025_npj_KAN/modes/read_outcar_force.py
+./vasp/2025_npj_KAN/modes/correction_to_phonon/bad/mode_0/read_outcar_force.py
+./vasp/2025_npj_KAN/demo_17/read_outcar_force.py
+./vasp/2025_npj_KAN/demo_17/read_outcar_force.py.0
+./vasp/2025_npj_KAN/strain/713/read_outcar_force.py
+./vasp/2025_npj_KAN/strain/tt/read_outcar_force.py
+./vasp/2025_npj_KAN/0/read_outcar_force.py
+./vasp/2025_npj_KAN/read_outcar_force.py
+./vasp/2025_undergo_spin_defect/SiC/small_supercell/vv/442/phonon/sample/read_outcar_force.py
