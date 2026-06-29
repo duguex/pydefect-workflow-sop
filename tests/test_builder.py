@@ -44,6 +44,7 @@ class TestBuildAll:
             build_all(defect_root, target_dir, config)
 
 
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
 def test_build_supercell_doped(tmp_path: Path):
     """_build_supercell with supercell_tool='doped' creates supercell_info.json."""
     from pymatgen.core.structure import Structure
@@ -84,6 +85,7 @@ def test_build_supercell_doped(tmp_path: Path):
     assert sc_info.transformation_matrix is not None
 
 
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
 def test_doped_supercell_sites_sorted(tmp_path: Path):
     """Issues #19 + #21: equivalent_atoms must be in ascending index order.
 

@@ -124,3 +124,25 @@ class TestStateStore:
             assert s2.cpd_status == s3.cpd_status
             assert s2.unitcell_status == s3.unitcell_status
             assert s2.root == s3.root
+
+    def test_atomic_save_crash_safe(self):
+        """Crash during save leaves original file intact."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            s1 = PipelineState(root=root)
+            s1.cpd_status = StepStatus.DONE
+            StateStore.save(s1)
+
+            path = StateStore.state_path(root)
+            original = path.read_text()
+
+            # Simulate crash by writing garbage to the .tmp file directly
+            tmp_path = path.with_suffix(".json.tmp")
+            tmp_path.write_text("CORRUPTED")
+            # os.replace was never called — original should be intact
+            assert path.read_text() == original, "Original file was corrupted"
+
+            # Load should still work
+            s2 = StateStore.load(root)
+            assert s2.cpd_status == StepStatus.DONE

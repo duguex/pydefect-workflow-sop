@@ -26,3 +26,9 @@ include = ["vasp_sop*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+filterwarnings = [
+    # pymatgen deprecated modules used by doped (third-party, not our code)
+    'ignore:This module has been moved to the pymatgen.core:DeprecationWarning',
+    'ignore:Entry, ComputedEntry and ComputedStructureEntry have been moved:DeprecationWarning',
+]
