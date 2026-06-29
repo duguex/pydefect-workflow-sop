@@ -469,6 +469,7 @@ def _add_cache_parser(subparsers) -> None:
     sp.add_argument("--calc-type", help="Filter by calc type (e.g. Static, Relax)")
     sp.add_argument("--tags", help="Filter by tags (e.g. DFT+U, spin)")
     sp.add_argument("--bandgap-min", type=float, help="Minimum bandgap (eV)")
+    sp.add_argument("--max-lattice", type=float, help="Max lattice constant a/b/c (Å), filters out large cells")
     sp.add_argument("--limit", type=int, default=50, help="Max results")
 
     # migrate
@@ -625,13 +626,15 @@ def _handle_cache(args: argparse.Namespace) -> None:
             calc_type=args.calc_type,
             tags_contains=args.tags,
             bandgap_min=args.bandgap_min,
+            lattice_max=args.max_lattice,
             limit=args.limit,
         )
         print(f"{len(results)} results:")
         for r in results:
             e = f"{r.get('total_energy', 0):.4f}" if r.get('total_energy') is not None else "?"
             bg = f"{r.get('bandgap', 0):.2f}" if r.get('bandgap') is not None else "?"
-            print(f"  {r['formula']:12s}  E={e}  gap={bg}eV"
+            abc = f"{r.get('max_abc', 0):.1f}" if r.get('max_abc') else "?"
+            print(f"  {r['formula']:12s}  E={e}  gap={bg}eV  max_abc={abc}Å"
                   f"  {r.get('calc_type') or '':10s}  tags={r.get('tags', '')}")
 
     elif args.cache_action == "migrate":

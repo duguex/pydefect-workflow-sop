@@ -314,6 +314,10 @@ def _parse_vasp_dir(src_dir: Path) -> dict[str, Any]:
         from emmet.core.tasks import TaskDoc
         doc = TaskDoc.from_directory(src_dir)
 
+        a, b, c = (0.0, 0.0, 0.0)
+        if doc.output and doc.output.structure:
+            a, b, c = doc.output.structure.lattice.abc
+
         return {
             "converged": doc.state == "successful",
             "total_energy": doc.output.energy if doc.output else None,
@@ -321,6 +325,8 @@ def _parse_vasp_dir(src_dir: Path) -> dict[str, Any]:
             "formula_pretty": doc.formula_pretty,
             "nsites": doc.nsites,
             "space_group": doc.symmetry.crystal_system if doc.symmetry else None,
+            "a": a, "b": b, "c": c,
+            "max_abc": max(a, b, c),
             "calc_type": str(doc.calc_type) if doc.calc_type else None,
             "tags": _tags_from_doc(doc),
             "parsed_by": "TaskDoc",
@@ -351,6 +357,7 @@ def _parse_vasp_dir(src_dir: Path) -> dict[str, Any]:
     space_group: str | None = None
     struct: Structure | None = None
     _sga: SpacegroupAnalyzer | None = None
+    a, b, c = 0.0, 0.0, 0.0
     for cand in (src_dir / "CONTCAR", src_dir / "POSCAR"):
         if cand.is_file():
             try:
@@ -360,6 +367,7 @@ def _parse_vasp_dir(src_dir: Path) -> dict[str, Any]:
                 formula_pretty = struct.composition.reduced_formula
                 _sga = SpacegroupAnalyzer(struct, symprec=0.1)
                 space_group = _sga.get_space_group_symbol()
+                a, b, c = struct.lattice.abc
             except Exception:
                 pass
             break
@@ -382,6 +390,8 @@ def _parse_vasp_dir(src_dir: Path) -> dict[str, Any]:
         "formula_pretty": formula_pretty,
         "nsites": n_sites,
         "space_group": space_group,
+        "a": a, "b": b, "c": c,
+        "max_abc": max(a, b, c),
         "calc_type": None,
         "tags": tags,
         "parsed_by": "regex",
@@ -505,6 +515,10 @@ def vasp_results_put(
         "n_sites": parsed.get("nsites"),
         "formula_pretty": parsed.get("formula_pretty"),
         "space_group": parsed.get("space_group"),
+        "a": parsed.get("a", 0.0),
+        "b": parsed.get("b", 0.0),
+        "c": parsed.get("c", 0.0),
+        "max_abc": parsed.get("max_abc", 0.0),
         "tags": parsed.get("tags", ""),
         "source_dir": str(src_dir.resolve()),
         "parsed_by": parsed.get("parsed_by", "unknown"),
@@ -576,6 +590,7 @@ def query(
     calc_type: str | None = None,
     tags_contains: str | None = None,
     bandgap_min: float | None = None,
+    lattice_max: float | None = None,
     converged_only: bool = True,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
@@ -586,6 +601,7 @@ def query(
         query(formula="GaN")
         query(functional="HSE", calc_type="Static")
         query(tags_contains="DFT+U", bandgap_min=2.0)
+        query(lattice_max=25.0)  # max(a,b,c) <= 25 Å
     """
     meta_store, _ = _get_stores()
     criteria: dict[str, Any] = {}
@@ -606,6 +622,8 @@ def query(
             criteria["tags"] = {"$regex": tags_contains}
     if bandgap_min is not None:
         criteria["bandgap"] = {"$gte": bandgap_min}
+    if lattice_max is not None:
+        criteria["max_abc"] = {"$lte": lattice_max}
     if converged_only:
         criteria["converged"] = 1
 
