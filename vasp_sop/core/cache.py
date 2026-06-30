@@ -727,9 +727,9 @@ def query(
     if formula:
         criteria["formula"] = formula
     if functional:
-        criteria["tags"] = {"$regex": functional}
+        criteria["tags"] = {"$regex": _re.escape(functional)}
     if calc_type:
-        criteria["calc_type"] = {"$regex": calc_type}
+        criteria["calc_type"] = {"$regex": _re.escape(calc_type)}
     if tags_contains:
         safe = _re.escape(tags_contains)
         if "tags" in criteria:
