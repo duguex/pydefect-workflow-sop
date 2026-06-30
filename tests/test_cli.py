@@ -401,6 +401,134 @@ class TestAdvanceDryRunPostprocess:
         assert "CONTCAR" in captured
 
 
+class TestBatchNoDuplicateSubmission:
+    """Issue #50: verify each phase dir is submitted at most once
+    across consecutive poll cycles (no re-submission leak)."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_common(self, monkeypatch, tmp_path: Path):
+        from vasp_sop.core.cache import override_cache_root
+        override_cache_root(tmp_path / ".vasp_sop")
+        monkeypatch.setattr("vasp_sop.core.cache.cache_lookup",
+                           lambda p: {"total_energy": 0.0}
+                           if "NaCl_mp-12345" in str(p) else None)
+        monkeypatch.setattr("vasp_sop.defect.builder.build_all",
+                           lambda *a, **kw: None)
+        monkeypatch.setattr("vasp_sop.defect.builder._generate_vasp_inputs",
+                           lambda *a, **kw: None)
+        monkeypatch.setattr("vasp_sop.vasp.io.check_converged",
+                           lambda p: "NaCl_mp-12345" in str(p))
+        monkeypatch.setattr("vasp_sop.vasp.io.prepare_inputs",
+                           lambda *a, **kw: None)
+        monkeypatch.setattr("vasp_sop.defect.cpd.compute_chemical_potentials",
+                           lambda *a, **kw: None)
+        monkeypatch.setattr("vasp_sop.defect.cpd._get_target_composition",
+                           lambda *a: {})
+        monkeypatch.setattr("vasp_sop.defect.analysis.analyze",
+                           lambda *a, **kw: None)
+    def test_competing_not_resubmitted(self, competing_system, monkeypatch):
+        """Competing dir submitted once across two cycles.
+
+        Second cycle: is_submitted() returns True → skip.
+        """
+        calls = []
+        monkeypatch.setattr("vasp_sop.core.jobs.submit_vasp",
+                           lambda p: (calls.append(str(p)) or
+                                      type("J", (), {"task_name": "t"})()))
+        from vasp_sop.cli.main import _advance_one_system
+        s = _make_system_dict(competing_system)
+
+        _advance_one_system(s, dry_run=False)  # cycle 1
+        cycle1_count = len(calls)
+        assert cycle1_count >= 1, "first cycle should submit something"
+
+        _advance_one_system(s, dry_run=False)  # cycle 2
+        assert len(calls) == cycle1_count, \
+            "second cycle must not re-submit (is_submitted guard)"
+
+        comp_dir = str((competing_system / "cpd" / "Other_mp-99999").resolve())
+        assert calls.count(comp_dir) == 1, \
+            f"competing dir submitted {calls.count(comp_dir)} times, expected 1"
+
+    def _make_ucdf_system(self, tmp_path: Path) -> Path:
+        """Build a minimal system in UC_DF phase (target+cached, CPD done,
+        UC inputs present, defect tree exists)."""
+        formula = "NaCl"
+        mpid = "12345"
+        root = tmp_path / "ucdf_system"
+        root.mkdir(parents=True)
+
+        plan = {
+            "project": {"formula": formula, "dopant_elements": [],
+                        "poscar_src": f"MP mp-{mpid}"},
+            "parameters": {"functional": "pbesol"},
+            "supercell": {"tool": "doped", "min_distance": 10.0},
+        }
+        (root / "plan.yaml").write_text(yaml.dump(plan))
+
+        # CPD done: target converged + target_vertices present
+        cpd = root / "cpd"
+        cpd.mkdir()
+        target_dir = cpd / f"{formula}_mp-{mpid}"
+        target_dir.mkdir()
+        (target_dir / "OUTCAR").write_text("converged\n")
+        (cpd / "target_vertices.yaml").write_text("tv: 1\n")
+        (cpd / "standard_energies.yaml").write_text("se: 1\n")
+
+        # Defect tree
+        df = root / "defect"
+        df.mkdir()
+        perfect = df / "perfect"
+        perfect.mkdir()
+        for d in (perfect,):
+            _write_incar(d)
+            _write_kpoints(d)
+            _write_potcar(d)
+            _write_poscar(d, 2)
+        defect_dir = df / "Va_Na_0"
+        defect_dir.mkdir()
+        _write_incar(defect_dir)
+        _write_kpoints(defect_dir)
+        _write_potcar(defect_dir)
+        _write_poscar(defect_dir, 2)
+
+        # UC inputs present
+        uc = root / "unitcell"
+        uc.mkdir()
+        for t in ("band", "dos", "dielectric"):
+            td = uc / t
+            td.mkdir()
+            _write_incar(td)
+            _write_kpoints(td)
+
+        return root
+
+    def test_ucdf_not_resubmitted(self, tmp_path, monkeypatch):
+        """UC and defect dirs submitted once across two cycles."""
+        calls = []
+        monkeypatch.setattr("vasp_sop.core.jobs.submit_vasp",
+                           lambda p: (calls.append(str(p)) or
+                                      type("J", (), {"task_name": "t"})()))
+        from vasp_sop.cli.main import _advance_one_system
+        root = self._make_ucdf_system(tmp_path)
+        s = _make_system_dict(root)
+
+        _advance_one_system(s, dry_run=False)  # cycle 1
+        cycle1_count = len(calls)
+        assert cycle1_count >= 1, "first cycle should submit UC + defect jobs"
+
+        _advance_one_system(s, dry_run=False)  # cycle 2
+        assert len(calls) == cycle1_count, \
+            "second cycle must not re-submit (is_submitted guard)"
+
+        uc_band = str((root / "unitcell" / "band").resolve())
+        assert calls.count(uc_band) == 1, \
+            f"uc-band submitted {calls.count(uc_band)} times, expected 1"
+        defect_dir = str((root / "defect" / "Va_Na_0").resolve())
+        assert calls.count(defect_dir) == 1, \
+            f"defect dir submitted {calls.count(defect_dir)} times, expected 1"
+
+
 class TestCachePut:
     """Tests for cache put CLI command."""
 

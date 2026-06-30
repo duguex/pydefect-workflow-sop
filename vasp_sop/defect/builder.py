@@ -1,8 +1,10 @@
+
 """Defect structure generation — supercell, enumeration, VASP inputs."""
 
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 from pathlib import Path
 
@@ -33,12 +35,20 @@ def build_all(
     if not poscar.is_file():
         raise FileNotFoundError(f"Target POSCAR not found at {poscar}.")
     uc_contcar = poscar  # use POSCAR as stand-in for CONTCAR
+    # ── Config-fingerprint guard ───────────────────────────────────
+    # Detect plan.yaml changes that affect the build.  If the current
+    # config differs from the last build, clear all flag files so the
+    # builder re-generates with the new settings.
+    _check_rebuild(defect_root, config)
 
     _build_supercell(defect_root, uc_contcar, config)
     _handle_interstitials(defect_root, config)
     _generate_defect_list(defect_root, config)
     _generate_structures(defect_root)
     _generate_vasp_inputs(defect_root, config)
+
+    # Write fingerprint *after* successful build.
+    _write_fingerprint(defect_root, config)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -261,3 +271,48 @@ def construct_complex_defects(defect_root: Path, config: PipelineConfig) -> None
         geoms = maker.make_all_n_body(n=order)
         entries = maker.generate_entries(order, dopants=config.dopant_elements or None)
         maker.write(entries, str(defect_root), merge=True)
+
+
+def _config_fingerprint(config: PipelineConfig) -> str:
+    """Return a short hash of config fields that affect the build."""
+    relevant = {
+        "supercell_tool": config.supercell_tool,
+        "supercell_min_distance": config.supercell_min_distance,
+        "supercell_min_atoms": config.supercell_min_atoms,
+        "supercell_max_atoms": config.supercell_max_atoms,
+        "interstitial": config.interstitial,
+        "interstitial_indices": config.interstitial_indices,
+        "dopant_elements": config.dopant_elements,
+        "complex_defect_order": config.complex_defect_order,
+        "remote_cutoff": config.remote_cutoff,
+        "formula": config.formula,
+    }
+    raw = json.dumps(relevant, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _check_rebuild(defect_root: Path, config: PipelineConfig) -> None:
+    """Compare config fingerprint against last build; clear flags on mismatch."""
+    fp_path = defect_root / ".build_fingerprint"
+    if not fp_path.is_file():
+        return  # first build, nothing to compare
+    old_fp = fp_path.read_text().strip()
+    new_fp = _config_fingerprint(config)
+    if old_fp == new_fp:
+        return
+    logger.info(
+        "Config fingerprint changed (%s → %s), clearing build flags.",
+        old_fp, new_fp,
+    )
+    for name in ("supercell_info.json", "defect_in.yaml",
+                  "defect_generate_flag", "complex_flag"):
+        p = defect_root / name
+        if p.is_file():
+            p.unlink()
+            logger.info("  Cleared %s", name)
+
+
+def _write_fingerprint(defect_root: Path, config: PipelineConfig) -> None:
+    """Persist the current config fingerprint so next build can detect changes."""
+    fp = _config_fingerprint(config)
+    (defect_root / ".build_fingerprint").write_text(fp + "\n")

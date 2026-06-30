@@ -534,8 +534,41 @@ def vasp_results_put(
 
     parsed = _parse_vasp_dir(src_dir)
     if not parsed["converged"] and parsed["total_energy"] is None:
-        logger.debug("Skipping %s: no converged result and no energy", src_dir)
-        return
+        # _parse_vasp_dir may fail (TaskDoc error + regex miss) even when
+        # the OUTCAR is properly converged.  Fall back to the stricter
+        # vasp.io check and, if it passes, force-create a minimal entry.
+        from vasp_sop.vasp.io import check_converged
+        if check_converged(src_dir):
+            logger.info("%s: TaskDoc/regex missed converging but "
+                        "check_converged OK — creating minimal cache entry",
+                        src_dir.name)
+            # Tail-read OUTCAR for energy regex (avoids GB-level reads)
+            outcar_path2 = src_dir / "OUTCAR"
+            size = outcar_path2.stat().st_size
+            tail_n = min(size, 65536)
+            with outcar_path2.open("rb") as f:
+                if tail_n < size:
+                    f.seek(size - tail_n)
+                raw_text = f.read().decode("utf-8", errors="replace")
+            import re as _re
+            all_e = _re.findall(r"free\s+energy\s+TOTEN\s*=\s*([-\d.]+)", raw_text)
+            total_energy = float(all_e[-1]) if all_e else None
+            parsed = {
+                "converged": True,
+                "total_energy": total_energy,
+                "bandgap": None,
+                "formula_pretty": None,
+                "nsites": None,
+                "space_group": None,
+                "a": 0.0, "b": 0.0, "c": 0.0,
+                "max_abc": 0.0,
+                "calc_type": None,
+                "tags": "",
+                "parsed_by": "fallback",
+            }
+        else:
+            logger.debug("Skipping %s: no converged result and no energy", src_dir)
+            return
 
     if parsed.get("max_abc") is not None and MAX_LATTICE is not None:
         if parsed["max_abc"] > MAX_LATTICE:
@@ -621,6 +654,51 @@ def cache_lookup(src_dir: Path) -> dict[str, Any] | None:
     """Return cached result for *src_dir*, or None."""
     formula, ch, _ = _detect_calc_info(src_dir)
     return vasp_results_get(formula, ch)
+
+def restore_from_cache(src_dir: Path) -> bool:
+    """Restore OUTCAR/CONTCAR/vasprun.xml from cache to *src_dir*.
+
+    Tries the original ``source_dir`` first (fastest), then falls back
+    to reconstructing CONTCAR from the cached ``structure_dict``.
+
+    Returns True if at least OUTCAR was restored.
+    """
+    cached = cache_lookup(src_dir)
+    if cached is None:
+        return False
+
+    logger.info("Restoring VASP outputs for %s from cache", src_dir.name)
+
+    # Try source_dir first
+    src = cached.get("source_dir")
+    if src and Path(src).is_dir():
+        restored = False
+        for f in ("OUTCAR", "CONTCAR", "vasprun.xml"):
+            fp = Path(src) / f
+            if fp.is_file():
+                import shutil
+                shutil.copy2(str(fp), str(src_dir / f))
+                restored = True
+        if restored:
+            return True
+
+    # Fallback: reconstruct CONTCAR from structure_dict in blob
+    ch = cached.get("content_hash")
+    if ch:
+        _, blob_store = _get_stores()
+        blob = blob_store.query_one({"content_hash": ch})
+        if blob:
+            import json as _json
+            blob_data = _json.loads(blob.get("blob_json", "{}"))
+            if "structure_dict" in blob_data:
+                try:
+                    from pymatgen.core.structure import Structure
+                    struct = Structure.from_dict(blob_data["structure_dict"])
+                    struct.to(filename=str(src_dir / "CONTCAR"), fmt="poscar")
+                except Exception as exc:
+                    logger.warning("Failed to restore CONTCAR from blob: %s", exc)
+
+    return (src_dir / "OUTCAR").is_file()
 
 
 

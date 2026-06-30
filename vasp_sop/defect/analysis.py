@@ -29,8 +29,35 @@ def analyze(
     if summary_json.is_file():
         logger.info("Defect energy summary already exists, skipping post-processing.")
         return
-
     perfect_dir = defect_root / "perfect"
+
+    # ── OUTCAR check + recovery ────────────────────────────────────
+    # The post-processing pipeline (pydefect CLI) reads OUTCAR from
+    # disk.  If a dir has a cache entry but missing files, restore
+    # from the cache (source_dir copy → blob structure_dict).
+    from vasp_sop.core.cache import restore_from_cache
+    from vasp_sop.core.jobs import move_crisp_outputs
+    missing_outcars: list[str] = []
+    for d in list(defect_root.iterdir()) + [perfect_dir]:
+        if not d.is_dir():
+            continue
+        if (d / "OUTCAR").is_file():
+            continue
+        move_crisp_outputs(d)
+        if (d / "OUTCAR").is_file():
+            continue
+        if restore_from_cache(d):
+            logger.info("Restored OUTCAR for %s from cache", d.name)
+        else:
+            missing_outcars.append(d.name)
+    if missing_outcars:
+        logger.error(
+            "Cannot run post-processing: %d defect dir(s) missing OUTCAR "
+            "and could not be restored from cache: %s. "
+            "Restore the files manually or re-run VASP for these dirs.",
+            len(missing_outcars), ", ".join(missing_outcars),
+        )
+        return
 
     # ── cr (calc_results) ───────────────────────────────────────────
     run_local("pydefect_vasp cr -d *_* perfect", cwd=defect_root)

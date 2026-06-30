@@ -26,12 +26,6 @@ from vasp_sop.core.jobs import (
     wait_all,
     run_local,
 )
-from vasp_sop.core.state import (
-    CpdResult,
-    PipelineState,
-    StateStore,
-    StepStatus,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -91,75 +85,6 @@ def _submit_remaining(
     return jobs
 
 
-def run_cpd(
-    config: PipelineConfig,
-    state: PipelineState,
-) -> CpdResult:
-    """Execute (or skip) the CPD stage.
-
-    Returns the result from the state if already done, otherwise runs
-    the full CPD workflow and persists the updated state.
-    """
-    if state.cpd_status == StepStatus.DONE and state.cpd_result is not None:
-        logger.info("CPD stage already complete, skipping.")
-        return state.cpd_result
-
-    root = config.root
-    cpd_root = root / _CPD_DIR
-    cpd_root.mkdir(parents=True, exist_ok=True)
-
-    state.cpd_status = StepStatus.RUNNING
-    StateStore.save(state)
-
-    intrinsic_elements = get_intrinsic_elements(config.formula)
-    logger.info("CPD: intrinsic elements = %s", intrinsic_elements)
-
-    # ── 1. Fetch competing phases from Materials Project ─────────────
-    elements = intrinsic_elements + config.dopant_elements
-    fetch_candidate_phases(elements, cpd_root)
-
-    # Build cpd_info dict {dirname: {formula, mpid}}
-    cpd_info = list_phases(cpd_root, intrinsic_elements)
-
-    target_composition = Composition(config.formula)
-    unitcell_path: Optional[Path] = None
-    for dirname, info in cpd_info.items():
-        comp = Composition(info["formula"])
-        if comp == target_composition:
-            unitcell_path = (cpd_root / dirname).resolve()
-            break
-    if unitcell_path is None:
-        raise ValueError(
-            f"Cannot find CPD directory for formula {config.formula} "
-            f"in {cpd_root}. Available: {list(cpd_info.keys())}"
-        )
-    logger.info("CPD: target unitcell path = %s", unitcell_path)
-
-    to_be_calculated = list(cpd_info.keys())
-    logger.info("CPD: %d phases to calculate", len(to_be_calculated))
-    # ── 2. Generate VASP inputs and run calculations (parallel) ──────
-    jobs = _submit_cpd_batch(cpd_root, to_be_calculated, config)
-    if jobs:
-        logger.info("CPD: waiting for %d VASP jobs", len(jobs))
-        wait_all(jobs)
-        for j in jobs:
-            move_crisp_outputs(j.work_dir)
-
-    # ── 3. Post-processing: composition energies + corrections ───────
-    compute_chemical_potentials(cpd_root, config, target_composition)
-
-    # ── 4. Build result ──────────────────────────────────────────────
-    result = CpdResult(
-        unitcell_path=unitcell_path,
-        chem_pot_path=(cpd_root / _TARGET_VERTICES).resolve(),
-        standard_energies_path=(cpd_root / _STANDARD_ENERGIES).resolve(),
-    )
-
-    state.cpd_result = result
-    state.cpd_status = StepStatus.DONE
-    StateStore.save(state)
-    logger.info("CPD stage complete.")
-    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -16,8 +16,6 @@ import sys
 from pathlib import Path
 from vasp_sop import __version__
 from vasp_sop.core.config import PipelineConfig
-from vasp_sop.core.state import StateStore, StepStatus
-from vasp_sop.defect.pipeline import run_point_defect_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -332,26 +330,44 @@ def _do_init(args: argparse.Namespace) -> None:
 
 
 def _do_status(args: argparse.Namespace) -> None:
-    """Print pipeline status for a project."""
+    """Print pipeline status for a project using filesystem + _phase()."""
     root = args.root.resolve()
-    state = StateStore.load(root)
     print(f"Project: {root}")
-    print(f"  CPD:       {state.cpd_status.value}")
-    print(f"  Unitcell:  {state.unitcell_status.value}")
-    print(f"  Defect:    {state.defect_status.value}")
-    if state.active_jobs:
-        print(f"  Active jobs: {len(state.active_jobs)}")
-        for work_dir, task_name in state.active_jobs.items():
-            print(f"    {task_name}: {work_dir}")
-    if state.is_terminal():
-        print("  >>> All stages complete.")
-    elif state.defect_status == StepStatus.FAILED:
-        print("  >>> Defect stage FAILED. Check logs and re-run.")
-    elif state.unitcell_status == StepStatus.FAILED:
-        print("  >>> Unitcell stage FAILED. Check logs and re-run.")
-    elif state.cpd_status == StepStatus.FAILED:
-        print("  >>> CPD stage FAILED. Check logs and re-run.")
 
+    # Use _phase() to determine current pipeline stage
+    from vasp_sop.core.config import PipelineConfig
+    plan = root / "plan.yaml"
+    if not plan.is_file():
+        print("  No plan.yaml found — system not initialized.")
+        return
+
+    config = PipelineConfig.from_yaml(plan, root=root)
+    src = config.poscar_src
+    mpid = src.split("mp-", 1)[1] if src.startswith("MP mp-") else None
+    s = {
+        "name": config.formula or root.name,
+        "root": root,
+        "config": config,
+        "formula": config.formula,
+        "mpid": mpid,
+    }
+    p = _phase(s)
+    print(f"  Pipeline phase: {p}")
+
+    # Per-stage detail from filesystem
+    cpd_dir = root / "cpd"
+    uc_dir = root / "unitcell"
+    df_dir = root / "defect"
+
+    has_target = any(
+        (pd / "OUTCAR").is_file() or (pd / "output" / "OUTCAR").is_file()
+        for pd in cpd_dir.iterdir() if pd.is_dir()
+    ) if cpd_dir.is_dir() else False
+    print(f"  Target OUTCAR: {'✓' if has_target else '·'}")
+
+    print(f"  CPD:      {_check_cpd(cpd_dir)}")
+    print(f"  Unitcell: {_check_unitcell(uc_dir)}")
+    print(f"  Defect:   {_check_defect(df_dir)}")
 
 def _do_run(args: argparse.Namespace) -> None:
     """Run (or resume) the full defect pipeline."""
@@ -360,13 +376,8 @@ def _do_run(args: argparse.Namespace) -> None:
 
 
 def _do_resume(args: argparse.Namespace) -> None:
-    """Resume pipeline from persisted state."""
+    """Resume pipeline from config (state now filesystem-based)."""
     root = args.root.resolve()
-    state = StateStore.load(root)
-
-    # Try plan.yaml (new format) → config.yaml (legacy YAML) → info.json
-    # (legacy JSON) before giving up. ``info.json`` is migrated to a fresh
-    # plan.yaml so the rest of the pipeline sees a single canonical format.
     from vasp_sop.core.config import PLAN_FILENAME
     config_path = root / PLAN_FILENAME
     if not config_path.is_file():
@@ -376,9 +387,7 @@ def _do_resume(args: argparse.Namespace) -> None:
     else:
         legacy_json = root / "info.json"
         if legacy_json.is_file():
-            logger.info(
-                "Found legacy info.json — migrating to %s.", PLAN_FILENAME,
-            )
+            logger.info("Found legacy info.json — migrating to %s.", PLAN_FILENAME)
             config = PipelineConfig.from_legacy_json(legacy_json, root=root)
             new_path = root / PLAN_FILENAME
             config.to_yaml(new_path)
@@ -389,35 +398,87 @@ def _do_resume(args: argparse.Namespace) -> None:
                 PLAN_FILENAME, root,
             )
             sys.exit(1)
-
-    if state.is_terminal():
-        logger.info("Pipeline already complete. Nothing to resume.")
-        return
-
-    # State is non-terminal — re-enter the pipeline. The state machine in
-    # run_point_defect_pipeline checks each stage's DONE flag and skips
-    # completed work, so resume behaves the same as run.
     _run_pipeline(config)
 
 
-
 def _run_pipeline(config: PipelineConfig) -> None:
-    """Execute the pipeline."""
+    """Execute the pipeline using the batch-style single-system loop.
+
+    Replaced ``run_point_defect_pipeline`` from ``pipeline.py`` after
+    the legacy pipeline was removed (see issue #78).
+    """
     logger.info(
         "Starting point-defect pipeline for %s (root: %s)",
         config.formula, config.root,
     )
 
-    try:
-        state = run_point_defect_pipeline(config)
-    except Exception:
-        logger.exception("Pipeline failed")
-        sys.exit(1)
+    # Build a system dict matching what _batch_run creates
+    from vasp_sop.core.config import PLAN_FILENAME
+    plan_path = config.root / PLAN_FILENAME
 
-    if state.is_terminal():
-        logger.info("Pipeline completed successfully.")
+    # ── Build CPD structure + defect structures upfront ─────────────
+    # (mirrors the legacy Wave-1 behaviour where all inputs are
+    # generated before any VASP is submitted)
+    from vasp_sop.defect import cpd as _cpd
+    from vasp_sop.defect.builder import build_all as _build_defects
+    from vasp_sop.defect import unitcell as _uc
+    from vasp_sop.materials import get_intrinsic_elements
+
+    cpd_root = config.root / "cpd"
+    uc_root = config.root / "unitcell"
+    df_root = config.root / "defect"
+
+    if cpd_root.is_dir():
+        intrinsic = get_intrinsic_elements(config.formula)
+        cpd_info = _cpd._get_cpd_info(cpd_root, intrinsic)
+        target_dir, other_dirs = _cpd._split_target(cpd_root, cpd_info, config.formula)
+        for d in other_dirs:
+            from vasp_sop.vasp.io import prepare_inputs
+            prepare_inputs(d, config)
+        if df_root.is_dir() and target_dir and (target_dir / "POSCAR").is_file():
+            _build_defects(df_root, target_dir, config)
+        if uc_root.is_dir() and target_dir:
+            _uc._prepare_all_inputs(uc_root, target_dir, config)
+
+    # ── Polling loop (same semantics as _batch_run) ─────────────────
+    import time as _time
+    from vasp_sop.vasp.io import check_converged
+    from vasp_sop.core.cache import cache_lookup, _get_submitted_dirs, clear_submission
+    from vasp_sop.core.jobs import move_crisp_outputs
+
+    s = {
+        "name": config.formula or config.root.name,
+        "root": config.root,
+        "config": config,
+        "formula": config.formula,
+    }
+    mpid = config.poscar_src.split("mp-", 1)[1] if config.poscar_src.startswith("MP mp-") else None
+    s["mpid"] = mpid
+
+    for _iteration in range(200):
+        # Poll completed submissions
+        for wd_str in list(_get_submitted_dirs()):
+            wd = Path(wd_str)
+            if check_converged(wd):
+                move_crisp_outputs(wd)
+                try:
+                    from vasp_sop.core.cache import vasp_results_put
+                    vasp_results_put(wd)
+                except Exception as exc:
+                    logger.warning("Failed to cache %s: %s", wd.name, exc)
+                clear_submission(wd_str)
+
+        # Advance step
+        _advance_one_system(s, dry_run=False)
+
+        # Check completion — _phase is defined in this module
+        p = _phase(s)
+        if p in ("DONE", "NO_TARGET"):
+            logger.info("Pipeline complete (phase=%s).", p)
+            return
+        _time.sleep(60)
     else:
-        logger.warning("Pipeline finished but not fully complete.")
+        logger.error("Pipeline did not complete after 200 iterations.")
         sys.exit(1)
 
 
@@ -519,11 +580,23 @@ def _handle_cache(args: argparse.Namespace) -> None:
             to_cache: list[Path] = []
             unconverged: list[Path] = []
 
+            def _is_converged_tail(outcar: Path) -> bool:
+                """Check convergence marker in OUTCAR tail (reads ≤ 4 KB)."""
+                size = outcar.stat().st_size
+                n = 4096
+                if size <= n:
+                    return "General timing and accounting" in outcar.read_text()
+                with outcar.open("rb") as f:
+                    f.seek(size - n)
+                    return b"General timing and accounting" in f.read()
+
             def _classify(d: Path) -> tuple[str, Path]:
                 if cache_lookup(d) is not None:
                     return "cached", d
-                text = (d / "OUTCAR").read_text()
-                if "General timing and accounting" in text[-4096:]:
+                outcar = d / "OUTCAR"
+                if not outcar.is_file():
+                    return "unconverged", d
+                if _is_converged_tail(outcar):
                     return "converged", d
                 return "unconverged", d
 
@@ -781,7 +854,6 @@ def _batch_progress(root: Path) -> None:
 def _batch_status(root: Path) -> None:
     """Scan *root* for vasp-sop systems and print status table."""
     from vasp_sop.vasp.io import check_converged, input_ready
-    from vasp_sop.core.state import StateStore, StepStatus
 
     rows: list[dict] = []
     for d in sorted(root.iterdir()):
@@ -874,36 +946,50 @@ def _competing_dirs(s: dict) -> list[Path]:
 
 
 def _phase(s: dict) -> str:
-    """Determine the current pipeline phase for a system dict."""
+    """Determine the current pipeline phase for a system dict.
+
+    Uses phase-persistence gates: once CPD_POST has written
+    ``target_vertices.yaml``, the system never regresses to
+    COMPETING — even when competing-phase submissions reappear.
+    """
     from vasp_sop.vasp.io import check_converged
     from vasp_sop.core.cache import cache_lookup
     td = _target_dir(s)
     if td is None:
         return "NO_TARGET"
+
+    cpd_root = s["root"] / _CPD
+    target_vertices = cpd_root / "target_vertices.yaml"
+
+    # ── Phase-persistence gate ────────────────────────────────────
+    # Once CPD_POST has written target_vertices.yaml the system is
+    # irrevocably past COMPETING.  Downstream UC/DF can still cycle
+    # but we will never return COMPETING again for this system.
+    if target_vertices.is_file():
+        uc_root = s["root"] / _UC
+        uc_tasks = ["band", "dos", "dielectric"]
+        uc_has_inputs = any((uc_root / t / "INCAR").is_file() for t in uc_tasks)
+        if not uc_has_inputs:
+            return "UC_DF"
+        uc_pending = any(
+            cache_lookup(uc_root / t) is None for t in uc_tasks
+            if (uc_root / t / "INCAR").is_file()
+        )
+        df_root = s["root"] / _DF
+        if not df_root.is_dir():
+            return "UC_DF"
+        if not (df_root / "defect_energy_summary.json").is_file():
+            return "UC_DF"
+        if uc_pending:
+            return "UC_DF"
+        return "DONE"
+
+    # ── Normal upstream progression (CPD not yet complete) ────────
     if cache_lookup(td) is None:
         return "TARGET"
     if _competing_dirs(s):
         return "COMPETING"
-    cpd_root = s["root"] / _CPD
-    if not (cpd_root / "target_vertices.yaml").is_file():
-        return "CPD_POST"
-    uc_root = s["root"] / _UC
-    uc_tasks = ["band", "dos", "dielectric"]
-    uc_has_inputs = any((uc_root / t / "INCAR").is_file() for t in uc_tasks)
-    if not uc_has_inputs:
-        return "UC_DF"
-    uc_pending = any(
-        cache_lookup(uc_root / t) is None for t in uc_tasks
-        if (uc_root / t / "INCAR").is_file()
-    )
-    df_root = s["root"] / _DF
-    if not df_root.is_dir():
-        return "UC_DF"
-    if not (df_root / "defect_energy_summary.json").is_file():
-        return "UC_DF"
-    if uc_pending:
-        return "UC_DF"
-    return "DONE"
+    return "CPD_POST"
 
 
 
@@ -1017,13 +1103,12 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
                 cached = _crg(f, m)
             if cached:
                 _logger.info("%s target restored from calc cache", s["name"])
+                from vasp_sop.core.cache import restore_from_cache
+                restore_from_cache(td)
                 import json as _json
                 submit_info = {"task_name": "cached", "work_dir": str(td.resolve())}
                 with open((s["root"] / _CPD / ".target_submit.json"), "w") as _f:
                     _json.dump(submit_info, _f)
-            else:
-                _submit_or_skip(td, "target", s["name"])
-        return
 
     if p == "COMPETING":
         for cd in _competing_dirs(s):
@@ -1138,14 +1223,24 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
                 cache_lookup(uc_root / t) is not None or not (uc_root / t / "INCAR").is_file()
                 for t in ("band", "dos", "dielectric")
             )
-            df_vasp_done = all(
+            # All defect VASP calculations are *cached* — no more should
+            # be submitted to the queue (cache-basesd gate).
+            df_vasp_cached = all(
                 cache_lookup(child) is not None or not input_ready(child)
                 for child in df_root.iterdir() if child.is_dir()
             ) if df_root.is_dir() else True
+            # All defect VASP calculations have OUTCAR on disk — the
+            # post-processing pipeline (pydefect CLI) reads from files,
+            # so we must not run it until every OUTCAR is actually present.
+            df_vasp_ondisk = all(
+                check_converged(child) or not input_ready(child)
+                for child in df_root.iterdir() if child.is_dir()
+            ) if df_root.is_dir() else True
 
-            if uc_all_done and df_vasp_done and (df_root / "defect_energy_summary.json").is_file():
-                pass
-            elif uc_all_done and df_vasp_done:
+            if uc_all_done and df_vasp_cached and df_vasp_ondisk \
+                    and (df_root / "defect_energy_summary.json").is_file():
+                pass  # already done
+            elif uc_all_done and df_vasp_cached and df_vasp_ondisk:
                 _logger.info("%s: post-processing ...", s["name"])
                 try:
                     _uc.build_unitcell_yaml(uc_root, s["config"])
@@ -1352,17 +1447,18 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
 
 
         # 5. Advance all systems (parallel per-system, 14 processes)
-        from concurrent.futures import ProcessPoolExecutor as _PPE
+        #    Use as_completed so a stuck system doesn't block the rest.
+        from concurrent.futures import ProcessPoolExecutor as _PPE, as_completed as _ac
         import functools as _ft
         _worker = _ft.partial(_advance_one_system, dry_run=dry_run)
         with _PPE(max_workers=14) as _pool:
-            list(_pool.map(_worker, sys_list))
-        # 6. Wait before next poll iteration (avoids hot spin on idle workers)
-        if running > 0 or not dry_run:
-            _time.sleep(poll_interval)
-        if dry_run:
-            print("\nDry-run complete. No VASP jobs were submitted.")
-            break
+            futures = {_pool.submit(_worker, s): s for s in sys_list}
+            for f in _ac(futures):
+                s = futures[f]
+                try:
+                    f.result()
+                except Exception as exc:
+                    _logger.error("%s worker returned error: %s", s["name"], exc)
     else:
         logger.error("Batch run hit max iterations (%d), exiting.", _MAX_ITERATIONS)
 
