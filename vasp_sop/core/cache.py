@@ -543,6 +543,12 @@ def vasp_results_put(
                         src_dir.name)
             # Tail-read OUTCAR for energy regex (avoids GB-level reads)
             outcar_path2 = src_dir / "OUTCAR"
+            if not outcar_path2.is_file():
+                outcar_path2 = src_dir / "output" / "OUTCAR"
+            if not outcar_path2.is_file():
+                logger.warning("%s: fallback path found no OUTCAR at %s or output/",
+                              src_dir.name, outcar_path2)
+                return
             size = outcar_path2.stat().st_size
             tail_n = min(size, 65536)
             with outcar_path2.open("rb") as f:

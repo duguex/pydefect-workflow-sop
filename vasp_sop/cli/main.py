@@ -1385,6 +1385,8 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                 continue  # already cached
             if not check_converged(pd):
                 continue  # not converged on disk
+            from vasp_sop.core.jobs import move_crisp_outputs
+            move_crisp_outputs(pd)
             formula, mpid = pd.name.split("_mp-", 1)
             _cache_put(pd, formula=formula, task_name=f"{formula}_mp-{mpid}")
             backfilled += 1
