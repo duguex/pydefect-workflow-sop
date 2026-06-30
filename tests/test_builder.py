@@ -126,3 +126,57 @@ def test_doped_supercell_sites_sorted(tmp_path: Path):
         assert eq == sorted(eq), (
             f"Site {name} equivalent_atoms not sorted: {eq}"
         )
+
+
+class TestConfigFingerprint:
+    """_config_fingerprint and _check_rebuild — issue #75."""
+
+    def test_changes_on_different_config(self):
+        """Different config values produce different fingerprints."""
+        from vasp_sop.defect.builder import _config_fingerprint
+        c1 = PipelineConfig(formula="GaN")
+        c2 = PipelineConfig(formula="GaN", complex_defect_order=2)
+        fp1 = _config_fingerprint(c1)
+        fp2 = _config_fingerprint(c2)
+        assert fp1 != fp2
+
+    def test_stable_for_same_config(self):
+        """Same config produces identical fingerprint across calls."""
+        from vasp_sop.defect.builder import _config_fingerprint
+        c = PipelineConfig(formula="SiC")
+        assert _config_fingerprint(c) == _config_fingerprint(c)
+
+    def test_check_rebuild_clears_flags_on_mismatch(self, tmp_path: Path):
+        """_check_rebuild removes flag files when config fingerprint changes."""
+        from vasp_sop.defect.builder import _config_fingerprint, _check_rebuild
+        root = tmp_path / "defect"
+        root.mkdir()
+        c_old = PipelineConfig(formula="GaN")
+        c_new = PipelineConfig(formula="GaN", complex_defect_order=3)
+
+        # Write old fingerprint
+        (root / ".build_fingerprint").write_text(
+            _config_fingerprint(c_old) + "\n"
+        )
+        # Create flag files as if previous build ran
+        (root / "supercell_info.json").touch()
+        (root / "defect_generate_flag").touch()
+
+        _check_rebuild(root, c_new)
+        assert not (root / "supercell_info.json").is_file(), "flag should be cleared"
+        assert not (root / "defect_generate_flag").is_file(), "flag should be cleared"
+
+    def test_check_rebuild_preserves_flags_on_match(self, tmp_path: Path):
+        """_check_rebuild leaves flag files untouched when fingerprint matches."""
+        from vasp_sop.defect.builder import _config_fingerprint, _check_rebuild
+        root = tmp_path / "defect"
+        root.mkdir()
+        c = PipelineConfig(formula="GaN")
+
+        (root / ".build_fingerprint").write_text(
+            _config_fingerprint(c) + "\n"
+        )
+        (root / "supercell_info.json").touch()
+
+        _check_rebuild(root, c)
+        assert (root / "supercell_info.json").is_file(), "flag should be preserved"

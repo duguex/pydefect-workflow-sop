@@ -115,3 +115,80 @@ class TestComputeChemicalPotentials:
 
         # Must not raise.
         compute_chemical_potentials(cpd_root, config, Composition("GaN"))
+
+
+class TestApplyMoleculeCorrections:
+    """apply_molecule_corrections — empirical energy corrections."""
+
+    def test_applies_correction(self, tmp_path: Path):
+        """Known molecule gets its energy adjusted by the correction value."""
+        from vasp_sop.defect.cpd import apply_molecule_corrections
+        comp = tmp_path / "composition_energies.yaml"
+        comp.write_text(yaml.dump({"O2": {"energy": -10.0}}))
+        corrections = {"O2": 1.374}
+        apply_molecule_corrections(comp, corrections)
+        data = yaml.safe_load(comp.read_text())
+        assert data["O2"]["energy"] == pytest.approx(-8.626)
+
+    def test_unknown_molecule_skipped(self, tmp_path: Path):
+        """Molecule not in corrections dict is left unchanged."""
+        from vasp_sop.defect.cpd import apply_molecule_corrections
+        comp = tmp_path / "composition_energies.yaml"
+        comp.write_text(yaml.dump({"H2O": {"energy": -5.0}}))
+        apply_molecule_corrections(comp, {})
+        data = yaml.safe_load(comp.read_text())
+        assert data["H2O"]["energy"] == -5.0
+
+
+class TestWriteBinaryTargetVertices:
+    """_write_binary_target_vertices — chem_pot computation for 2-element systems."""
+
+    def test_writes_correct_chem_pot_with_elemental_refs(self, tmp_path: Path):
+        """With elemental references in composition_energies, chem_pot
+        equals formation energy (target - sum of elemental references)."""
+        from vasp_sop.defect.cpd import _write_binary_target_vertices
+        from pymatgen.core import Composition
+        cpd = tmp_path / "cpd"
+        cpd.mkdir()
+        comp = cpd / "composition_energies.yaml"
+        comp.write_text(yaml.dump({
+            "GaN": {"energy": -15.0},   # GaN target
+            "Ga": {"energy": -3.0},     # elemental Ga
+            "N2": {"energy": -8.0},     # molecular N2
+        }))
+        _write_binary_target_vertices(cpd, Composition("GaN"), "GaN")
+        tv = yaml.safe_load((cpd / "target_vertices.yaml").read_text())
+        # formation energy = -15.0 - (-3.0 + -8.0) / ... wait
+        # GaN has 1 Ga + 1 N, so ref = 1*(-3.0) + 1*(-8.0/2) = -3.0 -4.0 = -7.0
+        # chem_pot = -15.0 - (-7.0) = -8.0
+        assert tv["GaN"]["chem_pot"] == pytest.approx(-8.0)
+
+    def test_fallback_to_total_energy_when_no_elemental_refs(self, tmp_path: Path):
+        """Without elemental references, uses total energy as chem_pot."""
+        from vasp_sop.defect.cpd import _write_binary_target_vertices
+        from pymatgen.core import Composition
+        cpd = tmp_path / "cpd"
+        cpd.mkdir()
+        comp = cpd / "composition_energies.yaml"
+        comp.write_text(yaml.dump({
+            "GaN": {"energy": -15.0},
+        }))
+        _write_binary_target_vertices(cpd, Composition("GaN"), "GaN")
+        tv = yaml.safe_load((cpd / "target_vertices.yaml").read_text())
+        assert tv["GaN"]["chem_pot"] == pytest.approx(-15.0)
+        assert "vertices" in yaml.safe_load(
+            (cpd / "chem_pot_diag.json").read_text()
+        )
+
+    def test_creates_standard_energies(self, tmp_path: Path):
+        """standard_energies.yaml is written alongside target_vertices.yaml."""
+        from vasp_sop.defect.cpd import _write_binary_target_vertices
+        from pymatgen.core import Composition
+        cpd = tmp_path / "cpd"
+        cpd.mkdir()
+        comp = cpd / "composition_energies.yaml"
+        comp.write_text(yaml.dump({"GaN": {"energy": -15.0}}))
+        _write_binary_target_vertices(cpd, Composition("GaN"), "GaN")
+        se = yaml.safe_load((cpd / "standard_energies.yaml").read_text())
+        assert "GaN" in se
+        assert se["GaN"]["energy"] == -15.0
