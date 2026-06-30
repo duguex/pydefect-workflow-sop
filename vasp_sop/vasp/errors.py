@@ -53,29 +53,54 @@ _ERROR_PATTERNS: dict[str, list[str]] = {
     ],
 }
 
+# mtime-based memoisation: avoid re-reading and re-scanning the same
+# OUTCAR across successive poll-loop cycles.
+_diagnose_cache: dict[Path, tuple[float, str | None]] = {}
+
+
 
 def diagnose_failure(outcar_path: Path) -> str | None:
     """Return the failure reason by matching OUTCAR text against known patterns.
 
     Returns the matched error category (e.g. ``"frozen_job"``,
     ``"positive_energy"``) or ``None`` if no known pattern is detected.
+
+    Results are memoised by mtime — the same OUTCAR (unchanged since last
+    read) returns the cached diagnosis instantly.
     """
     if not outcar_path.is_file():
         return None
 
-    text = outcar_path.read_text(encoding="utf-8", errors="replace")
-    text_tail = text[-16384:]
+    mtime = outcar_path.stat().st_mtime
+    cached = _diagnose_cache.get(outcar_path)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+
+    # Read a bounded tail (~64 KB) instead of the full OUTCAR — HSE
+    # files can exceed 100 MB, but error messages are always near the end.
+    size = outcar_path.stat().st_size
+    tail_size = min(size, 65536)
+    with outcar_path.open("rb") as f:
+        if tail_size < size:
+            f.seek(size - tail_size)
+        text_tail = f.read().decode("utf-8", errors="replace")
 
     # Check in tail first (most recent output), then full text
     for reason, patterns in _ERROR_PATTERNS.items():
         for pat in patterns:
             if _re.search(pat, text_tail):
+                _diagnose_cache[outcar_path] = (mtime, reason)
                 return reason
+
+    # Full text scan only when tail didn't match
+    text = outcar_path.read_text(encoding="utf-8", errors="replace")
     for reason, patterns in _ERROR_PATTERNS.items():
         for pat in patterns:
             if _re.search(pat, text):
+                _diagnose_cache[outcar_path] = (mtime, reason)
                 return reason
 
+    _diagnose_cache[outcar_path] = (mtime, None)
     return None
 
 

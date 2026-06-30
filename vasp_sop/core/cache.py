@@ -78,8 +78,14 @@ _CACHE_KEY = ["formula", "content_hash"]
 
 
 def _get_stores():
-    """Return (meta_store, blob_store), creating on first access."""
+    """Return (meta_store, blob_store), creating on first access.
+
+    Uses double-checked locking so the fast path (after init) avoids
+    the global lock entirely.
+    """
     global _meta_store, _blob_store
+    if _meta_store is not None and _blob_store is not None:
+        return _meta_store, _blob_store
     with _stores_lock:
         if _meta_store is None:
             from maggma.stores import JSONStore
@@ -617,12 +623,6 @@ def cache_lookup(src_dir: Path) -> dict[str, Any] | None:
     return vasp_results_get(formula, ch)
 
 
-def vasp_results_delete(formula: str, content_hash: str) -> None:
-    """Remove cached entry by formula + content_hash."""
-    meta_store, blob_store = _get_stores()
-    meta_store.remove_docs({"formula": formula, "content_hash": content_hash})
-    blob_store.remove_docs({"content_hash": content_hash})
-    logger.debug("Deleted cache for %s/%s", formula, content_hash)
 
 
 def query(
@@ -672,65 +672,6 @@ def query(
     return list(meta_store.query(criteria=criteria))[:limit]
 
 
-# ══════════════════════════════════════════════════════════════════════════
-# Bulk operations
-# ══════════════════════════════════════════════════════════════════════════
-
-def scan_converged_dirs(root: Path, *, skip_cached: bool = True) -> list[Path]:
-    """Scan *root* recursively for directories with converged OUTCARs.
-
-    Returns a sorted list of directories containing converged OUTCARs.
-    When *skip_cached* is True, directories already in the cache are excluded.
-    """
-    dirs: list[Path] = []
-    for outcar in sorted(root.rglob("OUTCAR")):
-        d = outcar.parent
-        if d.name == "output" and (d.parent / "OUTCAR").is_file():
-            continue
-        if skip_cached and cache_lookup(d) is not None:
-            continue
-        text = outcar.read_text()
-        if "General timing and accounting" not in text[-4096:]:
-            continue
-        dirs.append(d)
-    return dirs
-
-
-def backfill_all(root: Path, max_workers: int = 16) -> int:
-    """Cache all converged VASP calculations under *root* not already cached.
-
-    Parses in parallel for speed, then writes results in a single batch
-    to avoid JSONStore concurrency issues.
-    """
-    dirs = scan_converged_dirs(root)
-    if not dirs:
-        return 0
-
-    from concurrent.futures import ProcessPoolExecutor, as_completed
-
-    results: list[dict] = []
-    with ProcessPoolExecutor(max_workers=max_workers) as pool:
-        futures = {
-            pool.submit(_parse_and_build, d): d
-            for d in dirs
-        }
-        for future in as_completed(futures):
-            d = futures[future]
-            try:
-                results.append(future.result())
-            except Exception as exc:
-                logger.warning("Failed to parse %s: %s", d, exc)
-
-    # Filter out None results (e.g. lattice-filtered entries)
-    results = [r for r in results if r is not None]
-    meta_store, blob_store = _get_stores()
-
-    if meta_docs:
-        meta_store.update(meta_docs)
-    if blob_docs:
-        blob_store.update(blob_docs)
-
-    return len(meta_docs)
 
 
 def _parse_and_build(src_dir: Path) -> dict[str, Any]:
@@ -958,12 +899,3 @@ def _get_submitted_dirs() -> list[str]:
         (cutoff,),
     ).fetchall()
     return [r[0] for r in rows]
-
-
-def clear_stale_submissions(stale_hours: float = 6.0) -> int:
-    """Remove all submissions older than *stale_hours*.  Returns count."""
-    db = _submission_db()
-    cutoff = time.time() - stale_hours * 3600
-    n = db.execute("DELETE FROM submitted WHERE submitted_at < ?", (cutoff,)).rowcount
-    db.commit()
-    return n

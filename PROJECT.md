@@ -173,6 +173,8 @@ Wave 3:    后处理 (本地)
 
 ## 4. CLI 参考
 
+> 完整 CLI 目录见 [`FEATURES.md`](FEATURES.md#1-cli-commands)。
+
 ### 4.1 batch run
 
 ```bash

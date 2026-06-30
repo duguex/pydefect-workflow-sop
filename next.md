@@ -19,3 +19,7 @@ ZnO is stuck at CPD_POST but missing `target_vertices.yaml` — check what's wro
 - [x] `cache put -r` recursive scanning
 - [x] `cache put --formula --task-id` explicit args
 - [x] `vasp_results_put` with only formula or only task_id (partial auto-detect)
+
+## 5. Feature catalog
+`FEATURES.md` 已创建，包含所有用户可见能力的完整清单（CLI、流水线、配置、缓存等）。
+保持与代码库同步。

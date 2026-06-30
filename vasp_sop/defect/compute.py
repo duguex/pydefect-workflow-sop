@@ -93,8 +93,8 @@ def run_vasp(defect_root: Path) -> None:
                     )
                     restart_from_contcar(d)
                 else:
-                    # Stalled: auto-recover with POTIM increase
-                    stalled.discard(dirname)
+                    # Stalled: auto-recover with POTIM increase, but keep
+                    # in stalled set so this iteration skips submission.
                     logger.warning("Recovering stalled %s (max_f=%.4f)", dirname, cur_f)
                     incar_path = d / "INCAR"
                     if incar_path.is_file():

@@ -338,6 +338,7 @@ Notable gaps:
 | `vasp_sop/materials/mp.py` | MP query + parameter inference |
 | `pyproject.toml` | Dependencies, entry point, pytest config |
 | `PROJECT.md` | Detailed pipeline SOP (Chinese) |
+| `FEATURES.md` | User-facing feature catalog (CLI, pipeline, config, all capabilities) |
 
 ## Runtime Requirements
 

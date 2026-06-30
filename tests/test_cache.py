@@ -583,7 +583,8 @@ class TestCacheLookup:
         assert result["total_energy"] == -15.0
 
     def test_cache_lookup_after_delete(self, tmp_path: Path):
-        """Lookup returns None after entry is deleted."""
+        """Lookup returns None after entry is deleted via store directly."""
+        from vasp_sop.core.cache import _get_stores
         d = tmp_path / "deleteme"
         d.mkdir()
         (d / "OUTCAR").write_text(
@@ -597,7 +598,9 @@ class TestCacheLookup:
         _cache.vasp_results_put(d)
         assert _cache.cache_lookup(d) is not None
         f, ch, _ = _cache._detect_calc_info(d)
-        _cache.vasp_results_delete(f, ch)
+        meta_store, blob_store = _get_stores()
+        meta_store.remove_docs({"formula": f, "content_hash": ch})
+        blob_store.remove_docs({"content_hash": ch})
         assert _cache.cache_lookup(d) is None
 
 

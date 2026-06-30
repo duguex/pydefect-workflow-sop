@@ -488,7 +488,7 @@ def _add_cache_parser(subparsers) -> None:
 def _handle_cache(args: argparse.Namespace) -> None:
     from vasp_sop.core.cache import (
         cache_lookup, vasp_results_put, query, list_cache,
-        cache_stats, migrate_from_sqlite,
+        cache_stats, migrate_from_sqlite, _get_stores,
     )
     from pathlib import Path
     if args.cache_action == "put":
@@ -651,16 +651,23 @@ def _handle_cache(args: argparse.Namespace) -> None:
         print(f"Migrated {n} records from SQLite cache.db.")
 
     elif args.cache_action == "verify":
+        from collections import defaultdict
+        meta_store, _ = _get_stores()
+        all_entries = list(meta_store.query(
+            criteria={},
+            properties=["formula", "content_hash", "source_dir", "cached_at"],
+        ))
+        by_formula: dict[str, list] = defaultdict(list)
+        for e in all_entries:
+            by_formula[e.get("formula", "UNKNOWN")].append(e)
         stats = cache_stats()
         print(f"Total entries: {stats['total_entries']}")
         print(f"Converged: {stats['converged_entries']}")
-        print(f"Unique formulas: {stats['unique_formulas']}")
-        for formula in stats["formulas"]:
-            entries = query(formula=formula, limit=1)
-            ok = "OK" if entries else "NO_BLOB"
-            print(f"  {formula:12s}  {ok}")
-    else:
-        print(f"Unknown cache action: {args.cache_action}")
+        print(f"Unique formulas: {len(by_formula)}")
+        for formula in sorted(by_formula):
+            entries = by_formula[formula]
+            ok = "OK" if any(e.get("total_energy") for e in entries) else "NO_BLOB"
+            print(f"  {formula:12s}  {ok}  ({len(entries)} entries)")
 def _add_batch_parser(subparsers) -> None:
     """Add ``batch`` subcommand with actions."""
     p = subparsers.add_parser("batch", help="Multi-system batch operations")
@@ -709,6 +716,10 @@ def _add_batch_parser(subparsers) -> None:
         "--dry-run", action="store_true",
         help="Build defect structures and generate inputs only; do NOT submit any VASP jobs.",
     )
+    rp.add_argument(
+        "--exclude", action="append", default=[],
+        help="Exclude a system by directory name (repeatable: --exclude hBN --exclude orth-SiC)",
+    )
 
     # progress
     pp = sub.add_parser("progress", help="Show per-system completion percentage")
@@ -727,7 +738,8 @@ def _handle_batch(args: argparse.Namespace) -> None:
     elif args.batch_action == "submit":
         _batch_submit(args.root.resolve(), all_phases=args.all_phases)
     elif args.batch_action == "run":
-        _batch_run(args.root.resolve(), poll_interval=args.poll, dry_run=args.dry_run)
+        _batch_run(args.root.resolve(), poll_interval=args.poll, dry_run=args.dry_run,
+                   exclude=args.exclude)
     elif args.batch_action == "progress":
         _batch_progress(args.root.resolve())
 
@@ -839,24 +851,26 @@ def _competing_dirs(s: dict) -> list[Path]:
     _logr = _log.getLogger(__name__)
     td = _target_dir(s)
     cpd_dir = s["root"] / _CPD
-    # Log warning for dirs with POSCAR but no VASP inputs
+    result: list[Path] = []
     for pd in cpd_dir.iterdir():
         if not pd.is_dir() or pd.name == (td.name if td else ""):
             continue
         if pd.name in ("combos", "mp_flag"):
             continue
-        poscar = pd / "POSCAR"
-        if poscar.is_file() and not input_ready(pd):
-            _logr.warning("Competing phase %s has POSCAR but no VASP inputs (INCAR/POTCAR missing)",
-                          pd.name)
-    return sorted(
-        pd for pd in cpd_dir.iterdir()
-        if pd.is_dir() and pd.name != (td.name if td else "") and pd.name not in ("combos", "mp_flag")
-        and input_ready(pd)
-        and not check_converged(pd)
-        and not is_submitted(str(pd.resolve()))
-        and cache_lookup(pd) is None
-    )
+        if not input_ready(pd):
+            poscar = pd / "POSCAR"
+            if poscar.is_file():
+                _logr.warning("Competing phase %s has POSCAR but no VASP inputs "
+                              "(INCAR/POTCAR missing)", pd.name)
+            continue
+        if check_converged(pd):
+            continue
+        if is_submitted(str(pd.resolve())):
+            continue
+        if cache_lookup(pd) is not None:
+            continue
+        result.append(pd)
+    return sorted(result)
 
 
 def _phase(s: dict) -> str:
@@ -1147,12 +1161,16 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
         except Exception as exc:
             _logger.error("%s UC_DF failed: %s", s["name"], exc)
             print(f"  ✗ {s['name']:<18} UC_DF FAILED")
-def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) -> None:
+
+def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
+               exclude: list[str] | None = None) -> None:
     """Batch pipeline — advance all systems independently until completion.
 
     When *dry_run* is True, build/regenerate inputs locally but do NOT
     submit any VASP jobs (one pass only, no polling loop).
     No job limit — submits everything ready for submission.
+
+    *exclude* — list of system directory names to skip.
     """
     import time as _time
     from vasp_sop.vasp.io import check_converged, input_ready, prepare_inputs
@@ -1188,6 +1206,13 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
             "formula": config.formula,
             "mpid": mpid,
         })
+
+    # ── Apply --exclude filter ───────────────────────────────────
+    if exclude:
+        excluded_names = [s["name"] for s in sys_list if s["name"] in exclude]
+        if excluded_names:
+            logger.info("Excluded %d system(s): %s", len(excluded_names), excluded_names)
+        sys_list = [s for s in sys_list if s["name"] not in exclude]
 
     if not sys_list:
         print("No systems found.")
@@ -1228,10 +1253,20 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
             return None
         try:
             from vasp_sop.core.cache import mark_submitted
+            from vasp_sop.core.cache import lattice_too_large
+            if lattice_too_large(path):
+                logger.error("%s/%s: lattice too large (>MAX_LATTICE=%.1f Å), skipped",
+                             sys_name, label, 25.0)
+                print(f"  ✗ {sys_name:<18} {label}: lattice too large, skipped")
+                return None
             job = submit_vasp(path.resolve())
             mark_submitted(str(path.resolve()), job.task_name)
             print(f"  → {sys_name:<18} {label}: {job.task_name}")
             return job
+        except RuntimeError as exc:
+            logger.error("%s/%s submit failed (RuntimeError): %s", sys_name, label, exc)
+            print(f"  ✗ {sys_name:<18} {label}: {exc}")
+            return None
         except Exception as exc:
             logger.warning("%s/%s submit failed: %s", sys_name, label, exc)
             return None
@@ -1322,6 +1357,9 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False) ->
         _worker = _ft.partial(_advance_one_system, dry_run=dry_run)
         with _PPE(max_workers=14) as _pool:
             list(_pool.map(_worker, sys_list))
+        # 6. Wait before next poll iteration (avoids hot spin on idle workers)
+        if running > 0 or not dry_run:
+            _time.sleep(poll_interval)
         if dry_run:
             print("\nDry-run complete. No VASP jobs were submitted.")
             break

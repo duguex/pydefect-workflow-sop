@@ -484,26 +484,54 @@ def _write_binary_target_vertices(
     logger.info("Binary CPD: wrote %s with %d phases",
                 _STANDARD_ENERGIES, len(std_energies))
 
+    # ── Compute real chem_pot ────────────────────────────────────────
+    # Find elemental reference energies from composition_energies
+    elem_energies: dict[str, float] = {}
+    for phase, data in comp_energies.items():
+        comp = Composition(phase)
+        if comp.is_element:
+            elem = list(comp.elements)[0].symbol
+            elem_energies[elem] = data.get("energy", 0.0) / comp.num_atoms
+
+    target_energy = comp_energies.get(formula, {}).get("energy", 0.0)
+
+    # Formation energy = E_target - Σ n_i * μ_i^0 (elemental references)
+    if all(e.symbol in elem_energies for e in target_composition.elements):
+        ref_energy = sum(
+            target_composition[e.symbol] * elem_energies[e.symbol]
+            for e in target_composition.elements
+        )
+        chem_pot = target_energy - ref_energy
+    else:
+        # Fallback: total energy per formula unit (still >> 0.0)
+        chem_pot = target_energy
+        logger.warning(
+            "Binary CPD: elemental references not fully available "
+            "(found: %s), using total energy as chem_pot",
+            sorted(elem_energies.keys()),
+        )
+
     # Write synthetic target_vertices.yaml
     data = {
         "target": formula,
         formula: {
-            "chem_pot": 0.0,
+            "chem_pot": chem_pot,
             "competing_phases": list(std_energies.keys()),
             "impurity_phases": [],
         },
     }
     with open(target_vertices, "w") as f:
         yaml.dump(data, f, default_flow_style=None)
-    logger.info("Binary CPD: wrote synthetic %s for %s", _TARGET_VERTICES, formula)
+    logger.info("Binary CPD: wrote synthetic %s for %s (chem_pot=%.4f)",
+                _TARGET_VERTICES, formula, chem_pot)
 
     # Write synthetic chem_pot_diag.json
     import json
     diag = {
         "target_composition": formula,
         "competing_phases": list(std_energies.keys()),
-        "vertices": [[0.0]],
-        "target_vertices": [[0.0]],
+        "vertices": [[chem_pot]],
+        "target_vertices": [[chem_pot]],
     }
     with open(cpd_root / _CHEM_POT_DIAG, "w") as f:
         json.dump(diag, f, indent=2)
