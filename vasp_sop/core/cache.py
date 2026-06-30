@@ -24,7 +24,6 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-import yaml
 
 logger = logging.getLogger(__name__)
 
