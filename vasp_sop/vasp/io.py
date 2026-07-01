@@ -74,9 +74,41 @@ def check_complete(path: Path) -> bool:
     """Return True if OUTCAR exists (in *path* or *path*/output/)."""
     return (path / "OUTCAR").is_file() or (path / "output" / "OUTCAR").is_file()
 
+# mtime-based memoisation: avoid re-reading unchanged OUTCARs across
+# successive batch-run cycles.
+_check_converged_cache: dict[Path, tuple[float, bool]] = {}
+# EDIFFG cached per directory (INCAR rarely changes).
+_ediffg_cache: dict[Path, float] = {}
+
+
+def _tail_text(path: Path, n: int = 4096) -> str | None:
+    """Read the last *n* bytes of *path* (no full-file read for large files)."""
+    size = path.stat().st_size
+    if size <= n:
+        return path.read_text()
+    with path.open("rb") as f:
+        f.seek(size - n)
+        return f.read().decode("utf-8", errors="replace")
+
+
+def _get_ediffg(path: Path) -> float:
+    """Return the EDIFFG value from INCAR (cached)."""
+    cached = _ediffg_cache.get(path)
+    if cached is not None:
+        return cached
+    incar_path = path / "INCAR"
+    efg = 0.03
+    if incar_path.is_file():
+        head = incar_path.read_text()[:4096]
+        m = _re.search(r"EDIFFG\s*=\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", head)
+        if m:
+            efg = abs(float(m.group(1)))
+    _ediffg_cache[path] = efg
+    return efg
+
 
 def check_converged(path: Path) -> bool:
-    """OUTCAR-based ionic convergence check (head + tail, ~96 KB).
+    """OUTCAR-based ionic convergence check (tail-read + mtime cache).
 
     Returns True when an OUTCAR exists, VASP finished with timing info,
     and max ionic force component is below EDIFFG tolerance.
@@ -89,21 +121,38 @@ def check_converged(path: Path) -> bool:
     if outcar is None:
         return False
 
+    # mtime cache: unchanged files return cached result
+    try:
+        mtime = outcar.stat().st_mtime
+    except OSError:
+        return False
+    cached = _check_converged_cache.get(outcar)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+
+    # Tail-read first — most OUTCARs are not converged.
+    tail = _tail_text(outcar, n=4096)
+    if tail is None:
+        _check_converged_cache[outcar] = (mtime, False)
+        return False
+
+    if "General timing and accounting" not in tail:
+        _check_converged_cache[outcar] = (mtime, False)
+        return False
+
+    # Converged — full read for force parsing.
     try:
         text = outcar.read_text()
     except Exception:
+        _check_converged_cache[outcar] = (mtime, False)
         return False
 
-    if "General timing and accounting" not in text[-4096:]:
-        return False
-
-    # Parse forces from last TOTAL-FORCE block
     idx = text.rfind("TOTAL-FORCE (eV/Angst)")
     if idx < 0:
+        _check_converged_cache[outcar] = (mtime, False)
         return False
-    head = text[:16384]
-    m_efg = _re.search(r"EDIFFG\s*=\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", head)
-    efg = abs(float(m_efg.group(1))) if m_efg else 0.03
+
+    efg = _get_ediffg(path)
     max_f = 0.0
     for line in text[idx:].splitlines()[2:]:
         parts = line.strip().split()
@@ -113,7 +162,10 @@ def check_converged(path: Path) -> bool:
             max_f = max(max_f, abs(float(parts[3])), abs(float(parts[4])), abs(float(parts[5])))
         except ValueError:
             break
-    return max_f < efg
+
+    result = max_f < efg
+    _check_converged_cache[outcar] = (mtime, result)
+    return result
 
 
 def restart_from_contcar(path: Path) -> None:
