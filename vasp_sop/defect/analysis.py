@@ -1,4 +1,8 @@
-"""Defect post-processing — energy analysis, corrections, summaries."""
+"""Defect post-processing — energy analysis, corrections, summaries.
+
+Each pydefect step has a guard that skips it if its output already
+exists, so re-running post-processing picks up where it left off.
+"""
 
 from __future__ import annotations
 
@@ -21,10 +25,7 @@ def analyze(
     standard_energies: Path,
     target_vertices: Path,
 ) -> None:
-    """Run the defect energetics post-processing pipeline.
-
-    Ported from ``pydefect_logic.py:583-637``.
-    """
+    """Run the defect energetics post-processing pipeline."""
     summary_json = defect_root / "defect_energy_summary.json"
     if summary_json.is_file():
         logger.info("Defect energy summary already exists, skipping post-processing.")
@@ -32,9 +33,6 @@ def analyze(
     perfect_dir = defect_root / "perfect"
 
     # ── OUTCAR check + recovery ────────────────────────────────────
-    # The post-processing pipeline (pydefect CLI) reads OUTCAR from
-    # disk.  If a dir has a cache entry but missing files, restore
-    # from the cache (source_dir copy → blob structure_dict).
     from vasp_sop.core.cache import restore_from_cache
     from vasp_sop.core.jobs import move_crisp_outputs
     missing_outcars: list[str] = []
@@ -59,55 +57,61 @@ def analyze(
         )
         return
 
+    # Collect defect dirs once, reuse across guards
+    defect_dirs_all = sorted(
+        d for d in defect_root.iterdir()
+        if d.is_dir() and d.name != "perfect" and "_" in d.name
+    )
+
     # ── cr (calc_results) ───────────────────────────────────────────
-    run_local("pydefect_vasp cr -d *_* perfect", cwd=defect_root)
+    cr_present = [d for d in defect_dirs_all if (d / "calc_results.json").is_file()]
+    perfect_cr = perfect_dir / "calc_results.json"
+    if len(cr_present) == len(defect_dirs_all) and perfect_cr.is_file():
+        logger.info("calc_results.json exists for all dirs, skipping pydefect_vasp cr.")
+    else:
+        run_local("pydefect_vasp cr -d *_* perfect", cwd=defect_root)
 
     # ── efnv (energy-free NV) correction ────────────────────────────
-    if perfect_dir.is_dir():
-        perfect_cr = perfect_dir / "calc_results.json"
-        if perfect_cr.is_file():
-            run_local(
-                f"pydefect efnv -d *_* -pcr {perfect_cr} -u {unitcell_yaml}",
-                cwd=defect_root,
-            )
+    if perfect_dir.is_dir() and perfect_cr.is_file():
+        run_local(
+            f"pydefect efnv -d *_* -pcr {perfect_cr} -u {unitcell_yaml}",
+            cwd=defect_root,
+        )
 
     # ── dsi (defect structure info) ─────────────────────────────────
-    run_local("pydefect dsi -d *_*", cwd=defect_root)
+    dsi_present = [d for d in defect_dirs_all if (d / "defect_structure_info.json").is_file()]
+    if len(dsi_present) == len(defect_dirs_all):
+        logger.info("defect_structure_info.json exists for all dirs, skipping pydefect dsi.")
+    else:
+        run_local("pydefect dsi -d *_*", cwd=defect_root)
 
     # ── dvf (defect volume fraction) ────────────────────────────────
-    run_local("pydefect_util dvf -d *_*", cwd=defect_root)
+    dvf_present = [d for d in defect_dirs_all if (d / "defect_volume_fraction.json").is_file()]
+    if len(dvf_present) == len(defect_dirs_all):
+        logger.info("defect_volume_fraction.json exists for all dirs, skipping pydefect_util dvf.")
+    else:
+        run_local("pydefect_util dvf -d *_*", cwd=defect_root)
 
     # ── pbes (perfect band-edge state) ──────────────────────────────
-    run_local("pydefect_vasp pbes -d perfect", cwd=defect_root)
-
-    # ── beoi (band-edge orbital info) ───────────────────────────────
     pbes_json = perfect_dir / "perfect_band_edge_state.json"
     if pbes_json.is_file():
-        run_local(
-            f"pydefect_vasp beoi -d *_* -pbes {pbes_json}",
-            cwd=defect_root,
-        )
+        logger.info("perfect_band_edge_state.json exists, skipping pydefect_vasp pbes.")
+    else:
+        run_local("pydefect_vasp pbes -d perfect", cwd=defect_root)
 
-    # ── bes (band-edge state) ───────────────────────────────────────
+    # ── beoi + bes (band-edge orbital info + state) ────────────────
     if pbes_json.is_file():
-        run_local(
-            f"pydefect bes -d *_* -pbes {pbes_json}",
-            cwd=defect_root,
-        )
+        run_local(f"pydefect_vasp beoi -d *_* -pbes {pbes_json}", cwd=defect_root)
+        run_local(f"pydefect bes -d *_* -pbes {pbes_json}", cwd=defect_root)
 
     # ── dei (defect energy info) ───────────────────────────────────
-    perfect_cr = perfect_dir / "calc_results.json"
     if perfect_cr.is_file() and unitcell_yaml.is_file() and standard_energies.is_file():
-        defect_dirs = sorted(
-            d for d in defect_root.iterdir()
-            if d.is_dir() and "_" in d.name and d.name != "perfect"
-        )
-        corrected = [d for d in defect_dirs if (d / "correction.json").is_file()]
-        missing = [d for d in defect_dirs if not (d / "correction.json").is_file()]
-        if missing:
+        corrected = [d for d in defect_dirs_all if (d / "correction.json").is_file()]
+        not_corrected = [d for d in defect_dirs_all if not (d / "correction.json").is_file()]
+        if not_corrected:
             logger.warning(
                 "Skipping %d defect(s) missing correction.json: %s",
-                len(missing), ", ".join(d.name for d in missing),
+                len(not_corrected), ", ".join(d.name for d in not_corrected),
             )
         if corrected:
             targets = " ".join(d.name for d in corrected)
@@ -127,10 +131,7 @@ def analyze(
 
     # ── cs (calc summary) ───────────────────────────────────────────
     if perfect_cr.is_file():
-        run_local(
-            f"pydefect cs -d *_* -pcr {perfect_cr}",
-            cwd=defect_root,
-        )
+        run_local(f"pydefect cs -d *_* -pcr {perfect_cr}", cwd=defect_root)
 
     # ── pe (phase equilibrium) for each vertex ──────────────────────
     if target_vertices.is_file():
