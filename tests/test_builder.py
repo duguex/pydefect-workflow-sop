@@ -180,3 +180,84 @@ class TestConfigFingerprint:
 
         _check_rebuild(root, c)
         assert (root / "supercell_info.json").is_file(), "flag should be preserved"
+
+
+class TestWriteFingerprint:
+    """_write_fingerprint — persists config fingerprint after build."""
+
+    def test_writes_fingerprint_file(self, tmp_path: Path):
+        from vasp_sop.defect.builder import _write_fingerprint, _config_fingerprint
+        root = tmp_path / "defect"
+        root.mkdir()
+        config = PipelineConfig(formula="GaN")
+        _write_fingerprint(root, config)
+        fp_path = root / ".build_fingerprint"
+        assert fp_path.is_file()
+        content = fp_path.read_text().strip()
+        assert content == _config_fingerprint(config)
+
+
+class TestHandleInterstitials:
+    """_handle_interstitials — early-return branches."""
+
+    def test_skipped_when_disabled(self, tmp_path: Path):
+        from vasp_sop.defect.builder import _handle_interstitials
+        config = PipelineConfig(formula="GaN", interstitial=False)
+        _handle_interstitials(tmp_path, config)
+        # No crash = OK
+
+    def test_skipped_without_supercell_info(self, tmp_path: Path):
+        from vasp_sop.defect.builder import _handle_interstitials
+        config = PipelineConfig(formula="GaN", interstitial=True)
+        _handle_interstitials(tmp_path, config)
+
+    def test_skipped_when_no_dos_extrema(self, tmp_path: Path):
+        from vasp_sop.defect.builder import _handle_interstitials
+        sc_info = tmp_path / "supercell_info.json"
+        sc_info.write_text('{"interstitials": []}')
+        config = PipelineConfig(formula="GaN", interstitial=True)
+        _handle_interstitials(tmp_path, config)
+
+    def test_skipped_when_interstitials_exist(self, tmp_path: Path):
+        from vasp_sop.defect.builder import _handle_interstitials
+        sc_info = tmp_path / "supercell_info.json"
+        sc_info.write_text('{"interstitials": ["already_done"]}')
+        config = PipelineConfig(formula="GaN", interstitial=True)
+        _handle_interstitials(tmp_path, config)
+
+
+class TestBuildAll:
+    """build_all — calls sub-functions in correct order."""
+
+    def test_calls_sub_functions(self, tmp_path: Path, monkeypatch):
+        """With a target POSCAR, build_all calls _build_supercell,
+        _handle_interstitials, _generate_defect_list, and others."""
+        target = tmp_path / "target"
+        target.mkdir()
+        (target / "POSCAR").write_text("dummy\n")
+
+        order = []
+        monkeypatch.setattr("vasp_sop.defect.builder._build_supercell",
+                           lambda *a, **kw: order.append("supercell"))
+        monkeypatch.setattr("vasp_sop.defect.builder._handle_interstitials",
+                           lambda *a, **kw: order.append("interstitials"))
+        monkeypatch.setattr("vasp_sop.defect.builder._generate_defect_list",
+                           lambda *a, **kw: order.append("defect_list"))
+        monkeypatch.setattr("vasp_sop.defect.builder._generate_structures",
+                           lambda *a, **kw: order.append("structures"))
+        monkeypatch.setattr("vasp_sop.defect.builder._generate_vasp_inputs",
+                           lambda *a, **kw: order.append("vasp_inputs"))
+        monkeypatch.setattr("vasp_sop.defect.builder._check_rebuild",
+                           lambda *a, **kw: order.append("check_rebuild"))
+        monkeypatch.setattr("vasp_sop.defect.builder._write_fingerprint",
+                           lambda *a, **kw: order.append("fingerprint"))
+
+        from vasp_sop.defect.builder import build_all
+        config = PipelineConfig(formula="GaN")
+        build_all(tmp_path / "defect", target, config)
+
+        assert "supercell" in order
+        assert "defect_list" in order
+        assert "structures" in order
+        assert "vasp_inputs" in order
+        assert "fingerprint" in order
