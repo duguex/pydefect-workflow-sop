@@ -1259,11 +1259,14 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
 
 def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                exclude: list[str] | None = None) -> None:
-    """Batch pipeline — advance all systems independently until completion.
+    """Batch pipeline — advance all systems by one cycle (single pass).
+
+    One-shot: advances each system once by its current phase, submits
+    ready VASP jobs, then exits.  No background loop, no worker pool —
+    runs serially so output is real-time and no orphan processes leak.
 
     When *dry_run* is True, build/regenerate inputs locally but do NOT
-    submit any VASP jobs (one pass only, no polling loop).
-    No job limit — submits everything ready for submission.
+    submit any VASP jobs.
 
     *exclude* — list of system directory names to skip.
     """
@@ -1329,20 +1332,13 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
     from vasp_sop.core.cache import cache_lookup, vasp_results_put as _cache_put
 
     def _cache_phase_results(wd: Path) -> None:
-        """Cache completed VASP calculation."""
         try:
             _cache_put(wd)
         except Exception as exc:
             logger.warning("Failed to cache %s: %s", wd.name, exc)
 
-    # ── Helpers ─────────────────────────────────────────────────────
-
-
-
-
-    # ── Dry-run helper ──────────────────────────────────────────────
+    # ── Submit helper ──────────────────────────────────────────────
     def _submit_or_skip(path: Path, label: str, sys_name: str) -> object:
-        """Submit VASP or print dry-run message."""
         if dry_run:
             print(f"  [dry-run] {sys_name:<18} would submit: {label}")
             return None
@@ -1366,13 +1362,10 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
             logger.warning("%s/%s submit failed: %s", sys_name, label, exc)
             return None
 
-    # ── Main loop (max 1000 iterations to prevent infinite loops) ──
-    _MAX_ITERATIONS = 1000
-
     if dry_run:
         print("Dry-run mode: will build defect structures and generate inputs, NO VASP submission.\n")
 
-    # ── Backfill cache: cache already-converged phase results ──────
+    # ── Backfill cache ──────────────────────────────────────────
     backfilled = 0
     for s in sys_list:
         cpd_root = s["root"] / _CPD
@@ -1382,9 +1375,9 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
             if not pd.is_dir() or "_mp-" not in pd.name:
                 continue
             if cache_lookup(pd) is not None:
-                continue  # already cached
+                continue
             if not check_converged(pd):
-                continue  # not converged on disk
+                continue
             from vasp_sop.core.jobs import move_crisp_outputs
             move_crisp_outputs(pd)
             formula, mpid = pd.name.split("_mp-", 1)
@@ -1392,10 +1385,8 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
             backfilled += 1
     if backfilled:
         logger.info("Backfilled %d already-converged phase results into cache.", backfilled)
+
     # ── Sweep for orphan crisp outputs ──────────────────────────
-    # Previously completed crisp jobs may have OUTCARs stuck in
-    # ``output/`` subdirectories.  Move and cache them so the
-    # pipeline sees completed calculations without re-submitting.
     orphaned = 0
     for s in sys_list:
         for root_dir in (s["root"] / _UC, s["root"] / _DF):
@@ -1409,60 +1400,50 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                     continue
                 if not (output_dir / "OUTCAR").is_file():
                     continue
-                # Converged OUTCAR in output/ — move outputs
                 move_crisp_outputs(child)
-                # Cache if not already cached (avoids redundant pymatgen)
                 if cache_lookup(child) is None:
                     _cache_phase_results(child)
                 orphaned += 1
     if orphaned:
         logger.info("Processed %d orphaned crisp outputs.", orphaned)
 
-    for _iteration in range(_MAX_ITERATIONS):
-        # 1. Poll from submission DB (shared with ProcessPoolExecutor workers)
-        from vasp_sop.core.cache import _get_submitted_dirs, clear_submission
-        submitted_dirs = _get_submitted_dirs()
-        running = 0
-        for wd_str in list(submitted_dirs):
-            wd = Path(wd_str)
-            if check_converged(wd):
-                move_crisp_outputs(wd)
-                _cache_phase_results(wd)
-                clear_submission(wd_str)
-                logger.info("Completed: %s", wd.name)
-            else:
-                running += 1
+    # ── Poll completed submissions (one-shot) ────────────────────────
+    from vasp_sop.core.cache import _get_submitted_dirs, clear_submission
+    completed = 0
+    for wd_str in list(_get_submitted_dirs()):
+        wd = Path(wd_str)
+        if check_converged(wd):
+            move_crisp_outputs(wd)
+            _cache_phase_results(wd)
+            clear_submission(wd_str)
+            logger.info("Completed: %s", wd.name)
+            completed += 1
+    if completed:
+        print(f"  Cached {completed} completed calculation(s).")
 
-        # 2. Status snapshot
-        phases = [_phase(s) for s in sys_list]
-        done_count = sum(1 for p in phases if p in ("DONE", "NO_TARGET"))
-        counts = {p: phases.count(p) for p in sorted(set(phases))}
+    # ── Advance all systems (serial, single pass) ────────────────────
+    for s in sys_list:
+        name = s["name"]
+        p = _phase(s)
+        if p in ("DONE", "NO_TARGET"):
+            continue
+        try:
+            _advance_one_system(s, dry_run=dry_run)
+        except Exception as exc:
+            _logger.error("%s advance failed: %s", name, exc)
+            print(f"  ✗ {name:<18} FAILED ({exc})")
 
-        # 3. Print status line
-        parts = [f"{p}={n}" for p, n in sorted(counts.items())]
-        print(f"  [{running} running]  {'  '.join(parts)}")
-
-        # 4. Done?
-        if done_count == len(sys_list) and running == 0:
-            print("\nAll systems complete.")
-            break
-
-
-        # 5. Advance all systems (parallel per-system, 14 processes)
-        #    Use as_completed so a stuck system doesn't block the rest.
-        from concurrent.futures import ProcessPoolExecutor as _PPE, as_completed as _ac
-        import functools as _ft
-        _worker = _ft.partial(_advance_one_system, dry_run=dry_run)
-        with _PPE(max_workers=14) as _pool:
-            futures = {_pool.submit(_worker, s): s for s in sys_list}
-            for f in _ac(futures):
-                s = futures[f]
-                try:
-                    f.result()
-                except Exception as exc:
-                    _logger.error("%s worker returned error: %s", s["name"], exc)
+    # ── Final status ──────────────────────────────────────────────
+    phases = [_phase(s) for s in sys_list]
+    done_count = sum(1 for p in phases if p in ("DONE", "NO_TARGET"))
+    counts = {p: phases.count(p) for p in sorted(set(phases))}
+    parts = [f"{p}={n}" for p, n in sorted(counts.items())]
+    print(f"\n{'  '.join(parts)}")
+    if done_count == len(sys_list):
+        print("All systems complete.")
     else:
-        logger.error("Batch run hit max iterations (%d), exiting.", _MAX_ITERATIONS)
+        still = len(sys_list) - done_count
+        print(f"{still} system(s) remaining — re-run `vasp-sop batch run .` after VASP jobs complete.")
 
 
 def _batch_generate_inputs(root: Path, *, unitcell: bool = False) -> None:
