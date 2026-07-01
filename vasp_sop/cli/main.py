@@ -1422,28 +1422,47 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
         print(f"  Cached {completed} completed calculation(s).")
 
     # ── Advance all systems (serial, single pass) ────────────────────
-    for s in sys_list:
+    n_skipped = 0
+    errors: list[tuple[str, str]] = []  # (name, reason)
+    for idx, s in enumerate(sys_list, 1):
         name = s["name"]
         p = _phase(s)
         if p in ("DONE", "NO_TARGET"):
+            n_skipped += 1
             continue
+
+        print(f"  [{idx}/{len(sys_list)}] {name:<18} {p} ...", end="", flush=True)
         try:
             _advance_one_system(s, dry_run=dry_run)
+            print(" done")
         except Exception as exc:
+            reason = str(exc).split("(")[0].strip() or type(exc).__name__
             _logger.error("%s advance failed: %s", name, exc)
-            print(f"  ✗ {name:<18} FAILED ({exc})")
+            print(f" FAILED ({reason})")
+            errors.append((name, reason))
+
+    if n_skipped:
+        print(f"  [{n_skipped}/{len(sys_list)} systems already done, skipped]\n")
 
     # ── Final status ──────────────────────────────────────────────
     phases = [_phase(s) for s in sys_list]
     done_count = sum(1 for p in phases if p in ("DONE", "NO_TARGET"))
     counts = {p: phases.count(p) for p in sorted(set(phases))}
     parts = [f"{p}={n}" for p, n in sorted(counts.items())]
-    print(f"\n{'  '.join(parts)}")
+    print(f"{'  '.join(parts)}")
+
+    if errors:
+        print(f"\n  ⚠ {len(errors)} system(s) with errors:")
+        for name, reason in errors:
+            print(f"    {name:<18}  {reason}")
+
     if done_count == len(sys_list):
-        print("All systems complete.")
+        print("\nAll systems complete.")
     else:
         still = len(sys_list) - done_count
-        print(f"{still} system(s) remaining — re-run `vasp-sop batch run .` after VASP jobs complete.")
+        blocked = len(errors)
+        running = still - blocked
+        print(f"\n{running} running, {blocked} blocked, {still} remaining — re-run `vasp-sop batch run .` after VASP jobs complete.")
 
 
 def _batch_generate_inputs(root: Path, *, unitcell: bool = False) -> None:
