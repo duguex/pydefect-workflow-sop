@@ -1031,6 +1031,10 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
     p = _phase(s)
     if p == "DONE" or p == "NO_TARGET":
         return
+    from vasp_sop.core.phase_store import PhaseStore
+    _ps = PhaseStore()
+    _ps.record(s["name"], p)
+    _ps.close()
 
     root_dir = s["root"]
     cpd_root = root_dir / _CPD
