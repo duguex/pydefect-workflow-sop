@@ -614,3 +614,215 @@ class TestCachePut:
         _, ch2, _ = _detect_calc_info(tmp_path / "sys_A/cpd/Other_mp-101")
         assert vasp_results_get("GaN", ch1) is not None
         assert vasp_results_get("Other", ch2) is not None
+
+
+class TestFullPipelineWalkthrough:
+    """Drive a system through all 5 phases: TARGET → COMPETING → CPD_POST → UC_DF → DONE.
+
+    Each phase transition is verified by checking _phase() output and
+    asserting _advance_one_system produces the expected side effects
+    (submit_vasp calls, file creation, etc.).
+    """
+
+    def _write_converged_outcar(self, d: Path) -> None:
+        """Write an OUTCAR that satisfies check_converged (max-force < 0.03)."""
+        text = (
+            " General timing and accounting\n"
+            "   100.00% CPU utilisation\n"
+            " TOTAL-FORCE (eV/Angst)\n"
+            " ---\n"
+            " 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000\n"
+        )
+        (d / "OUTCAR").write_text(text)
+
+    def _write_unconverged_outcar(self, d: Path) -> None:
+        """Write an OUTCAR that fails check_converged (no timing marker)."""
+        (d / "OUTCAR").write_text("some header\n  reached required\n")
+
+    @pytest.fixture(autouse=True)
+    def _patch_common(self, monkeypatch, tmp_path: Path):
+        from vasp_sop.core.cache import override_cache_root
+        override_cache_root(tmp_path / ".vasp_sop")
+        monkeypatch.setattr("vasp_sop.defect.builder.build_all", lambda *a, **kw: None)
+        monkeypatch.setattr("vasp_sop.defect.builder._generate_vasp_inputs", lambda *a, **kw: None)
+        monkeypatch.setattr("vasp_sop.vasp.io.prepare_inputs", lambda *a, **kw: None)
+        monkeypatch.setattr("vasp_sop.defect.cpd.compute_chemical_potentials", lambda *a, **kw: None)
+        monkeypatch.setattr("vasp_sop.defect.cpd._get_target_composition", lambda *a: {})
+        monkeypatch.setattr("vasp_sop.defect.unitcell._prepare_all_inputs", lambda *a, **kw: None)
+        monkeypatch.setattr("vasp_sop.defect.unitcell.build_unitcell_yaml", lambda *a, **kw: None)
+        monkeypatch.setattr("vasp_sop.defect.analysis.analyze", lambda *a, **kw: None)
+        monkeypatch.setattr("vasp_sop.core.jobs.move_crisp_outputs", lambda *a, **kw: None)
+
+    def _make_system(self, tmp_path: Path, formula: str = "GaN", mpid: str = "804") -> Path:
+        """Create a minimal system with plan.yaml and target dir (no OUTCAR)."""
+        root = tmp_path / formula
+        root.mkdir()
+        plan = {
+            "project": {"formula": formula, "dopant_elements": [],
+                        "poscar_src": f"MP mp-{mpid}"},
+            "parameters": {"functional": "pbesol"},
+            "supercell": {"tool": "doped", "min_distance": 10.0},
+        }
+        (root / "plan.yaml").write_text(yaml.dump(plan))
+        cpd = root / "cpd"
+        cpd.mkdir()
+        target = cpd / f"{formula}_mp-{mpid}"
+        target.mkdir()
+        _write_poscar(target, 2)
+        _write_incar(target)
+        _write_potcar(target)
+        _write_kpoints(target)
+        return root
+
+    def test_walkthrough(self, tmp_path, monkeypatch):
+        """Walk through TARGET → COMPETING → CPD_POST → UC_DF → DONE."""
+        from vasp_sop.cli.main import _phase, _advance_one_system
+
+        formula = "GaN"
+        mpid = "804"
+        root = self._make_system(tmp_path, formula, mpid)
+
+        # Shared submit tracker + fake cache
+        submit_calls: list[str] = []
+        monkeypatch.setattr("vasp_sop.core.jobs.submit_vasp",
+                           lambda p: (submit_calls.append(str(p.resolve())) or
+                                      type("J", (), {"task_name": "t"})()))
+
+        cache_data: dict[str, dict] = {}
+        monkeypatch.setattr("vasp_sop.core.cache.cache_lookup",
+                           lambda p: cache_data.get(str(p.resolve())))
+        monkeypatch.setattr("vasp_sop.core.cache.vasp_results_get",
+                           lambda f, k: cache_data.get(f"{f}_{k}"))
+
+        s = _make_system_dict(root)
+
+        # ── Phase 1: TARGET ────────────────────────────────────────
+        assert _phase(s) == "TARGET", "bare system should start in TARGET"
+        _advance_one_system(s, dry_run=False)
+        # TARGET is a no-op when target is not cached — no submission
+        assert len(submit_calls) == 0, "TARGET phase should not submit"
+
+        # ── Phase 2: COMPETING ─────────────────────────────────────
+        # Cache target result to advance past TARGET
+        cache_data[f"{formula}_{mpid}"] = {"total_energy": -12.0}
+        td = root / "cpd" / f"{formula}_mp-{mpid}"
+        cache_data[str(td.resolve())] = {"total_energy": -12.0}
+
+        # Add unconverged competing dir so _competing_dirs returns it
+        comp = root / "cpd" / "Ga_mp-142"
+        comp.mkdir()
+        _write_poscar(comp, 1)
+        _write_incar(comp)
+        _write_potcar(comp)
+        _write_kpoints(comp)
+        self._write_unconverged_outcar(comp)
+
+        assert _phase(s) == "COMPETING", "unconverged competing dir → COMPETING"
+        _advance_one_system(s, dry_run=False)
+        assert str(comp.resolve()) in submit_calls, \
+            "competing phase should be submitted"
+
+        # ── Phase 3: CPD_POST ──────────────────────────────────────
+        # Cache + converge competing dir so _competing_dirs returns empty
+        cache_data[str(comp.resolve())] = {"total_energy": -5.0}
+        cache_data["Ga_142"] = {"total_energy": -5.0}
+        self._write_converged_outcar(comp)
+
+        assert _phase(s) == "CPD_POST", "no pending competing dirs → CPD_POST"
+        _advance_one_system(s, dry_run=False)
+        # CPD runs compute_chemical_potentials (mocked) — no VASP submission
+
+        # ── Phase 4: UC_DF ─────────────────────────────────────────
+        # Add CPD artifacts
+        cpd = root / "cpd"
+        (cpd / "target_vertices.yaml").write_text("tv: 1\n")
+        (cpd / "standard_energies.yaml").write_text("se: 1\n")
+
+        assert _phase(s) == "UC_DF", "CPD artifacts present → UC_DF"
+
+        # Create UC and defect directories
+        uc = root / "unitcell"
+        uc.mkdir()
+        for t in ("band", "dos", "dielectric"):
+            td = uc / t
+            td.mkdir()
+            _write_incar(td)
+        df = root / "defect"
+        df.mkdir()
+        perfect = df / "perfect"
+        perfect.mkdir()
+        _write_incar(perfect)
+        _write_kpoints(perfect)
+        _write_poscar(perfect, 2)
+        _write_potcar(perfect)
+
+        defect_dir = df / "Va_Ga_0"
+        defect_dir.mkdir()
+        _write_incar(defect_dir)
+        _write_kpoints(defect_dir)
+        _write_poscar(defect_dir, 2)
+        _write_potcar(defect_dir)
+        _advance_one_system(s, dry_run=False)
+        # Should submit UC (band/dos/dielectric) + defect (perfect + Va_Ga_0)
+        for t in ("band", "dos", "dielectric"):
+            assert str((uc / t).resolve()) in submit_calls, \
+                f"uc-{t} should be submitted"
+        assert str(perfect.resolve()) in submit_calls, "perfect should be submitted"
+        assert str(defect_dir.resolve()) in submit_calls, "defect should be submitted"
+
+        # ── Phase 5: DONE ──────────────────────────────────────────
+        # Cache all UC + defect results and add converged OUTCARs
+        for t in ("band", "dos", "dielectric"):
+            d = uc / t
+            cache_data[str(d.resolve())] = {"total_energy": -5.0}
+            self._write_converged_outcar(d)
+        for d in (perfect, defect_dir):
+            cache_data[str(d.resolve())] = {"total_energy": -5.0}
+            self._write_converged_outcar(d)
+
+        # Add defect_energy_summary.json (post-processing artifact)
+        (df / "defect_energy_summary.json").write_text("{}")
+
+        assert _phase(s) == "DONE", "all artifacts present → DONE"
+
+    def test_uc_resubmit_when_vasprxml_missing(self, tmp_path, monkeypatch):
+        """UC task with converged OUTCAR but missing vasprun.xml → re-submitted."""
+        from vasp_sop.cli.main import _phase, _advance_one_system
+
+        root = self._make_system(tmp_path, "GaN", "804")
+        cpd = root / "cpd"
+        (cpd / "target_vertices.yaml").write_text("tv: 1\n")
+        (cpd / "standard_energies.yaml").write_text("se: 1\n")
+
+        # Create UC dirs with converged OUTCAR but NO vasprun.xml
+        uc = root / "unitcell"
+        uc.mkdir()
+        for t in ("band", "dos", "dielectric"):
+            td = uc / t
+            td.mkdir()
+            _write_incar(td)
+            self._write_converged_outcar(td)
+
+        submit_calls: list[str] = []
+        monkeypatch.setattr("vasp_sop.core.jobs.submit_vasp",
+                           lambda p: (submit_calls.append(str(p.resolve())) or
+                                      type("J", (), {"task_name": "t"})()))
+        cache_data: dict[str, dict] = {}
+        # Cache only the target (so phase advances past COMPETING)
+        td = root / "cpd" / "GaN_mp-804"
+        cache_data[str(td.resolve())] = {"total_energy": -12.0}
+        cache_data["GaN_804"] = {"total_energy": -12.0}
+        monkeypatch.setattr("vasp_sop.core.cache.cache_lookup",
+                           lambda p: cache_data.get(str(p.resolve())))
+
+        s = _make_system_dict(root)
+        _advance_one_system(s, dry_run=False)
+
+        # band and dos should be re-submitted (missing vasprun.xml)
+        assert str((uc / "band").resolve()) in submit_calls, \
+            "band should re-submit (no vasprun.xml)"
+        assert str((uc / "dos").resolve()) in submit_calls, \
+            "dos should re-submit (no vasprun.xml)"
+        # dielectric should NOT be re-submitted (OUTCAR only is sufficient)
+        assert str((uc / "dielectric").resolve()) not in submit_calls, \
+            "dielectric should not re-submit (OUTCAR sufficient)"
