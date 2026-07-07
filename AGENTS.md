@@ -3,6 +3,8 @@
 ## Project Overview
 
 vasp-sop (v0.1.0, MIT) is a Python framework for high-throughput VASP point-defect
+calculations.  It depends on [vasp-cache](https://github.com/duguex/vasp-cache)
+for VASP calculation result storage and deduplication.
 calculations. Given a chemical formula and optional dopant elements, it automates
 the end-to-end pipeline: competing phase search → chemical potential diagram →
 unitcell properties → supercell construction → defect enumeration → VASP
