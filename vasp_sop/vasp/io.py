@@ -168,6 +168,26 @@ def check_converged(path: Path) -> bool:
     return result
 
 
+_REQUIRED_UC_OUTPUTS: dict[str, list[str]] = {
+    "band":       ["OUTCAR", "vasprun.xml"],
+    "dos":        ["OUTCAR", "vasprun.xml"],
+    "dielectric": ["OUTCAR"],
+}
+
+
+def check_task_complete(path: Path, task_type: str = "") -> bool:
+    """Check whether a VASP task's output artifacts are fully present.
+
+    For band/dos tasks: requires converged OUTCAR + vasprun.xml.
+    For dielectric:     requires converged OUTCAR only.
+    For any other task: delegates to check_converged().
+    """
+    if not check_converged(path):
+        return False
+    if task_type in _REQUIRED_UC_OUTPUTS:
+        return all((path / f).is_file() for f in _REQUIRED_UC_OUTPUTS[task_type])
+    return True
+
 def restart_from_contcar(path: Path) -> None:
     """Copy CONTCAR → POSCAR and set ISTART=1 for restart."""
     contcar = path / "CONTCAR"
