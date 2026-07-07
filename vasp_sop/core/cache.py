@@ -1,4 +1,10 @@
-"""Global cache for VASP calculation results.
+"""Global cache for VASP calculation results — interface to vasp-cache.
+
+NOTE: The generic caching layer (vasp_results_put/get, query,
+restore_from_cache, etc.) corresponds to the external vasp-cache project
+(https://github.com/duguex/vasp-cache) and will be migrated there.
+vasp-sop retains only pipeline-specific logic: submissions.db,
+mark_submitted, is_submitted, and clear_submission.
 
 Uses maggma ``JSONStore`` for lightweight, file-based persistence with
 MongoDB-like query syntax.  Metadata (energy, bandgap, tags, ...) lives
