@@ -734,9 +734,12 @@ def _add_batch_parser(subparsers) -> None:
 
     # history
     p_history = sub.add_parser("history", help="Show phase transition timeline")
+    p_history.add_argument(
+        "root", type=Path,
+        help="Project root directory containing system subdirectories",
+    )
     p_history.add_argument("--system", "-s", type=str, default=None,
                            help="System name (omit for all)")
-    p_history.set_defaults(batch_action="history")
 
     # generate-inputs
     gp = sub.add_parser("generate-inputs", help="Generate VASP inputs for all systems")
@@ -921,7 +924,7 @@ def _target_dir(s: dict) -> Path | None:
 def _competing_dirs(s: dict) -> list[Path]:
     """Return dirs in cpd/ that need VASP submission."""
     from vasp_sop.vasp.io import check_converged, input_ready
-    from vasp_sop.core.cache import cache_lookup, is_submitted
+    from vasp_sop.core.cache import is_submitted
     import logging as _log
     _logr = _log.getLogger(__name__)
     td = _target_dir(s)
@@ -942,7 +945,8 @@ def _competing_dirs(s: dict) -> list[Path]:
             continue
         if is_submitted(str(pd.resolve())):
             continue
-        if cache_lookup(pd) is not None:
+        from vasp_sop.core.job_store import JobStore
+        if JobStore().latest(str(pd.resolve())) == "done":
             continue
         result.append(pd)
     return sorted(result)
@@ -956,7 +960,8 @@ def _phase(s: dict) -> str:
     COMPETING — even when competing-phase submissions reappear.
     """
     from vasp_sop.vasp.io import check_converged
-    from vasp_sop.core.cache import cache_lookup
+    from vasp_sop.core.job_store import JobStore
+    _js = JobStore()
     td = _target_dir(s)
     if td is None:
         return "NO_TARGET"
@@ -975,7 +980,7 @@ def _phase(s: dict) -> str:
         if not uc_has_inputs:
             return "UC_DF"
         uc_pending = any(
-            cache_lookup(uc_root / t) is None for t in uc_tasks
+            _js.latest(str((uc_root / t).resolve())) != "done" for t in uc_tasks
             if (uc_root / t / "INCAR").is_file()
         )
         df_root = s["root"] / _DF
@@ -988,7 +993,7 @@ def _phase(s: dict) -> str:
         return "DONE"
 
     # ── Normal upstream progression (CPD not yet complete) ────────
-    if cache_lookup(td) is None:
+    if _js.latest(str(td.resolve())) != "done":
         return "TARGET"
     if _competing_dirs(s):
         return "COMPETING"
