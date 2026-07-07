@@ -560,7 +560,6 @@ def _handle_cache(args: argparse.Namespace) -> None:
                 return
 
             from tqdm import tqdm
-            from concurrent.futures import ProcessPoolExecutor, as_completed
 
             # Phase 1: collect all OUTCAR dirs (single-pass rglob)
             all_dirs: list[Path] = []
@@ -574,79 +573,59 @@ def _handle_cache(args: argparse.Namespace) -> None:
                 print("No OUTCARs found.")
                 return
 
-            # Phase 2: classify in parallel (cache check + convergence check)
-            # Threads are fine here — I/O bound (NFS tail reads).
-            from concurrent.futures import ThreadPoolExecutor
+            # Phase 2: classify serially (NFS-friendly, cache-aware)
             to_cache: list[Path] = []
             unconverged: list[Path] = []
 
-            def _is_converged_tail(outcar: Path) -> bool:
-                """Check convergence marker in OUTCAR tail (reads ≤ 4 KB)."""
+            for d in tqdm(all_dirs, desc="Scanning", unit=" dirs"):
+                if cache_lookup(d) is not None:
+                    continue  # already cached
+                outcar = d / "OUTCAR"
+                if not outcar.is_file():
+                    unconverged.append(d)
+                    continue
                 size = outcar.stat().st_size
                 n = 4096
                 if size <= n:
-                    return "General timing and accounting" in outcar.read_text()
-                with outcar.open("rb") as f:
-                    f.seek(size - n)
-                    return b"General timing and accounting" in f.read()
+                    tail = outcar.read_text()
+                else:
+                    with outcar.open("rb") as f:
+                        f.seek(size - n)
+                        tail = f.read().decode("utf-8", errors="replace")
+                if "General timing and accounting" in tail:
+                    to_cache.append(d)
+                else:
+                    unconverged.append(d)
 
-            def _classify(d: Path) -> tuple[str, Path]:
-                if cache_lookup(d) is not None:
-                    return "cached", d
-                outcar = d / "OUTCAR"
-                if not outcar.is_file():
-                    return "unconverged", d
-                if _is_converged_tail(outcar):
-                    return "converged", d
-                return "unconverged", d
-
-            with ThreadPoolExecutor(max_workers=16) as pool:
-                futures = {pool.submit(_classify, d): d for d in all_dirs}
-                with tqdm(total=len(all_dirs), desc="Scanning", unit=" dirs") as pbar:
-                    for future in as_completed(futures):
-                        status, d = future.result()
-                        if status == "converged":
-                            to_cache.append(d)
-                        elif status == "unconverged":
-                            unconverged.append(d)
-                        # "cached": skip silently
-                        pbar.update(1)
-
-            # Phase 2.5: report cached count
+            # Phase 3: report cached + unconverged
             cached_count = len(all_dirs) - len(to_cache) - len(unconverged)
             if cached_count:
                 print(f"  {cached_count} directories already cached, skipped.")
-
-            # Phase 3: report unconverged
             for d in unconverged:
                 print(f"  ! {d} (not converged)")
 
-            # Phase 4: parallel cache converged (parse in workers, write incrementally)
+
+            # Phase 4: cache serially (parse + write incrementally)
             if to_cache:
                 from vasp_sop.core.cache import _parse_and_build, _get_stores
                 meta_store, blob_store = _get_stores()
                 meta_docs, blob_docs = [], []
                 total_cached = 0
-                with ProcessPoolExecutor(max_workers=16) as pool:
-                    futures = {pool.submit(_parse_and_build, d): d for d in to_cache}
-                    with tqdm(total=len(to_cache), desc="Caching", unit=" dirs") as pbar:
-                        for future in as_completed(futures):
-                            try:
-                                r = future.result()
-                                if r:
-                                    meta_docs.append(r["meta"])
-                                    if r.get("blob"):
-                                        blob_docs.append(r["blob"])
-                                if len(meta_docs) >= 100:
-                                    meta_store.update(meta_docs)
-                                    if blob_docs:
-                                        blob_store.update(blob_docs)
-                                    total_cached += len(meta_docs)
-                                    meta_docs, blob_docs = [], []
-                            except Exception as exc:
-                                d = futures[future]
-                                print(f"\n  ! {d} (parse failed: {exc})")
-                            pbar.update(1)
+                for d in tqdm(to_cache, desc="Caching", unit=" dirs"):
+                    try:
+                        r = _parse_and_build(d)
+                        if r:
+                            meta_docs.append(r["meta"])
+                            if r.get("blob"):
+                                blob_docs.append(r["blob"])
+                        if len(meta_docs) >= 100:
+                            meta_store.update(meta_docs)
+                            if blob_docs:
+                                blob_store.update(blob_docs)
+                            total_cached += len(meta_docs)
+                            meta_docs, blob_docs = [], []
+                    except Exception as exc:
+                        print(f"\n  ! {d} (parse failed: {exc})")
 
                 if meta_docs:
                     meta_store.update(meta_docs)
@@ -1016,8 +995,8 @@ def _crisp_active_dirs(*, skip: bool = False) -> set[str]:
 
 
 def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
-    """Advance one system by one cycle (subprocess-safe for ProcessPoolExecutor)."""
-    # Re-imports needed for subprocess workers
+    """Advance one system by one cycle (runs serially in batch mode)."""
+    # Re-imports needed for module-level dispatch
     import logging
     from pathlib import Path
     from vasp_sop.vasp.io import check_converged, input_ready, prepare_inputs
@@ -1196,7 +1175,8 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
                 task_dir = uc_root / task
                 if not task_dir.is_dir():
                     continue
-                if check_converged(task_dir):
+                from vasp_sop.vasp.io import check_task_complete
+                if check_task_complete(task_dir, task):
                     continue
                 if is_submitted(str(task_dir.resolve())):
                     continue
@@ -1467,7 +1447,6 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
 
 def _batch_generate_inputs(root: Path, *, unitcell: bool = False) -> None:
     """Generate VASP inputs for all systems in *root* that need them."""
-    import concurrent.futures
     from vasp_sop.vasp.io import input_ready, prepare_inputs
     from vasp_sop.core.config import PipelineConfig
     import logging
@@ -1499,30 +1478,18 @@ def _batch_generate_inputs(root: Path, *, unitcell: bool = False) -> None:
 
     print(f"Generating inputs for {len(tasks)} phase directories across {len(set(t[0] for t in tasks))} systems ...")
 
-    def _gen_one(sys_name: str, phase_name: str, phase_dir: Path, plan_path: Path) -> str:
-        try:
-            config = PipelineConfig.from_yaml(plan_path, root=phase_dir.parent.parent)
-            prepare_inputs(phase_dir, config)
-            return f"OK  {sys_name}/{phase_name}"
-        except Exception as exc:
-            return f"FAIL {sys_name}/{phase_name}: {exc}"
-
     ok = 0
     fail = 0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-        fut_map = {pool.submit(_gen_one, *t): t for t in tasks}
-        for fut in concurrent.futures.as_completed(fut_map):
-            t = fut_map[fut]
-            try:
-                msg = fut.result()
-                if msg.startswith("OK"):
-                    ok += 1
-                else:
-                    fail += 1
-                print(f"  {msg}")
-            except Exception as exc:
-                fail += 1
-                print(f"  FAIL {t[0]}/{t[1]}: {exc}")
+    for t in tasks:
+        try:
+            sys_name, phase_name, phase_dir, plan_path = t
+            config = PipelineConfig.from_yaml(plan_path, root=phase_dir.parent.parent)
+            prepare_inputs(phase_dir, config)
+            ok += 1
+            print(f"  OK  {sys_name}/{phase_name}")
+        except Exception as exc:
+            fail += 1
+            print(f"  FAIL {t[0]}/{t[1]}: {exc}")
 
     print(f"Done: {ok} generated, {fail} failed")
 
