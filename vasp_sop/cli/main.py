@@ -1048,6 +1048,8 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
         try:
             job = submit_vasp(path.resolve())
             mark_submitted(str(path.resolve()), job.task_name)
+            from vasp_sop.core.job_store import JobStore
+            JobStore().record(str(path.resolve()), "running")
             print(f"  → {sys_name:<18} {label}: {job.task_name}")
             return job
         except Exception as exc:
@@ -1396,6 +1398,8 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
             formula, mpid = pd.name.split("_mp-", 1)
             _cache_put(pd, formula=formula, task_name=f"{formula}_mp-{mpid}")
             backfilled += 1
+            from vasp_sop.core.job_store import JobStore
+            JobStore().record(str(pd.resolve()), "done", source="backfill")
     if backfilled:
         logger.info("Backfilled %d already-converged phase results into cache.", backfilled)
 
@@ -1429,6 +1433,8 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
             move_crisp_outputs(wd)
             _cache_phase_results(wd)
             clear_submission(wd_str)
+            from vasp_sop.core.job_store import JobStore
+            JobStore().record(str(wd.resolve()), "done")
             logger.info("Completed: %s", wd.name)
             completed += 1
     if completed:
