@@ -732,6 +732,12 @@ def _add_batch_parser(subparsers) -> None:
         help="Project root directory containing system subdirectories",
     )
 
+    # history
+    p_history = sub.add_parser("history", help="Show phase transition timeline")
+    p_history.add_argument("--system", "-s", type=str, default=None,
+                           help="System name (omit for all)")
+    p_history.set_defaults(batch_action="history")
+
     # generate-inputs
     gp = sub.add_parser("generate-inputs", help="Generate VASP inputs for all systems")
     gp.add_argument(
@@ -785,6 +791,8 @@ def _add_batch_parser(subparsers) -> None:
 def _handle_batch(args: argparse.Namespace) -> None:
     if args.batch_action == "status":
         _batch_status(args.root.resolve())
+    elif args.batch_action == "history":
+        _batch_history(args.root.resolve(), system=args.system)
     elif args.batch_action == "generate-inputs":
         _batch_generate_inputs(args.root.resolve(), unitcell=args.unitcell)
     elif args.batch_action == "submit":
@@ -831,8 +839,12 @@ def _batch_progress(root: Path) -> None:
         print(f"{name:22s}  {pct:3d}%  {cpd_ok:>2d}/{nc:<3d}  {uc_ok:>2d}/{nu:<3d}  {df_ok:>3d}/{nd:<3d}")
 
 def _batch_status(root: Path) -> None:
-    """Scan *root* for vasp-sop systems and print status table."""
-    from vasp_sop.vasp.io import check_converged, input_ready
+    """Scan *root* for vasp-sop systems and print status table with phases."""
+    from vasp_sop.core.phase_store import PhaseStore
+
+    store = PhaseStore()
+    phase_map = store.latest_all()
+    store.close()
 
     rows: list[dict] = []
     for d in sorted(root.iterdir()):
@@ -841,39 +853,51 @@ def _batch_status(root: Path) -> None:
         plan = d / "plan.yaml"
         if not plan.is_file():
             continue
-        rows.append(_scan_system(d, plan))
+        name = d.name
+        phase = phase_map.get(name, "INIT")
+        pri = _PRIORITY_MAP.get(name, "\u2014")
+        rows.append({"name": name, "pri": pri, "phase": phase})
 
     if not rows:
         print(f"No vasp-sop systems found in {root}")
         return
 
-    print(f"{'System':<18} {'P':<3} {'VASPin':<7} {'CPD':<5} {'Unitcell':<9} {'Defect':<7}")
-    print("-" * 55)
+    print(f"{'System':<22} {'P':<3} {'Phase':<12}")
+    print("-" * 40)
     for r in rows:
-        print(f"{r['name']:<18} {r['pri']:<3} {r['vasp_in']:<7} {r['cpd']:<5} {r['uc']:<9} {r['defect']:<7}")
+        print(f"{r['name']:<22} {r['pri']:<3} {r['phase']:<12}")
 
-    # ── Summary footer ────────────────────────────────────────────────
-    # Status string conventions used by _check_cpd / _check_unitcell /
-    # _check_defect: "✓" = done, "▶" or "N/M" = in progress, "·" = not started.
-    total = len(rows)
-    completed = sum(
-        1 for r in rows
-        if r["cpd"] == "✓" and r["uc"] == "✓" and r["defect"] == "✓"
-    )
-    in_progress = total - completed - sum(
-        1 for r in rows
-        if r["cpd"] == "·" and r["uc"] == "·" and r["defect"] == "·"
-    )
-    not_started = sum(
-        1 for r in rows
-        if r["cpd"] == "·" and r["uc"] == "·" and r["defect"] == "·"
-    )
-    print("-" * 55)
-    print(
-        f"Total: {total}  Completed: {completed}  "
-        f"In progress: {in_progress}  Not started: {not_started}"
-    )
+    done = sum(1 for r in rows if r["phase"] == "DONE")
+    print("-" * 40)
+    print(f"Total: {len(rows)}  Done: {done}  "
+          f"Remaining: {len(rows) - done}")
 
+
+def _batch_history(root: Path, *, system: str | None = None) -> None:
+    """Print phase timeline for one or all systems."""
+    from vasp_sop.core.phase_store import PhaseStore
+    from datetime import datetime
+
+    store = PhaseStore()
+    if system:
+        records = store.history(system)
+        if not records:
+            print(f"No history for system '{system}'.")
+            return
+        print(f"Timeline for {system}:")
+        for r in records:
+            ts = datetime.fromtimestamp(r["timestamp"]).isoformat()
+            print(f"  {ts}  {r['phase']:<12s}  {r['source']}")
+    else:
+        phase_map = store.latest_all()
+        if not phase_map:
+            print("No phase records found.")
+            return
+        print(f"{'System':<22}  {'Phase':<12}")
+        print("-" * 35)
+        for name, phase in sorted(phase_map.items()):
+            print(f"  {name:<22}  {phase:<12}")
+    store.close()
 
 # ── Pipeline phase constants (module-level for shared access) ──────
 _CPD = "cpd"
