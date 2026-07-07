@@ -842,11 +842,12 @@ def _batch_progress(root: Path) -> None:
         print(f"{name:22s}  {pct:3d}%  {cpd_ok:>2d}/{nc:<3d}  {uc_ok:>2d}/{nu:<3d}  {df_ok:>3d}/{nd:<3d}")
 
 def _batch_status(root: Path) -> None:
-    """Scan *root* for vasp-sop systems and print status table with phases."""
-    from vasp_sop.core.phase_store import PhaseStore
+    """Scan *root* for vasp-sop systems and print status table."""
+    from vasp_sop.core.job_store import JobStore
+    from vasp_sop.core.config import PipelineConfig
 
-    store = PhaseStore()
-    phase_map = store.latest_all()
+    store = JobStore()
+    all_jobs = store.latest_all()
     store.close()
 
     rows: list[dict] = []
@@ -856,50 +857,82 @@ def _batch_status(root: Path) -> None:
         plan = d / "plan.yaml"
         if not plan.is_file():
             continue
-        name = d.name
-        phase = phase_map.get(name, "INIT")
-        pri = _PRIORITY_MAP.get(name, "\u2014")
-        rows.append({"name": name, "pri": pri, "phase": phase})
+        try:
+            config = PipelineConfig.from_yaml(plan, root=d)
+            src = config.poscar_src
+            mpid = src.split("mp-", 1)[1] if src.startswith("MP mp-") else None
+            s = {"name": d.name, "root": d, "config": config,
+                 "formula": config.formula, "mpid": mpid}
+        except Exception:
+            continue
+
+        phase = _phase(s)
+
+        prefix = str(d.resolve())
+        running = sum(1 for p, st in all_jobs.items()
+                      if p.startswith(prefix) and st == "running")
+        done = sum(1 for p, st in all_jobs.items()
+                   if p.startswith(prefix) and st == "done")
+        total = sum(1 for p in all_jobs if p.startswith(prefix))
+
+        pri = _PRIORITY_MAP.get(d.name, "\u2014")
+        rows.append({"name": d.name, "pri": pri, "phase": phase,
+                      "running": running, "done": done, "total": total})
 
     if not rows:
         print(f"No vasp-sop systems found in {root}")
         return
 
-    print(f"{'System':<22} {'P':<3} {'Phase':<12}")
-    print("-" * 40)
+    print(f"{'System':<22} {'P':<3} {'Phase':<10} {'Run':>4} {'Done':>4} {'Total':>5}")
+    print("-" * 52)
     for r in rows:
-        print(f"{r['name']:<22} {r['pri']:<3} {r['phase']:<12}")
-
-    done = sum(1 for r in rows if r["phase"] == "DONE")
-    print("-" * 40)
-    print(f"Total: {len(rows)}  Done: {done}  "
-          f"Remaining: {len(rows) - done}")
-
+        print(f"{r['name']:<22} {r['pri']:<3} {r['phase']:<10} "
+              f"{r['running']:>4} {r['done']:>4} {r['total']:>5}")
+    print("-" * 52)
+    done_count = sum(1 for r in rows if r["phase"] == "DONE")
+    print(f"Total: {len(rows)}  Done: {done_count}  "
+          f"Remaining: {len(rows) - done_count}")
 
 def _batch_history(root: Path, *, system: str | None = None) -> None:
-    """Print phase timeline for one or all systems."""
-    from vasp_sop.core.phase_store import PhaseStore
+    """Print job state history for one or all systems from JobStore."""
+    from vasp_sop.core.job_store import JobStore
     from datetime import datetime
 
-    store = PhaseStore()
+    store = JobStore()
+    all_jobs = store.latest_all()
+    store.close()
+
+    root_prefix = str(root.resolve())
+
     if system:
-        records = store.history(system)
-        if not records:
-            print(f"No history for system '{system}'.")
+        prefix = f"{root_prefix}/{system}"
+        sys_jobs = {p: s for p, s in all_jobs.items()
+                    if p.startswith(prefix)}
+        if not sys_jobs:
+            print(f"No job records for system '{system}'.")
             return
-        print(f"Timeline for {system}:")
-        for r in records:
-            ts = datetime.fromtimestamp(r["timestamp"]).isoformat()
-            print(f"  {ts}  {r['phase']:<12s}  {r['source']}")
+        print(f"Job states for {system}:")
+        for path, state in sorted(sys_jobs.items()):
+            rel = path.removeprefix(f"{prefix}/")
+            print(f"  {rel:<30s}  {state}")
     else:
-        phase_map = store.latest_all()
-        if not phase_map:
-            print("No phase records found.")
+        # Group by system directory name
+        systems: dict[str, list[str]] = {}
+        for path, state in all_jobs.items():
+            if path.startswith(root_prefix):
+                parts = path[len(root_prefix):].lstrip("/").split("/", 1)
+                sys_name = parts[0]
+                systems.setdefault(sys_name, []).append(state)
+        if not systems:
+            print("No job records found.")
             return
-        print(f"{'System':<22}  {'Phase':<12}")
-        print("-" * 35)
-        for name, phase in sorted(phase_map.items()):
-            print(f"  {name:<22}  {phase:<12}")
+        print(f"{'System':<22}  {'Run':>3}  {'Done':>4}  {'Total':>5}")
+        print("-" * 40)
+        for name in sorted(systems):
+            states = systems[name]
+            running = sum(1 for s in states if s == "running")
+            done = sum(1 for s in states if s == "done")
+            print(f"  {name:<22}  {running:>3}  {done:>4}  {len(states):>5}")
     store.close()
 
 # ── Pipeline phase constants (module-level for shared access) ──────
@@ -915,6 +948,8 @@ def _target_dir(s: dict) -> Path | None:
     cpd_dir = s["root"] / _CPD
     import re as _re
     pattern = _re.compile(_re.escape(s["mpid"]) + r"\Z")
+    if not cpd_dir.is_dir():
+        return None
     for pd in cpd_dir.iterdir():
         if pd.is_dir() and pattern.search(pd.name):
             return pd
@@ -1062,10 +1097,6 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
     p = _phase(s)
     if p == "DONE" or p == "NO_TARGET":
         return
-    from vasp_sop.core.phase_store import PhaseStore
-    _ps = PhaseStore()
-    _ps.record(s["name"], p)
-    _ps.close()
 
     root_dir = s["root"]
     cpd_root = root_dir / _CPD
@@ -1110,19 +1141,26 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
                 print(f"  [dry-run] {s['name']:<18} would submit: {' '.join(parts)}")
     if p == "TARGET":
         td = _target_dir(s)
-        if td and not is_submitted(str(td.resolve())) and not check_converged(td):
-            f, m = s["formula"], s["mpid"]
-            cached = None
-            if f and m:
-                cached = _crg(f, m)
-            if cached:
-                _logger.info("%s target restored from calc cache", s["name"])
-                from vasp_sop.core.cache import restore_from_cache
-                restore_from_cache(td)
-                import json as _json
-                submit_info = {"task_name": "cached", "work_dir": str(td.resolve())}
-                with open((s["root"] / _CPD / ".target_submit.json"), "w") as _f:
-                    _json.dump(submit_info, _f)
+        if td and not is_submitted(str(td.resolve())):
+            from vasp_sop.core.job_store import JobStore
+            if check_converged(td):
+                JobStore().record(str(td.resolve()), "done")
+            else:
+                f, m = s["formula"], s["mpid"]
+                cached = None
+                if f and m:
+                    cached = _crg(f, m)
+                if cached:
+                    _logger.info("%s target restored from calc cache", s["name"])
+                    from vasp_sop.core.cache import restore_from_cache
+                    restore_from_cache(td)
+                    import json as _json
+                    submit_info = {"task_name": "cached", "work_dir": str(td.resolve())}
+                    with open((s["root"] / _CPD / ".target_submit.json"), "w") as _f:
+                        _json.dump(submit_info, _f)
+                    JobStore().record(str(td.resolve()), "done")
+        # Re-evaluate phase — target may now be recorded as done
+        p = _phase(s)
 
     if p == "COMPETING":
         for cd in _competing_dirs(s):
