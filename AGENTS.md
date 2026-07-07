@@ -1,11 +1,42 @@
 # Repository Guidelines
 
+## 项目定位
+
+vasp-sop (v0.1.0, MIT) 是一个 **VASP 点缺陷高通量计算管线框架**。
+
+### 要解决的问题
+
+点缺陷 DFT 计算（空位、替位、填隙等）流程极其繁琐：MP 下载竞争相 → 化学势相图 → 超胞构建 → 枚举几十个缺陷/电荷态 → 每个配 VASP 输入 → 提交 ~100 个作业 → CONTCAR 重启循环 → eFNV 修正 → 形成能计算 → 出图。涉及 6+ 个独立工具（pydefect、doped、vise、pymatgen、Maggma、MP API），手动串联极易出错、无法规模化。
+
+vasp-sop 是一个**编排层**，把整条链路封装成一条命令。给定化学式和可选掺杂元素，自动完成从完美晶胞优化到形成能/能级图谱的端到端计算。
+
+### 核心能力
+
+| 维度 | 实现 |
+|---|---|
+| 一次配置 | `plan.yaml` 定义化学式、掺杂、泛函、超胞参数 |
+| 自动阶段推进 | `TARGET → COMPETING → CPD_POST → UC_DF → DONE` 状态机 |
+| 一键批量 | `vasp-sop batch run .` 串行推进所有体系 |
+| 三波 VASP 调度 | Wave 1: 结构优化 → Wave 2: 竞争相+能带+DOS+介电+缺陷全并行 → Wave 3: 后处理 |
+| 容错 | CONTCAR 重启（最多 20 次）、12 种错误诊断、单体系失败不阻塞其他 |
+| 结果缓存 | Maggma JSONStore 双存储，跨项目复用 |
+| 后处理编排 | 11 步 pydefect 管线 → `defect_energy_summary.json` |
+
+### 不是什么
+
+- ❌ **不是 DFT 代码** — 它调 VASP，不做电子结构计算
+- ❌ **不是材料数据库** — 它读写数据，不存储材料知识
+- ❌ **不是作业调度器** — 它走 `crisp`/`mpirun` 提交，不取代 Slurm
+
+### 一句话
+
+**把 VASP 点缺陷计算从手动脚本串联变成可配置、可串行推进、可复现的高通量管线。**
+
 ## Project Overview
 
-vasp-sop (v0.1.0, MIT) is a Python framework for high-throughput VASP point-defect
-calculations.  It depends on [vasp-cache](https://github.com/duguex/vasp-cache)
+vasp-sop depends on [vasp-cache](https://github.com/duguex/vasp-cache)
 for VASP calculation result storage and deduplication.
-calculations. Given a chemical formula and optional dopant elements, it automates
+Given a chemical formula and optional dopant elements, it automates
 the end-to-end pipeline: competing phase search → chemical potential diagram →
 unitcell properties → supercell construction → defect enumeration → VASP
 submission → formation energy analysis.
@@ -51,7 +82,7 @@ sub-tasks + defect calculations). Wave 3 runs after all Wave 2 jobs complete.
 | CLI | `vasp_sop/cli/main.py` | argparse dispatch (8 subcommands), batch orchestrator |
 | Config | `vasp_sop/core/config.py` | `PipelineConfig` dataclass, `plan.yaml` I/O, `generate_config()` |
 | Jobs | `vasp_sop/core/jobs.py` | VASP submission (crisp/local), `VaspJob` hierarchy, `run_local()` |
-| State | `vasp_sop/core/state.py` | Pipeline state machine, `StateStore`, `StepStatus` enum |
+| State | `vasp_sop/core/phase_store.py` | PhaseStore (SQLite) — records per-system phase transitions, queried by `batch status` and `batch history` |
 | Cache | `vasp_sop/core/cache.py` | maggma JSONStore dual-store (meta.json + blobs.json), TaskDoc + regex parse |
 | Builder | `vasp_sop/defect/builder.py` | Supercell (doped/pydefect) + defect enumeration + VASP inputs |
 | CPD | `vasp_sop/defect/cpd.py` | Competing phase diagram pipeline |
@@ -74,8 +105,7 @@ plan.yaml → PipelineConfig
   ├── builder.build_all() → defect/  (supercell + structures + inputs)
   │   ├── _build_supercell()      ← doped or pydefect
   │   ├── _generate_defect_list() ← pydefect ds
-  │   ├── _generate_structures()  ← pydefect_vasp de
-  │   └── _generate_vasp_inputs() ← ThreadPoolExecutor(8)
+  │   └── _generate_vasp_inputs() ← serial per-directory
   ├── compute.run_vasp() → OUTCAR per defect  (CONTCAR restart loop, max 20 attempts)
   └── analysis.analyze() → defect_energy_summary.json
 ```
@@ -89,7 +119,6 @@ TARGET → COMPETING → CPD_POST → UC_DF → DONE
 ```
 
 - Phase is determined by filesystem state (OUTCAR presence, convergence, target_vertices.yaml, etc.)
-- `batch run` polls and advances all systems via `ProcessPoolExecutor(max_workers=14)`
 - `--dry-run` does one pass and exits (no VASP submission)
 - Cache hit in TARGET/COMPETING skips submission (saves `.target_submit.json` with `"cached"`)
 - Errors in `_advance_one_system` are caught per-system — one failure doesn't block others
@@ -201,12 +230,11 @@ vasp-sop cache status --verbose
 - Cache functions catch exceptions during pymatgen parsing, log warnings, store what they can
 - Per-system isolation: one failing system doesn't block others in batch mode
 
-### Parallelism
+### Execution Model
 
-- `ProcessPoolExecutor(max_workers=14)` for per-system parallelism in batch run
-- `ThreadPoolExecutor(max_workers=8)` for per-directory VASP input generation
-- Process workers import `_advance_one_system` at module level (pickle-safe)
-- `_cache_phase_results()` called after job completion in polling loop
+- **Serial batch advancement**: systems advance one-by-one in `_batch_run` — no process pool, no orphan workers
+- **Serial input generation**: VASP input file preparation runs in serial (avoids NFS thundering-herd on shared storage)
+- **VASP-level parallelism**: individual VASP jobs each request multiple MPI ranks via Slurm (`crisp submit -n TASK_NAME`)
 - VASP jobs run independently per-phase, submitted via crisp or local subprocess
 
 ### Supercell Construction
@@ -255,7 +283,7 @@ CONTCAR restart loop in `defect/compute.py`:
 
 ### Persistence
 
-- Project state: `{root}/.pipeline_state.json` (JSON-serialized `PipelineState`)
+- Phase history: `~/.vasp_sop/phases.db` (SQLite — per-system phase transition logs, queried via `batch history`)
 - Calculation cache: `~/.vasp_sop/meta.json` + `~/.vasp_sop/blobs.json` (maggma JSONStore)
 - MP combo cache: `~/.vasp_sop/mp_cache/` (POSCARs + POTCARs on disk)
 - State is filesystem-based: phase determined by OUTCAR existence, convergence, YAML files
