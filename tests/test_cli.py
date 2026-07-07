@@ -246,56 +246,66 @@ class TestCrispActiveDirs:
 
 
 class TestBatchStatus:
-    """Issue #14: _batch_status must print a summary footer."""
+    """batch status reads from PhaseStore and prints phase column."""
 
-    def _make_system(self, root: Path, formula: str) -> Path:
-        """Create a minimal system directory with plan.yaml."""
-        d = root / f"sys_{formula}"
-        d.mkdir(parents=True)
+    def _make_system(self, root: Path) -> Path:
+        """Create a minimal system dir."""
+        d = root / "GaN"
+        d.mkdir()
         plan = {
-            "project": {"formula": formula, "dopant_elements": [],
-                         "poscar_src": "MP mp-1"},
+            "project": {"formula": "GaN", "dopant_elements": [],
+                        "poscar_src": "MP mp-804"},
             "parameters": {"functional": "pbesol"},
             "supercell": {"tool": "doped", "min_distance": 10.0},
         }
         (d / "plan.yaml").write_text(yaml.dump(plan))
         return d
 
-    def test_batch_status_summary(self, tmp_path, monkeypatch, capsys):
-        """Two systems — one fully done, one untouched — produce the
-        summary line with correct counts."""
-        self._make_system(tmp_path, "GaN")
-        self._make_system(tmp_path, "SrTe")
-
-        # Force scan_system to return canned status dicts.
-        call_count = {"n": 0}
-
-        def fake_scan(d, plan):
-            call_count["n"] += 1
-            name = d.name
-            if name == "sys_GaN":
-                return {"name": "GaN", "pri": "—",
-                        "vasp_in": "✓", "cpd": "✓",
-                        "uc": "✓", "defect": "✓"}
-            return {"name": "SrTe", "pri": "—",
-                    "vasp_in": "·", "cpd": "·",
-                    "uc": "·", "defect": "·"}
-
-        from vasp_sop.cli import main as cli_main
-        monkeypatch.setattr(cli_main, "_scan_system", fake_scan)
-        cli_main._batch_status(tmp_path)
-
+    def test_batch_status_header(self, tmp_path, monkeypatch, capsys):
+        """Status output has System + Phase columns."""
+        self._make_system(tmp_path)
+        from vasp_sop.cli.main import _batch_status
+        _batch_status(tmp_path)
         captured = capsys.readouterr().out
-        assert "Total: 2" in captured
-        assert "Completed: 1" in captured
-        assert "Not started: 1" in captured
+        assert "System" in captured
+        assert "Phase" in captured
+
+    def test_batch_status_init_phase(self, tmp_path, monkeypatch, capsys):
+        """System without PhaseStore records shows INIT."""
+        self._make_system(tmp_path)
+        from vasp_sop.cli.main import _batch_status
+        _batch_status(tmp_path)
+        captured = capsys.readouterr().out
+        assert "INIT" in captured
+
+    def test_batch_status_with_phase(self, tmp_path, monkeypatch, capsys):
+        """System with PhaseStore record shows recorded phase."""
+        d = self._make_system(tmp_path)
+        from vasp_sop.core.phase_store import PhaseStore
+        s = PhaseStore()
+        s.record("GaN", "DONE")
+        s.close()
+        from vasp_sop.cli.main import _batch_status
+        _batch_status(tmp_path)
+        captured = capsys.readouterr().out
+        assert "DONE" in captured
 
     def test_batch_status_no_systems(self, tmp_path, monkeypatch, capsys):
         """Empty root → 'No vasp-sop systems found' message, no crash."""
-        from vasp_sop.cli import main as cli_main
-        cli_main._batch_status(tmp_path)
+        from vasp_sop.cli.main import _batch_status
+        _batch_status(tmp_path)
         captured = capsys.readouterr().out
         assert "No vasp-sop systems found" in captured
+
+    def test_batch_status_summary(self, tmp_path, monkeypatch, capsys):
+        """Status output includes Total/Done/Remaining summary."""
+        self._make_system(tmp_path)
+        from vasp_sop.cli.main import _batch_status
+        _batch_status(tmp_path)
+        captured = capsys.readouterr().out
+        assert "Total:" in captured
+        assert "Done:" in captured
+        assert "Remaining:" in captured
 
 
 class TestAdvanceDryRunPostprocess:
@@ -674,6 +684,14 @@ class TestFullPipelineWalkthrough:
         _write_kpoints(target)
         return root
 
+    def _assert_phase_recorded(self, system_name: str, expected_phase: str):
+        from vasp_sop.core.phase_store import PhaseStore
+        store = PhaseStore()
+        latest = store.latest(system_name)
+        store.close()
+        assert latest == expected_phase, \
+            f"PhaseStore: expected {expected_phase}, got {latest}"
+
     def test_walkthrough(self, tmp_path, monkeypatch):
         """Walk through TARGET → COMPETING → CPD_POST → UC_DF → DONE."""
         from vasp_sop.cli.main import _phase, _advance_one_system
@@ -701,6 +719,7 @@ class TestFullPipelineWalkthrough:
         _advance_one_system(s, dry_run=False)
         # TARGET is a no-op when target is not cached — no submission
         assert len(submit_calls) == 0, "TARGET phase should not submit"
+        self._assert_phase_recorded("GaN", "TARGET")
 
         # ── Phase 2: COMPETING ─────────────────────────────────────
         # Cache target result to advance past TARGET
@@ -721,6 +740,7 @@ class TestFullPipelineWalkthrough:
         _advance_one_system(s, dry_run=False)
         assert str(comp.resolve()) in submit_calls, \
             "competing phase should be submitted"
+        self._assert_phase_recorded("GaN", "COMPETING")
 
         # ── Phase 3: CPD_POST ──────────────────────────────────────
         # Cache + converge competing dir so _competing_dirs returns empty
@@ -731,6 +751,7 @@ class TestFullPipelineWalkthrough:
         assert _phase(s) == "CPD_POST", "no pending competing dirs → CPD_POST"
         _advance_one_system(s, dry_run=False)
         # CPD runs compute_chemical_potentials (mocked) — no VASP submission
+        self._assert_phase_recorded("GaN", "CPD_POST")
 
         # ── Phase 4: UC_DF ─────────────────────────────────────────
         # Add CPD artifacts
@@ -769,6 +790,7 @@ class TestFullPipelineWalkthrough:
                 f"uc-{t} should be submitted"
         assert str(perfect.resolve()) in submit_calls, "perfect should be submitted"
         assert str(defect_dir.resolve()) in submit_calls, "defect should be submitted"
+        self._assert_phase_recorded("GaN", "UC_DF")
 
         # ── Phase 5: DONE ──────────────────────────────────────────
         # Cache all UC + defect results and add converged OUTCARs
@@ -817,6 +839,7 @@ class TestFullPipelineWalkthrough:
 
         s = _make_system_dict(root)
         _advance_one_system(s, dry_run=False)
+        self._assert_phase_recorded("GaN", "UC_DF")
 
         # band and dos should be re-submitted (missing vasprun.xml)
         assert str((uc / "band").resolve()) in submit_calls, \
