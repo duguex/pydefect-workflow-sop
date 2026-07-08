@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
 from pathlib import Path
 from vasp_sop import __version__
@@ -1366,6 +1367,44 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
         except Exception as exc:
             _logger.error("%s UC_DF failed: %s", s["name"], exc)
             print(f"  ✗ {s['name']:<18} UC_DF FAILED")
+
+_MAX_RESTART = 5
+
+
+def _handle_unconverged_poll(wd: Path) -> None:
+    """VASP normal exit but unconverged — CONTCAR restart or give up."""
+    from vasp_sop.core.job_store import JobStore
+    from vasp_sop.vasp.io import restart_from_contcar
+    from vasp_sop.core.jobs import submit_vasp
+
+    wd_str = str(wd.resolve())
+    history = JobStore().history(wd_str)
+    attempt = history[-1].get("attempt", 0) if history else 0
+
+    if attempt >= _MAX_RESTART:
+        JobStore().record(wd_str, "failed", reason="unconverged", attempt=attempt)
+        JobStore().untrack(wd_str)
+        print(f"  ! {wd.name:<18} unconverged after {attempt} restart(s), giving up")
+        return
+
+    restart_from_contcar(wd)
+    # Increase NSW
+    incar_path = wd / "INCAR"
+    if incar_path.is_file():
+        text = incar_path.read_text()
+        m = re.search(r"NSW\s*=\s*(\d+)", text)
+        nsw = int(m.group(1)) + 500 if m else 1000
+        if m:
+            text = re.sub(r"NSW\s*=\s*\d+", f"NSW = {nsw}", text)
+        else:
+            text += f"\nNSW = {nsw}"
+        incar_path.write_text(text)
+
+    job = submit_vasp(wd.resolve())
+    JobStore().record(wd_str, "submitted",
+                      source=job.task_name, attempt=attempt + 1)
+    # tracked stays — still in the check list
+    print(f"  → {wd.name:<18} restart #{attempt+1} ({job.task_name})")
 
 def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                exclude: list[str] | None = None) -> None:
