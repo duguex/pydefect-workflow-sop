@@ -70,6 +70,19 @@ class JobStore:
             db.commit()
         finally:
             db.close()
+        # Migration: add lifecycle columns if missing (v0.1.0 → v0.2.0)
+        db = self._connection()
+        try:
+            for col, col_type in [("attempt", "INTEGER NOT NULL DEFAULT 0"),
+                                   ("task_name", "TEXT NOT NULL DEFAULT ''"),
+                                   ("reason", "TEXT NOT NULL DEFAULT ''")]:
+                try:
+                    db.execute(f"ALTER TABLE job_history ADD COLUMN {col} {col_type}")
+                except sqlite3.OperationalError:
+                    pass
+            db.commit()
+        finally:
+            db.close()
 
     def record(self, dir_path: str, status: str,
                source: str = "batch_run", attempt: int = 0,

@@ -54,10 +54,19 @@ def prepare_inputs(
         if config.potcar_overrides else ""
     )
     encut_opt = f"ENCUT {config.encut}" if config.encut else ""
+    # Map generic task names to vise's expected task type values
+    _VISE_TASK_MAP = {
+        "dielectric": "dielectric_dfpt",
+        "band": "band",
+        "dos": "dos",
+        "structure_opt": "structure_opt",
+        "defect": "defect",
+    }
+    vise_task = _VISE_TASK_MAP.get(task_type, task_type)
 
     cmd = f"vise vs -x {config.functional} -k {kspacing}"
     if task_type:
-        cmd += f" -t {task_type}"
+        cmd += f" -t {vise_task}"
     if pp_opt:
         cmd += f" {pp_opt}"
     if config.hubbard_u:
