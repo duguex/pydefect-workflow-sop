@@ -1120,6 +1120,7 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
     from vasp_sop.core.cache import (
         vasp_results_get as _crg, vasp_results_put,
     )
+    from vasp_sop.core.job_store import JobStore
     _logger = logging.getLogger(__name__)
 
     def _submit_or_skip(path: Path, label: str, sys_name: str) -> object:
@@ -1129,7 +1130,6 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
             return None
         try:
             job = submit_vasp(path.resolve())
-            from vasp_sop.core.job_store import JobStore
             js = JobStore()
             js.track(str(path.resolve()))
             js.record(str(path.resolve()), "submitted", source=job.task_name)
@@ -1567,20 +1567,47 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
     if orphaned:
         logger.info("Processed %d orphaned crisp outputs.", orphaned)
 
-    # ── Poll completed submissions (one-shot) ────────────────────────
-    from vasp_sop.core.job_store import JobStore
-    _js_poll = JobStore()
+    # ── Poll tracked dirs ──────────────────────────────────────
+    from vasp_sop.vasp.io import check_converged, _tail_text
+    from vasp_sop.core.jobs import move_crisp_outputs
+    import time as _time
     completed = 0
-    for wd_str in list(_js_poll.tracked_dirs()):
-        wd = Path(wd_str)
+    crispy = _crisp_active_dirs(skip=False)
+    from vasp_sop.core.job_store import JobStore
+
+    for row in JobStore().tracked_dirs():
+        wd = Path(row["dir_path"])
+        wd_str = str(wd.resolve())
+
+        if wd_str in crispy:
+            continue
+
         if check_converged(wd):
             move_crisp_outputs(wd)
             _cache_phase_results(wd)
-            _js_poll.untrack(wd_str)
-            _js_poll.record(str(wd.resolve()), "converged")
-            logger.info("Completed: %s", wd.name)
+            JobStore().record(wd_str, "converged")
+            JobStore().untrack(wd_str)
             completed += 1
-    _js_poll.close()
+            continue
+
+        outcar = wd / "OUTCAR"
+        if not outcar.is_file():
+            outcar = wd / "output" / "OUTCAR"
+        if not outcar.is_file():
+            if _time.time() - row["submitted_at"] > 7 * 86400:
+                JobStore().record(wd_str, "failed", reason="orphaned")
+                JobStore().untrack(wd_str)
+            continue
+
+        tail = _tail_text(outcar, 4096)
+        if not tail or "General timing and accounting" not in tail:
+            JobStore().record(wd_str, "failed", reason="vasp_crash")
+            JobStore().untrack(wd_str)
+            continue
+
+        # VASP 正常结束但未收敛 → CONTCAR 重启
+        _handle_unconverged_poll(wd)
+
     if completed:
         print(f"  Cached {completed} completed calculation(s).")
 
