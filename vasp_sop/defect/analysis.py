@@ -90,7 +90,11 @@ def analyze(
     if len(dvf_present) == len(defect_dirs_all):
         logger.info("defect_volume_fraction.json exists for all dirs, skipping pydefect_util dvf.")
     else:
-        run_local("pydefect_util dvf -d *_*", cwd=defect_root)
+        try:
+            run_local("pydefect_util dvf -d *_*", cwd=defect_root)
+        except Exception:
+            logger.warning("pydefect_util dvf failed (may be slow on NFS or missing inputs), "
+                           "skipping defect volume fraction.")
 
     # ── pbes (perfect band-edge state) ──────────────────────────────
     pbes_json = perfect_dir / "perfect_band_edge_state.json"

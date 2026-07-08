@@ -222,24 +222,21 @@ def _generate_structures(defect_root: Path) -> None:
 
 
 def _generate_vasp_inputs(defect_root: Path, config: PipelineConfig) -> None:
-    """Generate VASP inputs for every defect directory (including perfect), in parallel."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    """Generate VASP inputs for every defect directory (including perfect), serially."""
     from vasp_sop.vasp.io import prepare_inputs
+    from tqdm import tqdm
 
     dirs = [child for child in defect_root.iterdir() if child.is_dir()]
     if not dirs:
         return
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        fut_map = {pool.submit(prepare_inputs, d, config,
-                                kspacing=0.1, task_type="defect",
-                                extra_uis="SIGMA 0.02 LORBIT 11"): d
-                   for d in dirs}
-        for fut in as_completed(fut_map):
-            try:
-                fut.result()
-            except Exception:
-                pass
+    for d in tqdm(dirs, desc="VASP inputs", unit=" dir"):
+        try:
+            prepare_inputs(d, config,
+                           kspacing=0.1, task_type="defect",
+                           extra_uis="SIGMA 0.02 LORBIT 11")
+        except Exception:
+            pass
 
 
 def construct_complex_defects(defect_root: Path, config: PipelineConfig) -> None:

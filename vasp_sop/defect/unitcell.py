@@ -110,20 +110,34 @@ def build_unitcell_yaml(uc_root: Path, config: PipelineConfig) -> None:
     dos_dir = uc_root / "dos"
     dielectric_dir = uc_root / "dielectric"
 
-    band_vasprun = (band_dir / "vasprun.xml").resolve()
+    band_vasprun_candidates = [
+        (band_dir / "vasprun.xml").resolve(),
+        (band_dir / "output" / "vasprun.xml").resolve(),
+    ]
+    band_vasprun = next((p for p in band_vasprun_candidates if p.is_file()),
+                         band_vasprun_candidates[0])
     band_outcar = (band_dir / "OUTCAR").resolve()
     dielectric_outcar = (dielectric_dir / "OUTCAR").resolve()
 
     if band_vasprun.is_file():
-        run_local("cd band && vise pb", cwd=uc_root)
+        try:
+            run_local("cd band && vise pb", cwd=uc_root)
+        except Exception:
+            logger.warning("vise pb failed (likely no band structure to plot), skipping band plot.")
 
     if dos_dir.is_dir():
-        run_local("cd dos && vise pd", cwd=uc_root)
-        run_local(
-            "cd dos && pydefect_vasp le -v AECCAR0 AECCAR2 "
-            "-i all_electron_charge",
-            cwd=uc_root,
-        )
+        try:
+            run_local("cd dos && vise pd", cwd=uc_root)
+        except Exception:
+            logger.warning("vise pd failed (likely missing vasprun.xml), skipping DOS plot.")
+        try:
+            run_local(
+                "cd dos && pydefect_vasp le -v AECCAR0 AECCAR2 "
+                "-i all_electron_charge",
+                cwd=uc_root,
+            )
+        except Exception:
+            logger.warning("pydefect_vasp le failed (AECCAR missing), skipping local-extrema.")
 
     if dielectric_dir.is_dir():
         try:

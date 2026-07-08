@@ -185,7 +185,12 @@ def check_task_complete(path: Path, task_type: str = "") -> bool:
     if not check_converged(path):
         return False
     if task_type in _REQUIRED_UC_OUTPUTS:
-        return all((path / f).is_file() for f in _REQUIRED_UC_OUTPUTS[task_type])
+        for f in _REQUIRED_UC_OUTPUTS[task_type]:
+            if (path / f).is_file():
+                continue
+            if (path / "output" / f).is_file():
+                continue
+            return False
     return True
 
 def restart_from_contcar(path: Path) -> None:

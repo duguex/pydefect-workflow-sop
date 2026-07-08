@@ -769,8 +769,17 @@ class TestFullPipelineWalkthrough:
         for d in (uc / "band", uc / "dos", uc / "dielectric", perfect, defect_dir):
             JobStore().record(str(d.resolve()), "done")
 
-        # Add defect_energy_summary.json (post-processing artifact)
+        # Required intermediate files for DONE
+        (cpd / "composition_energies.yaml").write_text("ce: 1\n")
+        (cpd / "chem_pot_diag.json").write_text('{"tv": 1}\n')
+        (uc / "unitcell.yaml").write_text("uy: 1\n")
         (df / "defect_energy_summary.json").write_text("{}")
+        for d in (perfect, defect_dir):
+            (d / "calc_results.json").write_text("{}\n")
+            (d / "correction.json").write_text("{}\n")
+            (d / "defect_structure_info.json").write_text("{}\n")
+            (d / "defect_volume_fraction.json").write_text("{}\n")
+        (perfect / "perfect_band_edge_state.json").write_text("{}\n")
 
         assert _phase(s) == "DONE", "all artifacts present → DONE"
 

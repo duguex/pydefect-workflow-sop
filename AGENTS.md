@@ -82,7 +82,7 @@ sub-tasks + defect calculations). Wave 3 runs after all Wave 2 jobs complete.
 | CLI | `vasp_sop/cli/main.py` | argparse dispatch (8 subcommands), batch orchestrator |
 | Config | `vasp_sop/core/config.py` | `PipelineConfig` dataclass, `plan.yaml` I/O, `generate_config()` |
 | Jobs | `vasp_sop/core/jobs.py` | VASP submission (crisp/local), `VaspJob` hierarchy, `run_local()` |
-| State | `vasp_sop/core/phase_store.py` | PhaseStore (SQLite) — records per-system phase transitions, queried by `batch status` and `batch history` |
+| State | `vasp_sop/core/job_store.py` | JobStore (SQLite) — per-calculation VASP job states (`waiting`/`running`/`done`), queried by `_phase()` and `batch status` |
 | Cache | `vasp_sop/core/cache.py` | maggma JSONStore dual-store (meta.json + blobs.json), TaskDoc + regex parse |
 | Builder | `vasp_sop/defect/builder.py` | Supercell (doped/pydefect) + defect enumeration + VASP inputs |
 | CPD | `vasp_sop/defect/cpd.py` | Competing phase diagram pipeline |
@@ -144,8 +144,7 @@ tests/
 ├── test_jobs.py         ← Subprocess + input-ready tests
 ├── test_parser.py       ← VASP parsing layer tests (TaskDoc + regex)
 ├── test_errors.py       ← Error diagnosis tests (12 modes)
-├── test_import.py       ← Smoke tests
-└── test_state.py        ← Pipeline state machine tests
+├── test_job_store.py    ← JobStore tests
 
 issues/                  ← GitHub issue references (local copies)
 ```
@@ -283,7 +282,7 @@ CONTCAR restart loop in `defect/compute.py`:
 
 ### Persistence
 
-- Phase history: `~/.vasp_sop/phases.db` (SQLite — per-system phase transition logs, queried via `batch history`)
+- Job state: `~/.vasp_sop/jobs.db` (SQLite — per-calculation `waiting`/`running`/`done`, queried by `_phase()` and `batch status`)
 - Calculation cache: `~/.vasp_sop/meta.json` + `~/.vasp_sop/blobs.json` (maggma JSONStore)
 - MP combo cache: `~/.vasp_sop/mp_cache/` (POSCARs + POTCARs on disk)
 - State is filesystem-based: phase determined by OUTCAR existence, convergence, YAML files
@@ -356,8 +355,7 @@ Notable gaps:
 | `vasp_sop/cli/main.py` | CLI entry, batch orchestrator, `_advance_one_system` |
 | `vasp_sop/core/config.py` | `PipelineConfig`, `plan.yaml` generation |
 | `vasp_sop/core/cache.py` | maggma JSONStore cache (meta.json + blobs.json) |
-| `vasp_sop/core/jobs.py` | VASP submission, `run_local()`, `VaspJob` hierarchy |
-| `vasp_sop/core/state.py` | Pipeline state machine |
+| `vasp_sop/core/job_store.py` | JobStore, per-calculation state tracking |
 | `vasp_sop/defect/builder.py` | Supercell + defect generation |
 | `vasp_sop/defect/cpd.py` | Chemical potential diagram |
 | `vasp_sop/defect/pipeline.py` | Three-wave orchestration |
