@@ -1279,6 +1279,9 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
                     continue
                 from vasp_sop.vasp.io import check_task_complete
                 if check_task_complete(task_dir, task):
+                    from vasp_sop.core.job_store import JobStore
+                    if JobStore().latest(str(task_dir.resolve())) != "done":
+                        JobStore().record(str(task_dir.resolve()), "done", source="backfill")
                     continue
                 if is_submitted(str(task_dir.resolve())):
                     continue
@@ -1294,6 +1297,9 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
                     if not input_ready(child):
                         continue
                     if check_converged(child):
+                        from vasp_sop.core.job_store import JobStore
+                        if JobStore().latest(str(child.resolve())) != "done":
+                            JobStore().record(str(child.resolve()), "done", source="backfill")
                         continue
                     if is_submitted(str(child.resolve())):
                         continue
