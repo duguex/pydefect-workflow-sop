@@ -1,7 +1,10 @@
 """Per-calculation VASP job state tracking — SQLite-backed.
 
 Tracks each VASP calculation directory through:
-    waiting -> running -> done
+    pending -> submitted -> converged
+
+Also supports a tracked table for active job directories awaiting
+completion checks.
 
 System-level phase is derived from per-calculation states + marker
 files in ``_phase()`` (see ``vasp_sop/cli/main.py``).
@@ -24,7 +27,7 @@ def _db_path(given: Path | None) -> Path:
     return CACHE_ROOT / _DEFAULT_DB
 
 
-_VALID_STATUSES = frozenset({"waiting", "running", "done"})
+_VALID_STATUSES = frozenset({"pending", "submitted", "converged", "failed"})
 
 
 class JobStore:
@@ -40,7 +43,6 @@ class JobStore:
         db.execute("PRAGMA journal_mode=WAL")
         db.row_factory = sqlite3.Row
         return db
-
     def _init_db(self) -> None:
         db = self._connection()
         try:
@@ -49,19 +51,29 @@ class JobStore:
                     dir_path    TEXT NOT NULL,
                     status      TEXT NOT NULL,
                     timestamp   REAL NOT NULL,
-                    source      TEXT NOT NULL DEFAULT 'batch_run'
+                    source      TEXT NOT NULL DEFAULT 'batch_run',
+                    attempt     INTEGER NOT NULL DEFAULT 0,
+                    task_name   TEXT NOT NULL DEFAULT '',
+                    reason      TEXT NOT NULL DEFAULT ''
                 )
             """)
             db.execute("""
                 CREATE INDEX IF NOT EXISTS idx_jh_dir_time
                 ON job_history(dir_path, timestamp)
             """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS tracked (
+                    dir_path      TEXT PRIMARY KEY,
+                    submitted_at  REAL NOT NULL
+                )
+            """)
             db.commit()
         finally:
             db.close()
 
     def record(self, dir_path: str, status: str,
-               source: str = "batch_run") -> None:
+               source: str = "batch_run", attempt: int = 0,
+               task_name: str = "", reason: str = "") -> None:
         """Insert a job state record."""
         if status not in _VALID_STATUSES:
             raise ValueError(f"Invalid status {status!r}; "
@@ -69,11 +81,44 @@ class JobStore:
         db = self._connection()
         try:
             db.execute(
-                "INSERT INTO job_history (dir_path, status, timestamp, source) "
-                "VALUES (?, ?, ?, ?)",
-                (dir_path, status, time.time(), source),
+                "INSERT INTO job_history "
+                "(dir_path, status, timestamp, source, attempt, task_name, reason) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (dir_path, status, time.time(), source, attempt, task_name, reason),
             )
             db.commit()
+        finally:
+            db.close()
+
+    def track(self, dir_path: str) -> None:
+        """加入待检查列表（提交时调用）。"""
+        db = self._connection()
+        try:
+            db.execute(
+                "INSERT OR REPLACE INTO tracked (dir_path, submitted_at) VALUES (?, ?)",
+                (dir_path, time.time()),
+            )
+            db.commit()
+        finally:
+            db.close()
+
+    def untrack(self, dir_path: str) -> None:
+        """从待检查列表移除（收敛或放弃时调用）。"""
+        db = self._connection()
+        try:
+            db.execute("DELETE FROM tracked WHERE dir_path = ?", (dir_path,))
+            db.commit()
+        finally:
+            db.close()
+
+    def tracked_dirs(self) -> list[dict]:
+        """返回 tracked 表中所有目录。"""
+        db = self._connection()
+        try:
+            rows = db.execute(
+                "SELECT dir_path, submitted_at FROM tracked ORDER BY submitted_at"
+            ).fetchall()
+            return [dict(r) for r in rows]
         finally:
             db.close()
 
@@ -110,7 +155,7 @@ class JobStore:
         db = self._connection()
         try:
             rows = db.execute(
-                "SELECT status, timestamp, source FROM job_history "
+                "SELECT status, timestamp, source, attempt, task_name, reason FROM job_history "
                 "WHERE dir_path = ? ORDER BY timestamp ASC",
                 (dir_path,),
             ).fetchall()

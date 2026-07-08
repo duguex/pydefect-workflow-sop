@@ -13,17 +13,17 @@ def store(tmp_path: Path):
 
 class TestJobStore:
     def test_record_and_latest(self, store):
-        store.record("/sys/band", "running")
-        assert store.latest("/sys/band") == "running"
+        store.record("/sys/band", "submitted")
+        assert store.latest("/sys/band") == "submitted"
 
     def test_history_ordering(self, store):
-        store.record("/sys/band", "waiting")
+        store.record("/sys/band", "pending")
         time.sleep(0.01)
-        store.record("/sys/band", "running")
-        store.record("/sys/band", "done")
+        store.record("/sys/band", "submitted")
+        store.record("/sys/band", "converged")
         history = store.history("/sys/band")
         assert len(history) == 3
-        assert [r["status"] for r in history] == ["waiting", "running", "done"]
+        assert [r["status"] for r in history] == ["pending", "submitted", "converged"]
 
     def test_empty_latest(self, store):
         assert store.latest("/nonexistent") is None
@@ -32,30 +32,30 @@ class TestJobStore:
         assert store.history("/nonexistent") == []
 
     def test_latest_all_multiple(self, store):
-        store.record("/sysA/band", "done")
-        store.record("/sysB/band", "running")
+        store.record("/sysA/band", "converged")
+        store.record("/sysB/band", "submitted")
         all_st = store.latest_all()
-        assert all_st["/sysA/band"] == "done"
-        assert all_st["/sysB/band"] == "running"
+        assert all_st["/sysA/band"] == "converged"
+        assert all_st["/sysB/band"] == "submitted"
 
     def test_record_updates_latest(self, store):
-        store.record("/sys/band", "waiting")
-        assert store.latest("/sys/band") == "waiting"
-        store.record("/sys/band", "done")
-        assert store.latest("/sys/band") == "done"
+        store.record("/sys/band", "pending")
+        assert store.latest("/sys/band") == "pending"
+        store.record("/sys/band", "converged")
+        assert store.latest("/sys/band") == "converged"
 
     def test_custom_source(self, store):
-        store.record("/sys/band", "done", source="init")
+        store.record("/sys/band", "converged", source="init")
         assert store.history("/sys/band")[0]["source"] == "init"
 
     def test_persistence(self, tmp_path):
         from vasp_sop.core.job_store import JobStore
         db_path = tmp_path / "jobs.db"
         s1 = JobStore(db_path)
-        s1.record("/sys/band", "done")
+        s1.record("/sys/band", "converged")
         s1.close()
         s2 = JobStore(db_path)
-        assert s2.latest("/sys/band") == "done"
+        assert s2.latest("/sys/band") == "converged"
         s2.close()
 
     def test_invalid_status_raises(self, store):
