@@ -222,21 +222,48 @@ def _generate_structures(defect_root: Path) -> None:
 
 
 def _generate_vasp_inputs(defect_root: Path, config: PipelineConfig) -> None:
-    """Generate VASP inputs for every defect directory (including perfect), serially."""
-    from vasp_sop.vasp.io import prepare_inputs
+    """Generate VASP inputs for every defect directory.
+
+    Generates INCAR/POTCAR/KPOINTS once via ``prepare_inputs``, then
+    copies them to remaining directories to avoid N repeated subprocess
+    calls (each ``vise vs`` starts a fresh Python interpreter).
+    """
+    from vasp_sop.vasp.io import prepare_inputs, input_ready
+    from shutil import copy2
     from tqdm import tqdm
 
     dirs = [child for child in defect_root.iterdir() if child.is_dir()]
     if not dirs:
         return
 
-    for d in tqdm(dirs, desc="VASP inputs", unit=" dir"):
+    # Phase 1: ensure first directory has full inputs (subprocess call)
+    first = dirs[0]
+    if not input_ready(first):
         try:
-            prepare_inputs(d, config,
+            prepare_inputs(first, config,
                            kspacing=0.1, task_type="defect",
                            extra_uis="SIGMA 0.02 LORBIT 11")
         except Exception:
             pass
+
+    # Phase 2: copy shared files to remaining directories
+    shared = ["INCAR", "POTCAR", "KPOINTS"]
+    skip = []
+    for d in tqdm(dirs[1:], desc="VASP inputs", unit=" dir"):
+        if input_ready(d):
+            continue
+        for f in shared:
+            src = first / f
+            if src.is_file():
+                copy2(str(src), str(d / f))
+        # Verify: POSCAR is per-directory, so input_ready needs it
+        if not input_ready(d):
+            try:
+                prepare_inputs(d, config,
+                               kspacing=0.1, task_type="defect",
+                               extra_uis="SIGMA 0.02 LORBIT 11")
+            except Exception:
+                pass
 
 
 def construct_complex_defects(defect_root: Path, config: PipelineConfig) -> None:
