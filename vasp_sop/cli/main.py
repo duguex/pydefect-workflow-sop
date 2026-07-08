@@ -1458,14 +1458,14 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
         for pd in cpd_root.iterdir():
             if not pd.is_dir() or "_mp-" not in pd.name:
                 continue
-            # Skip if JobStore already knows it's done (avoids NFS stat)
+            # JobStore is local SQLite (fast). Skips already-backfilled dirs.
             from vasp_sop.core.job_store import JobStore
             if JobStore().latest(str(pd.resolve())) == "done":
                 continue
-            if cache_lookup(pd) is not None:
-                continue
+            # check_converged is a tail-read (fast). Skips unconverged dirs.
             if not check_converged(pd):
                 continue
+            # Converged and not yet backfilled → cache it
             from vasp_sop.core.jobs import move_crisp_outputs
             move_crisp_outputs(pd)
             formula, mpid = pd.name.split("_mp-", 1)
