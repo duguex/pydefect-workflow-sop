@@ -278,7 +278,7 @@ class TestBatchStatus:
         assert "No vasp-sop systems found" in captured
 
 class TestAdvanceDryRunPostprocess:
-    """Issue #20: dry-run in UC_DF phase must preview post-processing
+    """Issue #20: dry-run in UNITCELL_DEFECT phase must preview post-processing
     without mutating state."""
 
     @pytest.fixture(autouse=True)
@@ -296,7 +296,7 @@ class TestAdvanceDryRunPostprocess:
                             lambda *a: {})
 
     def _make_uc_df_system(self, tmp_path: Path, *, with_artifacts: bool) -> Path:
-        """Build a system whose _phase() returns 'UC_DF' (target converged,
+        """Build a system whose _phase() returns 'UNITCELL_DEFECT' (target converged,
         CPD done, UC inputs present, defect tree started)."""
         formula = "NaCl"
         mpid = "12345"
@@ -430,7 +430,7 @@ class TestBatchNoDuplicateSubmission:
             f"competing dir submitted {calls.count(comp_dir)} times, expected 1"
 
     def _make_ucdf_system(self, tmp_path: Path) -> Path:
-        """Build a minimal system in UC_DF phase (target+cached, CPD done,
+        """Build a minimal system in UNITCELL_DEFECT phase (target+cached, CPD done,
         UC inputs present, defect tree exists)."""
         formula = "NaCl"
         mpid = "12345"
@@ -596,7 +596,7 @@ class TestCachePut:
 
 
 class TestFullPipelineWalkthrough:
-    """Drive a system through all 5 phases: TARGET → COMPETING → CPD_POST → UC_DF → DONE.
+    """Drive a system through all 5 phases: STRUCTURE_OPT → COMPETING → CHEM_POT_DIAGRAM → UNITCELL_DEFECT → COMPLETE.
 
     Each phase transition is verified by checking _phase() output and
     asserting _advance_one_system produces the expected side effects
@@ -653,7 +653,7 @@ class TestFullPipelineWalkthrough:
         _write_kpoints(target)
         return root
 
-    def _assert_job_state(self, calc_dir: Path, expected: str = "running") -> None:
+    def _assert_job_state(self, calc_dir: Path, expected: str = "submitted") -> None:
         """Assert JobStore has *expected* state for a calculation directory."""
         from vasp_sop.core.job_store import JobStore
         store = JobStore()
@@ -663,7 +663,7 @@ class TestFullPipelineWalkthrough:
             f"JobStore: expected {expected} for {calc_dir.name}, got {actual}"
 
     def test_walkthrough(self, tmp_path, monkeypatch):
-        """Walk through TARGET → COMPETING → CPD_POST → UC_DF → DONE."""
+        """Walk through STRUCTURE_OPT → COMPETING → CHEM_POT_DIAGRAM → UNITCELL_DEFECT → COMPLETE."""
         from vasp_sop.cli.main import _phase, _advance_one_system
 
         formula = "GaN"
@@ -684,13 +684,13 @@ class TestFullPipelineWalkthrough:
 
         s = _make_system_dict(root)
 
-        # ── Phase 1: TARGET ────────────────────────────────────────
-        assert _phase(s) == "TARGET", "bare system should start in TARGET"
+        # ── Phase 1: STRUCTURE_OPT ────────────────────────────────────────
+        assert _phase(s) == "STRUCTURE_OPT", "bare system should start in STRUCTURE_OPT"
         _advance_one_system(s, dry_run=False)
-        # TARGET is a no-op when target is not cached — no submission
+        # STRUCTURE_OPT is a no-op when target is not cached — no submission
 
         # ── Phase 2: COMPETING ─────────────────────────────────────
-        # Cache target result to advance past TARGET
+        # Cache target result to advance past STRUCTURE_OPT
         cache_data[f"{formula}_{mpid}"] = {"total_energy": -12.0}
         td = root / "cpd" / f"{formula}_mp-{mpid}"
         cache_data[str(td.resolve())] = {"total_energy": -12.0}
@@ -706,26 +706,26 @@ class TestFullPipelineWalkthrough:
 
         # Advance — records cached target as done in JobStore, then submits competing
         _advance_one_system(s, dry_run=False)
-        assert _phase(s) != "TARGET", "system should advance past TARGET"
+        assert _phase(s) != "STRUCTURE_OPT", "system should advance past STRUCTURE_OPT"
         assert str(comp.resolve()) in submit_calls, \
             "competing phase should be submitted"
         self._assert_job_state(comp)
-        # ── Phase 3: CPD_POST ──────────────────────────────────────
+        # ── Phase 3: CHEM_POT_DIAGRAM ──────────────────────────────────────
         # Cache + converge competing dir so _competing_dirs returns empty
         cache_data[str(comp.resolve())] = {"total_energy": -5.0}
         cache_data["Ga_142"] = {"total_energy": -5.0}
         self._write_converged_outcar(comp)
 
-        assert _phase(s) == "CPD_POST", "no pending competing dirs → CPD_POST"
+        assert _phase(s) == "CHEM_POT_DIAGRAM", "no pending competing dirs → CHEM_POT_DIAGRAM"
         _advance_one_system(s, dry_run=False)
 
-        # ── Phase 4: UC_DF ─────────────────────────────────────────
+        # ── Phase 4: UNITCELL_DEFECT ─────────────────────────────────────────
         # Add CPD artifacts
         cpd = root / "cpd"
         (cpd / "target_vertices.yaml").write_text("tv: 1\n")
         (cpd / "standard_energies.yaml").write_text("se: 1\n")
 
-        assert _phase(s) == "UC_DF", "CPD artifacts present → UC_DF"
+        assert _phase(s) == "UNITCELL_DEFECT", "CPD artifacts present → UNITCELL_DEFECT"
 
         # Create UC and defect directories
         uc = root / "unitcell"
@@ -757,7 +757,7 @@ class TestFullPipelineWalkthrough:
         assert str(perfect.resolve()) in submit_calls, "perfect should be submitted"
         self._assert_job_state(uc / "band")
 
-        # ── Phase 5: DONE ──────────────────────────────────────────
+        # ── Phase 5: COMPLETE ──────────────────────────────────────────
         # Cache all UC + defect results and add converged OUTCARs
         for t in ("band", "dos", "dielectric"):
             d = uc / t
@@ -768,9 +768,9 @@ class TestFullPipelineWalkthrough:
             self._write_converged_outcar(d)
         from vasp_sop.core.job_store import JobStore
         for d in (uc / "band", uc / "dos", uc / "dielectric", perfect, defect_dir):
-            JobStore().record(str(d.resolve()), "done")
+            JobStore().record(str(d.resolve()), "converged")
 
-        # Required intermediate files for DONE
+        # Required intermediate files for COMPLETE
         (cpd / "composition_energies.yaml").write_text("ce: 1\n")
         (cpd / "chem_pot_diag.json").write_text('{"tv": 1}\n')
         (uc / "unitcell.yaml").write_text("uy: 1\n")
@@ -782,7 +782,7 @@ class TestFullPipelineWalkthrough:
             (d / "defect_volume_fraction.json").write_text("{}\n")
         (perfect / "perfect_band_edge_state.json").write_text("{}\n")
 
-        assert _phase(s) == "DONE", "all artifacts present → DONE"
+        assert _phase(s) == "COMPLETE", "all artifacts present → COMPLETE"
 
     def test_uc_resubmit_when_vasprxml_missing(self, tmp_path, monkeypatch):
         """UC task with converged OUTCAR but missing vasprun.xml → re-submitted."""
