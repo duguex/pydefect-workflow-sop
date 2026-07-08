@@ -3,8 +3,7 @@
 NOTE: The generic caching layer (vasp_results_put/get, query,
 restore_from_cache, etc.) corresponds to the external vasp-cache project
 (https://github.com/duguex/vasp-cache) and will be migrated there.
-vasp-sop retains only pipeline-specific logic: submissions.db,
-mark_submitted, is_submitted, and clear_submission.
+vasp-sop retains only pipeline-specific logic in core.job_store.
 
 Uses maggma ``JSONStore`` for lightweight, file-based persistence with
 MongoDB-like query syntax.  Metadata (energy, bandgap, tags, ...) lives
@@ -25,10 +24,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 import re as _re
-import threading
-import time
-from pathlib import Path
-from typing import Any, Optional
 
 
 logger = logging.getLogger(__name__)
@@ -63,7 +58,7 @@ def lattice_too_large(src_dir: Path) -> bool:
 
 def override_cache_root(p: Path) -> None:
     """Swap cache root (for testing)."""
-    global CACHE_ROOT, MP_CACHE, POSCAR_CACHE, CALC_CACHE, _meta_store, _blob_store, _SUBMISSION_DB
+    global CACHE_ROOT, MP_CACHE, POSCAR_CACHE, CALC_CACHE, _meta_store, _blob_store
     with _stores_lock:
         CACHE_ROOT = p
         MP_CACHE = CACHE_ROOT / "mp_cache"
@@ -71,7 +66,6 @@ def override_cache_root(p: Path) -> None:
         CALC_CACHE = CACHE_ROOT / "calc_cache"
         _meta_store = None
         _blob_store = None
-        _SUBMISSION_DB = None
 
 
 # ── Store singletons (lazy-init) ───────────────────────────────────────
@@ -917,74 +911,3 @@ def cache_stats() -> dict[str, Any]:
         "unique_formulas": len(formulas),
         "formulas": sorted(formulas),
     }
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# Submission tracking — cross-process VASP job state via SQLite
-# ══════════════════════════════════════════════════════════════════════════
-
-_SUBMISSION_DB: sqlite3.Connection | None = None
-
-
-def _submission_db() -> sqlite3.Connection:
-    """Return the submission-tracking SQLite connection (WAL mode)."""
-    global _SUBMISSION_DB
-    with _stores_lock:
-        if _SUBMISSION_DB is None:
-            CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-            db = sqlite3.connect(str(CACHE_ROOT / "submissions.db"), timeout=10)
-            db.execute("PRAGMA journal_mode=WAL")
-            db.execute("""CREATE TABLE IF NOT EXISTS submitted (
-                dir_path TEXT PRIMARY KEY,
-                task_name TEXT NOT NULL,
-                submitted_at REAL NOT NULL
-            )""")
-            _SUBMISSION_DB = db
-    return _SUBMISSION_DB
-
-
-def mark_submitted(dir_path: str, task_name: str) -> None:
-    """Record that a VASP job has been submitted for *dir_path*."""
-    db = _submission_db()
-    db.execute(
-        "INSERT OR REPLACE INTO submitted VALUES (?, ?, ?)",
-        (dir_path, task_name, time.time()),
-    )
-    db.commit()
-
-
-def is_submitted(dir_path: str, *, stale_hours: float = 6.0) -> bool:
-    """Return True if a submission is recorded and not stale.
-
-    A submission is considered stale (and eligible for re-submit) if
-    it was recorded more than *stale_hours* ago.  This handles the case
-    where crisp lost the job (e.g. node failure, job preemption).
-    """
-    db = _submission_db()
-    row = db.execute(
-        "SELECT submitted_at FROM submitted WHERE dir_path = ?",
-        (dir_path,),
-    ).fetchone()
-    if row is None:
-        return False
-    elapsed = time.time() - row[0]
-    return elapsed < stale_hours * 3600
-
-
-def clear_submission(dir_path: str) -> None:
-    """Remove a submission record (job completed or cancelled)."""
-    db = _submission_db()
-    with _stores_lock:
-        db.execute("DELETE FROM submitted WHERE dir_path = ?", (dir_path,))
-        db.commit()
-
-
-def _get_submitted_dirs() -> list[str]:
-    """Return all active (non-stale) submitted dir paths."""
-    db = _submission_db()
-    cutoff = time.time() - 6 * 3600
-    rows = db.execute(
-        "SELECT dir_path FROM submitted WHERE submitted_at > ?",
-        (cutoff,),
-    ).fetchall()
-    return [r[0] for r in rows]

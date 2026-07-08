@@ -443,7 +443,7 @@ def _run_pipeline(config: PipelineConfig) -> None:
     # ── Polling loop (same semantics as _batch_run) ─────────────────
     import time as _time
     from vasp_sop.vasp.io import check_converged
-    from vasp_sop.core.cache import cache_lookup, _get_submitted_dirs, clear_submission
+    from vasp_sop.core.cache import cache_lookup
     from vasp_sop.core.jobs import move_crisp_outputs
 
     s = {
@@ -457,7 +457,9 @@ def _run_pipeline(config: PipelineConfig) -> None:
 
     for _iteration in range(200):
         # Poll completed submissions
-        for wd_str in list(_get_submitted_dirs()):
+        from vasp_sop.core.job_store import JobStore
+        _js = JobStore()
+        for wd_str in list(_js.tracked_dirs()):
             wd = Path(wd_str)
             if check_converged(wd):
                 move_crisp_outputs(wd)
@@ -466,7 +468,9 @@ def _run_pipeline(config: PipelineConfig) -> None:
                     vasp_results_put(wd)
                 except Exception as exc:
                     logger.warning("Failed to cache %s: %s", wd.name, exc)
-                clear_submission(wd_str)
+                _js.untrack(wd_str)
+                _js.record(wd_str, "converged")
+        _js.close()
 
         # Advance step
         _advance_one_system(s, dry_run=False)
@@ -873,17 +877,17 @@ def _batch_status(root: Path) -> None:
         uc_prefix = prefix + "/unitcell/"
         df_prefix = prefix + "/defect/"
         cpd_r = sum(1 for p, st in all_jobs.items()
-                     if p.startswith(cpd_prefix) and st == "running")
+                     if p.startswith(cpd_prefix) and st == "submitted")
         cpd_d = sum(1 for p, st in all_jobs.items()
-                     if p.startswith(cpd_prefix) and st == "done")
+                     if p.startswith(cpd_prefix) and st == "converged")
         uc_r = sum(1 for p, st in all_jobs.items()
-                    if p.startswith(uc_prefix) and st == "running")
+                    if p.startswith(uc_prefix) and st == "submitted")
         uc_d = sum(1 for p, st in all_jobs.items()
-                    if p.startswith(uc_prefix) and st == "done")
+                    if p.startswith(uc_prefix) and st == "converged")
         df_r = sum(1 for p, st in all_jobs.items()
-                    if p.startswith(df_prefix) and st == "running")
+                    if p.startswith(df_prefix) and st == "submitted")
         df_d = sum(1 for p, st in all_jobs.items()
-                    if p.startswith(df_prefix) and st == "done")
+                    if p.startswith(df_prefix) and st == "converged")
 
         pri = _PRIORITY_MAP.get(d.name, "\u2014")
         rows.append({"name": d.name, "pri": pri, "phase": phase,
@@ -946,8 +950,8 @@ def _batch_history(root: Path, *, system: str | None = None) -> None:
         print("-" * 40)
         for name in sorted(systems):
             states = systems[name]
-            running = sum(1 for s in states if s == "running")
-            done = sum(1 for s in states if s == "done")
+            running = sum(1 for s in states if s == "submitted")
+            done = sum(1 for s in states if s == "converged")
             print(f"  {name:<22}  {running:>3}  {done:>4}  {len(states):>5}")
     store.close()
 
@@ -975,7 +979,6 @@ def _target_dir(s: dict) -> Path | None:
 def _competing_dirs(s: dict) -> list[Path]:
     """Return dirs in cpd/ that need VASP submission."""
     from vasp_sop.vasp.io import check_converged, input_ready
-    from vasp_sop.core.cache import is_submitted
     import logging as _log
     _logr = _log.getLogger(__name__)
     td = _target_dir(s)
@@ -994,10 +997,10 @@ def _competing_dirs(s: dict) -> list[Path]:
             continue
         if check_converged(pd):
             continue
-        if is_submitted(str(pd.resolve())):
-            continue
         from vasp_sop.core.job_store import JobStore
-        if JobStore().latest(str(pd.resolve())) == "done":
+        if JobStore().latest(str(pd.resolve())) == "submitted":
+            continue
+        if JobStore().latest(str(pd.resolve())) == "converged":
             continue
         result.append(pd)
     return sorted(result)
@@ -1033,7 +1036,7 @@ def _phase(s: dict) -> str:
 
         # UC VASP not yet done
         uc_pending = any(
-            _js.latest(str((uc_root / t).resolve())) != "done" for t in uc_tasks
+            _js.latest(str((uc_root / t).resolve())) != "converged" for t in uc_tasks
             if (uc_root / t / "INCAR").is_file()
         )
         if uc_pending:
@@ -1072,7 +1075,7 @@ def _phase(s: dict) -> str:
         return "DONE"
 
     # ── Normal upstream progression (CPD not yet complete) ────────
-    if _js.latest(str(td.resolve())) != "done":
+    if _js.latest(str(td.resolve())) != "converged":
         return "TARGET"
     if _competing_dirs(s):
         return "COMPETING"
@@ -1115,7 +1118,6 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
     from vasp_sop.defect.analysis import analyze as _analyze_defects
     from vasp_sop.core.cache import (
         vasp_results_get as _crg, vasp_results_put,
-        mark_submitted, is_submitted,
     )
     _logger = logging.getLogger(__name__)
 
@@ -1126,9 +1128,11 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
             return None
         try:
             job = submit_vasp(path.resolve())
-            mark_submitted(str(path.resolve()), job.task_name)
             from vasp_sop.core.job_store import JobStore
-            JobStore().record(str(path.resolve()), "running")
+            js = JobStore()
+            js.track(str(path.resolve()))
+            js.record(str(path.resolve()), "submitted", source=job.task_name)
+            js.close()
             print(f"  → {sys_name:<18} {label}: {job.task_name}")
             return job
         except Exception as exc:
@@ -1185,10 +1189,10 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
                 print(f"  [dry-run] {s['name']:<18} would submit: {' '.join(parts)}")
     if p == "TARGET":
         td = _target_dir(s)
-        if td and not is_submitted(str(td.resolve())):
+        if td and JobStore().latest(str(td.resolve())) != "submitted":
             from vasp_sop.core.job_store import JobStore
             if check_converged(td):
-                JobStore().record(str(td.resolve()), "done")
+                JobStore().record(str(td.resolve()), "converged")
             else:
                 f, m = s["formula"], s["mpid"]
                 cached = None
@@ -1202,13 +1206,13 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
                     submit_info = {"task_name": "cached", "work_dir": str(td.resolve())}
                     with open((s["root"] / _CPD / ".target_submit.json"), "w") as _f:
                         _json.dump(submit_info, _f)
-                    JobStore().record(str(td.resolve()), "done")
+                    JobStore().record(str(td.resolve()), "converged")
         # Re-evaluate phase — target may now be recorded as done
         p = _phase(s)
 
     if p == "COMPETING":
         for cd in _competing_dirs(s):
-            if is_submitted(str(cd.resolve())):
+            if JobStore().latest(str(cd.resolve())) == "submitted":
                 continue
             if "_mp-" in cd.name:
                 _cf, _cm = cd.name.split("_mp-", 1)
@@ -1296,12 +1300,12 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
                 from vasp_sop.vasp.io import check_task_complete
                 if check_task_complete(task_dir, task):
                     from vasp_sop.core.job_store import JobStore
-                    if JobStore().latest(str(task_dir.resolve())) != "done":
-                        JobStore().record(str(task_dir.resolve()), "done", source="backfill")
+                    if JobStore().latest(str(task_dir.resolve())) != "converged":
+                        JobStore().record(str(task_dir.resolve()), "converged", source="backfill")
                     continue
-                if is_submitted(str(task_dir.resolve())):
+                if JobStore().latest(str(task_dir.resolve())) == "submitted":
                     continue
-                if JobStore().latest(str(task_dir.resolve())) == "done":
+                if JobStore().latest(str(task_dir.resolve())) == "converged":
                     continue
                 prepare_inputs(task_dir, s["config"], task_type=task)
                 _submit_or_skip(task_dir, f"uc-{task}", s["name"])
@@ -1314,23 +1318,23 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
                         continue
                     if check_converged(child):
                         from vasp_sop.core.job_store import JobStore
-                        if JobStore().latest(str(child.resolve())) != "done":
-                            JobStore().record(str(child.resolve()), "done", source="backfill")
+                        if JobStore().latest(str(child.resolve())) != "converged":
+                            JobStore().record(str(child.resolve()), "converged", source="backfill")
                         continue
-                    if is_submitted(str(child.resolve())):
+                    if JobStore().latest(str(child.resolve())) == "submitted":
                         continue
-                    if JobStore().latest(str(child.resolve())) == "done":
+                    if JobStore().latest(str(child.resolve())) == "converged":
                         continue
                     _submit_or_skip(child, f"df-{child.name}", s["name"])
 
             uc_all_done = all(
-                JobStore().latest(str((uc_root / t).resolve())) == "done"
+                JobStore().latest(str((uc_root / t).resolve())) == "converged"
                 or not (uc_root / t / "INCAR").is_file()
                 for t in ("band", "dos", "dielectric")
             )
             # All defect VASP calculations are done — checked via JobStore.
             df_vasp_done = all(
-                JobStore().latest(str(child.resolve())) == "done"
+                JobStore().latest(str(child.resolve())) == "converged"
                 or not input_ready(child)
                 for child in df_root.iterdir() if child.is_dir()
             ) if df_root.is_dir() else True
@@ -1427,13 +1431,16 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
 
     # ── Populate submission DB from crisp + filesystem ────────────────
     if not dry_run:
-        from vasp_sop.core.cache import mark_submitted
+        from vasp_sop.core.job_store import JobStore
         _crisp_active = _crisp_active_dirs(skip=False)
         if _crisp_active:
-            logger.info("Found %d active crisp tasks, recording in submission DB.",
+            logger.info("Found %d active crisp tasks, recording in JobStore.",
                         len(_crisp_active))
             for p in _crisp_active:
-                mark_submitted(p, "restored")
+                js = JobStore()
+                js.track(p)
+                js.record(p, "submitted", source="restored")
+                js.close()
 
     from vasp_sop.core.cache import cache_lookup, vasp_results_put as _cache_put
 
@@ -1449,7 +1456,6 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
             print(f"  [dry-run] {sys_name:<18} would submit: {label}")
             return None
         try:
-            from vasp_sop.core.cache import mark_submitted
             from vasp_sop.core.cache import lattice_too_large
             if lattice_too_large(path):
                 logger.error("%s/%s: lattice too large (>MAX_LATTICE=%.1f Å), skipped",
@@ -1457,7 +1463,11 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                 print(f"  ✗ {sys_name:<18} {label}: lattice too large, skipped")
                 return None
             job = submit_vasp(path.resolve())
-            mark_submitted(str(path.resolve()), job.task_name)
+            from vasp_sop.core.job_store import JobStore
+            js = JobStore()
+            js.track(str(path.resolve()))
+            js.record(str(path.resolve()), "submitted", source=job.task_name)
+            js.close()
             print(f"  → {sys_name:<18} {label}: {job.task_name}")
             return job
         except RuntimeError as exc:
@@ -1482,7 +1492,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                 continue
             # JobStore is local SQLite (fast). Skips already-backfilled dirs.
             from vasp_sop.core.job_store import JobStore
-            if JobStore().latest(str(pd.resolve())) == "done":
+            if JobStore().latest(str(pd.resolve())) == "converged":
                 continue
             # check_converged is a tail-read (fast). Skips unconverged dirs.
             if not check_converged(pd):
@@ -1493,7 +1503,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
             formula, mpid = pd.name.split("_mp-", 1)
             _cache_put(pd, formula=formula, task_name=f"{formula}_mp-{mpid}")
             backfilled += 1
-            JobStore().record(str(pd.resolve()), "done", source="backfill")
+            JobStore().record(str(pd.resolve()), "converged", source="backfill")
     if backfilled:
         logger.info("Backfilled %d already-converged phase results into cache.", backfilled)
 
@@ -1519,18 +1529,19 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
         logger.info("Processed %d orphaned crisp outputs.", orphaned)
 
     # ── Poll completed submissions (one-shot) ────────────────────────
-    from vasp_sop.core.cache import _get_submitted_dirs, clear_submission
+    from vasp_sop.core.job_store import JobStore
+    _js_poll = JobStore()
     completed = 0
-    for wd_str in list(_get_submitted_dirs()):
+    for wd_str in list(_js_poll.tracked_dirs()):
         wd = Path(wd_str)
         if check_converged(wd):
             move_crisp_outputs(wd)
             _cache_phase_results(wd)
-            clear_submission(wd_str)
-            from vasp_sop.core.job_store import JobStore
-            JobStore().record(str(wd.resolve()), "done")
+            _js_poll.untrack(wd_str)
+            _js_poll.record(str(wd.resolve()), "converged")
             logger.info("Completed: %s", wd.name)
             completed += 1
+    _js_poll.close()
     if completed:
         print(f"  Cached {completed} completed calculation(s).")
 
