@@ -867,28 +867,44 @@ def _batch_status(root: Path) -> None:
             continue
 
         phase = _phase(s)
-
         prefix = str(d.resolve())
-        running = sum(1 for p, st in all_jobs.items()
-                      if p.startswith(prefix) and st == "running")
-        done = sum(1 for p, st in all_jobs.items()
-                   if p.startswith(prefix) and st == "done")
-        total = sum(1 for p in all_jobs if p.startswith(prefix))
+        # Per-stage breakdown from JobStore paths
+        cpd_prefix = prefix + "/cpd/"
+        uc_prefix = prefix + "/unitcell/"
+        df_prefix = prefix + "/defect/"
+        cpd_r = sum(1 for p, st in all_jobs.items()
+                     if p.startswith(cpd_prefix) and st == "running")
+        cpd_d = sum(1 for p, st in all_jobs.items()
+                     if p.startswith(cpd_prefix) and st == "done")
+        uc_r = sum(1 for p, st in all_jobs.items()
+                    if p.startswith(uc_prefix) and st == "running")
+        uc_d = sum(1 for p, st in all_jobs.items()
+                    if p.startswith(uc_prefix) and st == "done")
+        df_r = sum(1 for p, st in all_jobs.items()
+                    if p.startswith(df_prefix) and st == "running")
+        df_d = sum(1 for p, st in all_jobs.items()
+                    if p.startswith(df_prefix) and st == "done")
 
         pri = _PRIORITY_MAP.get(d.name, "\u2014")
         rows.append({"name": d.name, "pri": pri, "phase": phase,
-                      "running": running, "done": done, "total": total})
+                      "cpd_r": cpd_r, "cpd_d": cpd_d,
+                      "uc_r": uc_r, "uc_d": uc_d,
+                      "df_r": df_r, "df_d": df_d})
 
     if not rows:
         print(f"No vasp-sop systems found in {root}")
         return
 
-    print(f"{'System':<22} {'P':<3} {'Phase':<10} {'Run':>4} {'Done':>4} {'Total':>5}")
-    print("-" * 52)
+    print(f"{'System':<22} {'P':<3} {'Phase':<10} {'CPD':>8} {'UC':>8} {'Defect':>9}")
+    print(f"{'':22s} {'':3s} {'':10s} {'R/D':>8} {'R/D':>8} {'R/D':>9}")
+    print("-" * 62)
     for r in rows:
+        cpd_s = f"{r['cpd_r']}/{r['cpd_d']}" if r['cpd_r'] or r['cpd_d'] else "\u00b7"
+        uc_s = f"{r['uc_r']}/{r['uc_d']}" if r['uc_r'] or r['uc_d'] else "\u00b7"
+        df_s = f"{r['df_r']}/{r['df_d']}" if r['df_r'] or r['df_d'] else "\u00b7"
         print(f"{r['name']:<22} {r['pri']:<3} {r['phase']:<10} "
-              f"{r['running']:>4} {r['done']:>4} {r['total']:>5}")
-    print("-" * 52)
+              f"{cpd_s:>8} {uc_s:>8} {df_s:>9}")
+    print("-" * 62)
     done_count = sum(1 for r in rows if r["phase"] == "DONE")
     print(f"Total: {len(rows)}  Done: {done_count}  "
           f"Remaining: {len(rows) - done_count}")

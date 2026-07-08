@@ -267,7 +267,8 @@ class TestBatchStatus:
         captured = capsys.readouterr().out
         assert "System" in captured
         assert "Phase" in captured
-        assert "Run" in captured
+        assert "CPD" in captured
+        assert "UC" in captured
         assert "Done" in captured
 
     def test_batch_status_no_systems(self, tmp_path, capsys):
