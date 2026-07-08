@@ -1,5 +1,7 @@
 # Repository Guidelines
 
+> 架构文档: [`docs/architecture.md`](docs/architecture.md) — `_batch_run` 流程、`_phase()` 阶段机、`_advance_one_system` 各阶段操作、JobStore 状态模型、CONTCAR 重启逻辑。
+
 ## 项目定位
 
 vasp-sop (v0.1.0, MIT) 是一个 **VASP 点缺陷高通量计算管线框架**。
