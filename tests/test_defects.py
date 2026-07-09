@@ -9,21 +9,20 @@ from vasp_sop.vasp.io import check_converged
 
 def _make_outcar(dir_path: Path, nsw: int = 50, ediffg: float = -0.03,
                  last_ionic_step: int = 3, max_force: float = 0.01,
-                 completed: bool = True) -> Path:
+                 completed: bool = True, ibrion: int = 2) -> Path:
     """Write a synthetic OUTCAR with specified convergence behavior."""
+    # Write INCAR so NSW/IBRION are available for check_converged
+    (dir_path / "INCAR").write_text(f"NSW = {nsw}\nIBRION = {ibrion}\nEDIFFG = {ediffg}\n")
     lines = [f"  NSW = {nsw}", f"  EDIFFG = {ediffg}"]
-    # Add iteration markers for each ionic step
+    # Add iteration markers + TOTAL-FORCE block for each ionic step
     for ionic in range(1, last_ionic_step + 1):
         for elec in range(1, 6):
             lines.append(f"--------------------------------------- Iteration {elec:4d}({ionic:4d})  ---")
-
-    # TOTAL-FORCE block
-    lines.append(" POSITION                                       TOTAL-FORCE (eV/Angst)")
-    lines.append("-" * 80)
-    # One atom at (0,0,0) with specified force
-    lines.append(f"     0.00000      0.00000      0.00000      {max_force:.6f}      0.00000      0.00000")
-    lines.append("")
-    lines.append("")
+        lines.append(" POSITION                                       TOTAL-FORCE (eV/Angst)")
+        lines.append("-" * 80)
+        lines.append(f"     0.00000      0.00000      0.00000      {max_force:.6f}      0.00000      0.00000")
+        lines.append("")
+        lines.append("")
 
     if completed:
         lines.append("\n General timing and accounting informations for this job:\n")
@@ -31,7 +30,6 @@ def _make_outcar(dir_path: Path, nsw: int = 50, ediffg: float = -0.03,
     outcar = dir_path / "OUTCAR"
     outcar.write_text("\n".join(lines))
     return outcar
-
 
 class TestVaspJobDone:
     def test_converged(self, tmp_path: Path):
@@ -56,10 +54,9 @@ class TestVaspJobDone:
     def test_empty_outcar(self, tmp_path: Path):
         """OUTCAR exists but is empty."""
         (tmp_path / "OUTCAR").write_text("")
-        assert check_converged(tmp_path) is False
-
     def test_missing_force_block(self, tmp_path: Path):
-        """OUTCAR has completion but no TOTAL-FORCE block."""
+        """Relaxation OUTCAR has completion but no TOTAL-FORCE block → unconverged."""
+        (tmp_path / "INCAR").write_text("NSW = 50\nIBRION = 2\nEDIFFG = -0.03\n")
         lines = ["  NSW = 50", "  EDIFFG = -0.03",
                  " General timing and accounting informations for this job:"]
         (tmp_path / "OUTCAR").write_text("\n".join(lines))

@@ -117,10 +117,12 @@ def _get_ediffg(path: Path) -> float:
 
 
 def check_converged(path: Path) -> bool:
-    """OUTCAR-based ionic convergence check (tail-read + mtime cache).
+    """Ionic convergence check, aligned with pymatgen Vasprun.converged_ionic.
 
-    Returns True when an OUTCAR exists, VASP finished with timing info,
-    and max ionic force component is below EDIFFG tolerance.
+    For relaxation jobs (IBRION=1/2/3, NSW>1):
+      converged if VASP exited before max NSW (EDIFFG was met).
+    For single-point / DFPT (NSW≤1 or IBRION≠1/2/3):
+      converged if OUTCAR exists and VASP finished normally.
     """
     outcar: Path | None = None
     for cand in (path / "OUTCAR", path / "output" / "OUTCAR"):
@@ -130,7 +132,6 @@ def check_converged(path: Path) -> bool:
     if outcar is None:
         return False
 
-    # mtime cache: unchanged files return cached result
     try:
         mtime = outcar.stat().st_mtime
     except OSError:
@@ -139,44 +140,39 @@ def check_converged(path: Path) -> bool:
     if cached is not None and cached[0] == mtime:
         return cached[1]
 
-    # Tail-read first — most OUTCARs are not converged.
+    # VASP must have finished normally
     tail = _tail_text(outcar, n=4096)
-    if tail is None:
+    if tail is None or "General timing and accounting" not in tail:
         _check_converged_cache[outcar] = (mtime, False)
         return False
 
-    if "General timing and accounting" not in tail:
-        _check_converged_cache[outcar] = (mtime, False)
-        return False
+    # Read INCAR for NSW, IBRION
+    nsw = 0
+    ibrion = -1
+    incar_path = path / "INCAR"
+    if incar_path.is_file():
+        incar_text = incar_path.read_text()[:4096]
+        m = _re.search(r"NSW\s*=\s*(\d+)", incar_text)
+        if m:
+            nsw = int(m.group(1))
+        m = _re.search(r"IBRION\s*=\s*(\d+)", incar_text)
+        if m:
+            ibrion = int(m.group(1))
 
-    # pymatgen Outcar parses from end of file (efficient reverse-read)
-    try:
-        from pymatgen.io.vasp import Outcar as _Outcar
-        o = _Outcar(str(outcar))
-        result = bool(o.read_ionic_relaxation())
-    except Exception:
-        # pymatgen failed → manual TOTAL-FORCE parse as fallback
-        try:
-            text = outcar.read_text()
-            idx = text.rfind("TOTAL-FORCE (eV/Angst)")
-            if idx < 0:
-                result = False
-            else:
-                efg = _get_ediffg(path)
-                max_f = 0.0
-                for line in text[idx:].splitlines()[2:]:
-                    parts = line.strip().split()
-                    if len(parts) < 6:
-                        break
-                    max_f = max(max_f, abs(float(parts[3])),
-                                abs(float(parts[4])), abs(float(parts[5])))
-                result = max_f < efg
-        except Exception:
-            result = False
+    # Single-point / DFPT / NSW≤1 → no relaxation check needed
+    if nsw <= 1 or ibrion not in (1, 2, 3):
+        _check_converged_cache[outcar] = (mtime, True)
+        return True
+
+    # Relaxation (IBRION=1/2/3, NSW>1):
+    # converged if VASP exited before max NSW (EDIFFG was met)
+    text = outcar.read_text()
+    n_ionic = text.count("TOTAL-FORCE (eV/Angst)")
+    # Must have at least 1 ionic step (initial structure) and fewer than NSW
+    result = n_ionic >= 1 and n_ionic < nsw
 
     _check_converged_cache[outcar] = (mtime, result)
     return result
-
 
 _REQUIRED_UC_OUTPUTS: dict[str, list[str]] = {
     "band":       ["OUTCAR", "vasprun.xml"],
