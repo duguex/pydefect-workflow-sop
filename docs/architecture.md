@@ -1,7 +1,7 @@
 # vasp-sop 架构与业务逻辑
 
-> 日期: 2026-07-08
-> 目的: 透明化当前架构，供审查
+> 最后更新: 2026-07-08
+> 涵盖: submissions.db 删除、JobStore 状态变更、NSW 收敛判定、CONTCAR 重启集成
 
 ---
 
@@ -14,278 +14,261 @@
          │ _batch_run() │
          └──────┬──────┘
                 │
-     ┌──────────┼──────────┐
-     │          │          │
-     ▼          ▼          ▼
-  回填缓存   孤儿清理   轮询已完成
-  (backfill) (orphan)   (poll)
-                          │
-                          ▼
-                   逐个推进系统
-                   _advance_one_system()
-                   (每个系统一次)
+     ┌──────────┼──────────────┐
+     │          │              │
+     ▼          ▼              ▼
+  回填缓存   孤儿清理     轮询已完成 + 重启
+  (backfill) (orphan)     (poll + restart)
+                             │
+                             ▼
+                      逐个推进系统
+                      _advance_one_system()
+                      (每个系统一次)
 ```
 
----
+## 2. 数据存储
 
-## 2. `_batch_run()` 主循环
+单一数据库 `~/.vasp_sop/jobs.db`，两张表：
 
-### 2.1 回填缓存 (Backfill)
+### job_history — VASP 计算最终状态
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `dir_path` | TEXT | 计算目录完整路径 |
+| `status` | TEXT | `converged` / `failed` |
+| `reason` | TEXT | 失败原因: `unconverged` / `vasp_crash` / `orphaned` / `stalled` |
+| `timestamp` | REAL | 记录时间 |
+| `attempt` | INTEGER | CONTCAR 重启次数（0-5） |
+| `task_name` | TEXT | crisp 任务 ID |
+
+### tracked — 待检查列表
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `dir_path` | TEXT | 已提交到 crisp 但尚未出结果的目录 |
+| `submitted_at` | REAL | 提交时间 |
+
+`submissions.db` 已删除。所有状态统一在 `jobs.db` 中。
+
+## 3. `_batch_run()` 主循环
+
+### 3.1 回填缓存 (Backfill)
 
 ```python
 for 每个系统:
     for 每个 cpd/竞争相手目录:
-        if JobStore().latest(dir) == "done":
-            continue           # 已知完成了，跳过
+        if JobStore().latest(dir) == "converged":
+            continue           # 已记录，跳过
         if not check_converged(dir):
-            continue           # OUTCAR 没收敛，跳过
-        # 收敛了 → 写入 maggma cache + JobStore
-        _cache_put(dir)
-        JobStore().record(dir, "done")
+            continue           # 没收敛，跳过
+        _cache_put(dir)        # 写入 maggma 缓存
+        JobStore().record(dir, "converged", source="backfill")
 ```
 
-**作用**：把已完成但未缓存的竞争相 VASP 结果补进缓存。
-
-**我改了什么**：把 `cache_lookup(dir)` 删了（原来是先查缓存，有就跳过）。因为 `_cache_put` 本身是幂等的，不需要预先检查。
-
-### 2.2 孤儿输出清理 (Orphan Sweep)
+### 3.2 轮询已完成作业 (Poll)
 
 ```python
-for 每个系统:
-    for unitcell/ 和 defect/ 的子目录:
-        if 子目录/output/OUTCAR 存在但没被处理:
-            move_crisp_outputs(child)   # output/ → 上级目录
-            _cache_phase_results(child) # 写入缓存
-```
+crisp_active = _crisp_active_dirs(skip=False)  # crisp 当前活跃列表
 
-**作用**：crisp 把输出放在 `output/` 里，正常情况下轮询会移出来。如果进程中断了，`output/` 残留着，下次清理找到并处理。
+for row in JobStore().tracked_dirs():
+    wd = Path(row["dir_path"])
+    if str(wd.resolve()) in crisp_active:
+        continue                # 还在集群上跑
 
-### 2.3 轮询已完成作业 (Poll)
-
-```python
-for 每个 submission DB 中的活跃目录:
     if check_converged(wd):
-        move_crisp_outputs(wd)     # output/ → 上级目录
-        _cache_phase_results(wd)   # 写入 maggma 缓存
-        clear_submission(wd_str)   # 清除提交标记
-        JobStore().record(wd, "done")
+        move_crisp_outputs(wd)
+        _cache_phase_results(wd)
+        JobStore().record(wd, "converged")
+        JobStore().untrack(wd)
+        continue
+
+    outcar = wd / "OUTCAR"
+    if not outcar.is_file():
+        outcar = wd / "output" / "OUTCAR"
+    if not outcar.is_file():
+        if time.time() - row["submitted_at"] > 7 * 86400:
+            JobStore().record(wd, "failed", reason="orphaned")
+            JobStore().untrack(wd)
+        continue
+
+    tail = tail_read(outcar, 4096)
+    if "General timing and accounting" not in tail:
+        JobStore().record(wd, "failed", reason="vasp_crash")
+        JobStore().untrack(wd)
+        continue
+
+    # VASP 正常结束但未收敛 → CONTCAR 重启或放弃
+    _handle_unconverged_poll(wd)
 ```
 
-**问题**：如果 `check_converged(wd)` 返回 False（VASP 跑完但没收敛），这个分支什么都不做。提交标记不清除，作业被认为还在跑，但事实上 crisp 已经完成了。**这是阻塞点之一。**
+### 3.3 CONTCAR 重启 + 停滞检测
 
-### 2.4 逐个推进系统
+```python
+MAX_RESTART = 5
+STALL_THRESHOLD = 0.99  # 受力改进 < 1% 即停滞
+
+def _handle_unconverged_poll(wd):
+    cur_f = parse_max_f(OUTCAR)  # 解析当前最大受力
+    history = JobStore().history(wd)
+
+    # 停滞检测：与上次重启前的受力比较
+    if cur_f > 0 and attempt > 0:
+        prev_f = history 中上一次 restart 的 prev_f
+        if cur_f >= prev_f * STALL_THRESHOLD:
+            JobStore().record(wd, "failed", reason="stalled")
+            untrack
+            return
+
+    if attempt >= MAX_RESTART:
+        JobStore().record(wd, "failed", reason="unconverged")
+        untrack
+        return
+
+    restart_from_contcar(wd)   # CONTCAR → POSCAR
+    NSW += 500
+    submit_vasp(wd)             # 重新提交到 crisp
+    JobStore().record(wd, "submitted", attempt + 1)
+```
+
+### 3.4 逐个推进系统
 
 ```python
 for 每个系统:
-    p = _phase(s)   # 判断当前阶段
-    if p == DONE or NO_TARGET:
+    p = _phase(s)
+    if p == COMPLETE or NO_TARGET:
         continue
-    _advance_one_system(s)  # 执行当前阶段的操作
+    _advance_one_system(s)
 ```
 
----
+## 4. 阶段机 (`_phase()`)
 
-## 3. 阶段机 (`_phase()`)
-
-### 3.1 阶段定义
+### 4.1 阶段定义
 
 ```
-TARGET → COMPETING → CPD_POST → UC_DF → DONE
+STRUCTURE_OPT → COMPETING → CHEM_POT_DIAGRAM → UNITCELL_DEFECT → COMPLETE
 ```
 
 | 阶段 | 含义 | 判定条件 |
 |---|---|---|
 | `NO_TARGET` | 没有 MPID，无法运行 | `_target_dir()` 返回 None |
-| `TARGET` | 目标相 VASP 没算完 | JobStore 说 target 没 `done` |
+| `STRUCTURE_OPT` | 目标相 VASP 没算完 | JobStore 说 target 没 `converged` |
 | `COMPETING` | 竞争相还有没提交的 | `_competing_dirs()` 返回非空 |
-| `CPD_POST` | 竞争相算完了，CPD 待生成 | 无 competing dirs，`target_vertices.yaml` 不存在 |
-| `UC_DF` | CPD 完成，UC/缺陷阶段 | `target_vertices.yaml` 存在 |
-| `DONE` | 全线完成 | 全部 10 种中间文件齐全 |
+| `CHEM_POT_DIAGRAM` | 竞争相算完了，CPD 待生成 | 无 competing dirs，`target_vertices.yaml` 不存在 |
+| `UNITCELL_DEFECT` | CPD 完成，UC/缺陷阶段 | `target_vertices.yaml` 存在 |
+| `COMPLETE` | 全线完成 | 全部中间文件齐全 |
 
-### 3.2 UC_DF → DONE 的具体判断
+### 4.2 COMPLETE 的具体判断
 
 ```python
 if target_vertices.yaml 存在:
-    if UC 输入未生成:           return UC_DF
-    if UC 有任务没做完:         return UC_DF
-    if unitcell/unitcell.yaml 不存在: return UC_DF
-    if cpd/*.yaml/.json 缺:     return UC_DF
-    if defect 目录不存在:       return UC_DF
-    if defect_energy_summary.json 不存在: return UC_DF
+    if UC 输入未生成:              return UNITCELL_DEFECT
+    if UC 有任务没做完:            return UNITCELL_DEFECT
+    if unitcell/unitcell.yaml 不存在: return UNITCELL_DEFECT
+    if CPD 中间文件缺:             return UNITCELL_DEFECT
+    if defect 目录不存在:          return UNITCELL_DEFECT
+    if defect_energy_summary.json 不存在: return UNITCELL_DEFECT
     for 每个缺陷子目录:
-        if 缺 calc_results.json:  return UC_DF
-        if 缺 correction.json:   return UC_DF
-        if 缺 defect_structure_info.json: return UC_DF
-    if 缺 perfect_band_edge_state.json: return UC_DF
-    return DONE
+        if failed 状态: continue         # 跳过已放弃的
+        if 缺 calc_results.json:         return UNITCELL_DEFECT
+        if 缺 correction.json:          return UNITCELL_DEFECT
+        if 缺 defect_structure_info.json: return UNITCELL_DEFECT
+    if 缺 perfect_band_edge_state.json: return UNITCELL_DEFECT
+    return COMPLETE
 ```
 
----
+## 5. 收敛判定 (`check_converged`)
 
-## 4. `_advance_one_system()` 各阶段操作
-
-### 4.1 TARGET 阶段
+和 pymatgen `Vasprun.converged_ionic` 逻辑一致，基于 NSW：
 
 ```python
-if _crg(formula, mpid) 缓存命中:
-    restore_from_cache(target_dir)   # 从缓存恢复文件
-# 否则什么都不做（target 还没提交，等外部提交）
+def check_converged(path):
+    if not OUTCAR 存在: return False
+    if "General timing" not in tail: return False
+
+    nsw = read INCAR → NSW
+    ibrion = read INCAR → IBRION
+
+    # 单点 / DFPT / NSW≤1 → 不需要弛豫检查
+    if nsw <= 1 or ibrion not in (1, 2, 3):
+        return True
+
+    # 弛豫 (IBRION=1/2/3, NSW>1):
+    n_ionic = OUTCAR 中 TOTAL-FORCE 块数
+    return n_ionic >= 1 and n_ionic < nsw   # 提前退出 = 收敛
 ```
 
-### 4.2 COMPETING 阶段
+### dielectric 特殊处理
+
+DFPT 介电计算（`IBRION=8`、`LEPSILON=True`）不做离子弛豫，`check_converged` 中的受力判断不适用。`check_task_complete("dielectric")` 直接跳过 `check_converged`，只检查 OUTCAR 存在 + VASP 正常结束。
+
+## 6. `_advance_one_system()` 各阶段操作
+
+### 6.1 STRUCTURE_OPT 阶段（原 TARGET）
+
+```python
+if 缓存命中: restore_from_cache(target_dir)
+```
+
+### 6.2 COMPETING 阶段
 
 ```python
 for 每个需要提交的竞争相目录:
-    if 未提交且未收敛且未缓存:
-        _submit_or_skip(dir)  →  crisp submit
+    if 未提交且未收敛且 JobStore 未 done:
+        _submit_or_skip(dir) → crisp submit
+        JobStore().track(dir) + record("submitted")
 ```
 
-### 4.3 CPD_POST 阶段
+### 6.3 CHEM_POT_DIAGRAM 阶段（原 CPD_POST）
 
 ```python
-# 把收敛的竞争相输出移出来
-for 每个 cpd 子目录:
-    if 收敛: move_crisp_outputs(dir)
-# 运行 CPD 管线
+move_crisp_outputs(收敛的竞争相)
 compute_chemical_potentials(cpd_root)
-# 生成 target_vertices.yaml, chem_pot_diag.json 等
 ```
 
-### 4.4 UC_DF 阶段 (最复杂)
+### 6.4 UNITCELL_DEFECT 阶段（原 UC_DF）
 
 ```python
-# 1. 构建缺陷结构（如果没有）
 build_defects(defect_root, target_dir)
-_generate_vasp_inputs(defect_root)  # 生成 INCAR/POTCAR/KPOINTS
+_generate_vasp_inputs(defect_root)
 
-# 2. 提交需要跑的 UC 任务
 for task in (band, dos, dielectric):
-    if 任务已完成 (check_task_complete):  记录 JobStore done，跳过
-    if 已提交 (is_submitted):              跳过
-    if JobStore 说 done:                   跳过
-    prepare_inputs(dir)                     # 确保输入文件齐全
-    _submit_or_skip(dir) → crisp submit    # 提交到集群
+    if check_task_complete(task_dir, task):  JobStore converged，跳过
+    if JobStore "submitted":                 跳过
+    if JobStore "converged":                 跳过
+    prepare_inputs + _submit_or_skip
 
-# 3. 提交需要跑的缺陷任务
 if defect_energy_summary.json 不存在:
     for 每个缺陷子目录:
-        if 输入不齐全:                    跳过
-        if 已收敛 (check_converged):      记录 JobStore done，跳过
-        if 已提交:                         跳过
-        if JobStore 说 done:               跳过
-        _submit_or_skip(dir) → crisp submit
+        if 输入不齐全:                      跳过
+        if check_converged:                 记录 converged，跳过
+        if JobStore "submitted":             跳过
+        if JobStore "converged":             跳过
+        _submit_or_skip
 
-# 4. 如果全部跑完了，触发后处理
-if UC 全部 done AND 缺陷全部 done AND 缺陷全部有 OUTCAR:
-    if defect_energy_summary.json 不存在:
-        build_unitcell_yaml(uc_root)       # 生成 unitcell.yaml
-        _analyze_defects(...)              # 11 步 pydefect 后处理
+if UC 全部完成 AND 缺陷全部完成 AND 全部有 OUTCAR:
+    build_unitcell_yaml(uc_root)
+    _analyze_defects(...)
 ```
 
----
-
-## 5. 状态追踪 (JobStore)
-
-SQLite 表:
-
-```sql
-job_history(dir_path, status, timestamp, source)
-```
-
-状态三态：
-
-```
-waiting → running → done
-```
-
-**实际未覆盖的状态：**
-
-| 情况 | 当前状态 | 应该是什么 |
-|---|---|---|
-| VASP 提交到 crisp | `running` | ✅ |
-| VASP 完成 + 收敛 | `done` | ✅ |
-| VASP 完成 + 未收敛 | 卡在 `running` 标记 | 缺 `unconverged` 状态 |
-| VASP 崩溃/错误 | 同上有 OUTCAR 标记 | 缺 `failed` 状态 |
-
----
-
-## 6. CONTCAR 重启
-
-已有函数 `vasp_sop/vasp/io.py:restart_from_contcar()`:
+## 7. _submit_or_skip
 
 ```python
-def restart_from_contcar(path):
-    """Copy CONTCAR → POSCAR and set ISTART=1 for restart."""
-    shutil.copy2(CONTCAR, POSCAR)
-    INCAR 中设置 ISTART = 1
+def _submit_or_skip(path):
+    job = submit_vasp(path)         → crisp submit
+    JobStore().track(path)          → 加入待检查列表
+    JobStore().record("submitted")  → 记录提交状态
 ```
 
-已有完整的重启循环 `vasp_sop/defect/compute.py:run_vasp()`:
+## 8. 关键改动路线
 
-```python
-for attempt in range(20):
-    submit 所有未收敛的缺陷
-    等待完成
-    for 每个缺陷:
-        if check_converged(d):      done
-        elif max_f 没下降:          stalled
-        else:                       restart_from_contcar + 重提交
-```
-
-但这个函数走的是**本地 `submit_vasp`（subprocess + mpirun）**，没有集成到 **crisp 提交路径**。
-
----
-
-## 7. 我改了什么（对原有逻辑的改动）
-
-| 改动 | 位置 | 是否改变了语义 |
+| 改动 | 原因 | 日期 |
 |---|---|---|
-| 删除回填中的 `cache_lookup` | `_batch_run` backfill | ✅ 安全（`_cache_put` 幂等） |
-| 回填加 `JobStore` 跳过 | `_batch_run` backfill | ✅ 性能优化 |
-| 提交时记录 `running` | `_submit_or_skip` | ✅ 新增 |
-| 轮询时记录 `done` | `_batch_run` poll | ✅ 新增 |
-| `_phase()` 用 JobStore 代替 `cache_lookup` | `_phase()` | ⚠️ 语义有变 |
-| `_phase()` 加 10 种中间文件检查 | `_phase()` | ✅ 更严格 |
-| 跳过收敛目录时写 JobStore | UC_DF 提交循环 | ✅ 修复死锁 |
-| 批量生成 VASP 输入（copy 替代 N×subprocess） | `_generate_vasp_inputs` | ✅ 性能优化 |
-| 删除 `perfect` 的 `correction.json` 检查 | `_phase()` | ✅ 合理 |
-| 删除 `defect_volume_fraction.json` 检查 | `_phase()` | ✅ 可视化文件 |
-| dvf 失败不阻塞 | `analysis.py` | ✅ 非关键步骤 |
-
----
-
-## 8. 当前阻塞点汇总
-
-### 阻塞 1：CONTCAR 重启未集成到 crisp 路径
-
-```
-crisp 作业完成 → VASP 没收敛
-  → 轮询发现 check_converged=False
-  → 什么都不做
-  → 提交标记不清除
-  → 系统永远卡住
-```
-
-**影响**：30 个 UC_DF 系统中有 4-20 个缺陷属于此类。
-
-### 阻塞 2：少数未收敛缺陷阻止全系统分析
-
-```
-df_vasp_ondisk = all(check_converged(child) for child in defect_dirs)
-                → 因为 4 个缺陷没收敛，返回 False
-                → 后处理不触发
-                → 其他 26 个收敛的缺陷也卡住
-```
-
-**影响**：`_phase()` 判断 DONE 时也会按目录逐个检查中间文件，缺失就返回 UC_DF。
-
-### 阻塞 3：JobStore 三态不够用
-
-```
-running 状态同时包含了：
-  1. 正在集群上跑（正常）
-  2. 跑完了但没收敛（应重启）
-  3. 跑崩溃了（应放弃）
-```
-
-无法区分这三种情况，导致系统不知道下一步该做什么。
+| submissions.db 删除 → JobStore track/untrack | 统一数据源 | 07-08 |
+| JobStore 状态: waiting/running/done → submitted/converged/failed | 覆盖不收敛和崩溃 | 07-08 |
+| 轮询: tracked_dirs + crisp jobs | 无需 submissions.db | 07-08 |
+| 轮询: 收敛/不收敛/崩溃 三分支 | 不让不收敛的卡死 | 07-08 |
+| CONTCAR 重启 + 停滞检测 | 自动恢复不收敛的缺陷 | 07-08 |
+| check_converged: 受力 → NSW 比较 | 和 pymatgen 一致 | 07-08 |
+| check_task_complete: dielectric 跳过受力 | DFPT 不做弛豫 | 07-08 |
+| Phase 改名 | 更直观 | 07-08 |
+| _phase() 跳过 failed 缺陷 | 不阻塞 COMPLETE | 07-08 |

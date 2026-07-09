@@ -84,7 +84,7 @@ sub-tasks + defect calculations). Wave 3 runs after all Wave 2 jobs complete.
 | CLI | `vasp_sop/cli/main.py` | argparse dispatch (8 subcommands), batch orchestrator |
 | Config | `vasp_sop/core/config.py` | `PipelineConfig` dataclass, `plan.yaml` I/O, `generate_config()` |
 | Jobs | `vasp_sop/core/jobs.py` | VASP submission (crisp/local), `VaspJob` hierarchy, `run_local()` |
-| State | `vasp_sop/core/job_store.py` | JobStore (SQLite) — per-calculation VASP job states (`waiting`/`running`/`done`), queried by `_phase()` and `batch status` |
+| State | `vasp_sop/core/job_store.py` | JobStore (SQLite) — per-calculation VASP job states (`submitted`/`converged`/`failed`), plus `tracked` table for active submissions |
 | Cache | `vasp_sop/core/cache.py` | maggma JSONStore dual-store (meta.json + blobs.json), TaskDoc + regex parse |
 | Builder | `vasp_sop/defect/builder.py` | Supercell (doped/pydefect) + defect enumeration + VASP inputs |
 | CPD | `vasp_sop/defect/cpd.py` | Competing phase diagram pipeline |
@@ -284,7 +284,7 @@ CONTCAR restart loop in `defect/compute.py`:
 
 ### Persistence
 
-- Job state: `~/.vasp_sop/jobs.db` (SQLite — per-calculation `waiting`/`running`/`done`, queried by `_phase()` and `batch status`)
+- Job state: `~/.vasp_sop/jobs.db` (SQLite — `job_history`: per-calculation `submitted`/`converged`/`failed`; `tracked`: active submissions awaiting polling)
 - Calculation cache: `~/.vasp_sop/meta.json` + `~/.vasp_sop/blobs.json` (maggma JSONStore)
 - MP combo cache: `~/.vasp_sop/mp_cache/` (POSCARs + POTCARs on disk)
 - State is filesystem-based: phase determined by OUTCAR existence, convergence, YAML files
