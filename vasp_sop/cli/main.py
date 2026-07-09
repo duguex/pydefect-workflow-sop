@@ -901,12 +901,15 @@ def _batch_status(root: Path) -> None:
         return
 
     print(f"{'System':<22} {'P':<3} {'Phase':<10} {'CPD':>8} {'UC':>8} {'Defect':>9}")
-    print(f"{'':22s} {'':3s} {'':10s} {'R/D':>8} {'R/D':>8} {'R/D':>9}")
+    print(f"{'':22s} {'':3s} {'':10s} {'D/T':>8} {'D/T':>8} {'D/T':>9}")
     print("-" * 62)
     for r in rows:
-        cpd_s = f"{r['cpd_r']}/{r['cpd_d']}" if r['cpd_r'] or r['cpd_d'] else "\u00b7"
-        uc_s = f"{r['uc_r']}/{r['uc_d']}" if r['uc_r'] or r['uc_d'] else "\u00b7"
-        df_s = f"{r['df_r']}/{r['df_d']}" if r['df_r'] or r['df_d'] else "\u00b7"
+        cpd_total = r['cpd_d'] + r['cpd_r']
+        cpd_s = f"{r['cpd_d']}/{cpd_total}" if cpd_total else "\u00b7"
+        uc_total = r['uc_d'] + r['uc_r']
+        uc_s = f"{r['uc_d']}/{uc_total}" if uc_total else "\u00b7"
+        df_total = r['df_d'] + r['df_r']
+        df_s = f"{r['df_d']}/{df_total}" if df_total else "\u00b7"
         print(f"{r['name']:<22} {r['pri']:<3} {r['phase']:<10} "
               f"{cpd_s:>8} {uc_s:>8} {df_s:>9}")
     print("-" * 62)
