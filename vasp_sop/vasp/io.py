@@ -149,30 +149,31 @@ def check_converged(path: Path) -> bool:
         _check_converged_cache[outcar] = (mtime, False)
         return False
 
-    # Converged — full read for force parsing.
+    # pymatgen Outcar parses from end of file (efficient reverse-read)
     try:
-        text = outcar.read_text()
+        from pymatgen.io.vasp import Outcar as _Outcar
+        o = _Outcar(str(outcar))
+        result = bool(o.read_ionic_relaxation())
     except Exception:
-        _check_converged_cache[outcar] = (mtime, False)
-        return False
-
-    idx = text.rfind("TOTAL-FORCE (eV/Angst)")
-    if idx < 0:
-        _check_converged_cache[outcar] = (mtime, False)
-        return False
-
-    efg = _get_ediffg(path)
-    max_f = 0.0
-    for line in text[idx:].splitlines()[2:]:
-        parts = line.strip().split()
-        if len(parts) < 6:
-            break
+        # pymatgen failed → manual TOTAL-FORCE parse as fallback
         try:
-            max_f = max(max_f, abs(float(parts[3])), abs(float(parts[4])), abs(float(parts[5])))
-        except ValueError:
-            break
+            text = outcar.read_text()
+            idx = text.rfind("TOTAL-FORCE (eV/Angst)")
+            if idx < 0:
+                result = False
+            else:
+                efg = _get_ediffg(path)
+                max_f = 0.0
+                for line in text[idx:].splitlines()[2:]:
+                    parts = line.strip().split()
+                    if len(parts) < 6:
+                        break
+                    max_f = max(max_f, abs(float(parts[3])),
+                                abs(float(parts[4])), abs(float(parts[5])))
+                result = max_f < efg
+        except Exception:
+            result = False
 
-    result = max_f < efg
     _check_converged_cache[outcar] = (mtime, result)
     return result
 
