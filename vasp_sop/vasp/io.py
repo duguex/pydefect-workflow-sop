@@ -188,11 +188,11 @@ def check_task_complete(path: Path, task_type: str = "") -> bool:
     """Check whether a VASP task's output artifacts are fully present.
 
     For band/dos tasks: requires converged OUTCAR + vasprun.xml.
-    For dielectric:     requires converged OUTCAR only.
+    For dielectric:     requires OUTCAR with VASP completion (no force check,
+                        because dielectric is a DFPT single-point calc).
     For any other task: delegates to check_converged().
     """
-    if not check_converged(path):
-        return False
+    # First check required files exist (OUTCAR, vasprun.xml etc.)
     if task_type in _REQUIRED_UC_OUTPUTS:
         for f in _REQUIRED_UC_OUTPUTS[task_type]:
             if (path / f).is_file():
@@ -200,6 +200,20 @@ def check_task_complete(path: Path, task_type: str = "") -> bool:
             if (path / "output" / f).is_file():
                 continue
             return False
+
+    # dielectric: no ionic relaxation, force convergence is N/A
+    if task_type == "dielectric":
+        outcar = path / "OUTCAR"
+        if not outcar.is_file():
+            outcar = path / "output" / "OUTCAR"
+        if not outcar.is_file():
+            return False
+        tail = _tail_text(outcar, 4096)
+        return tail is not None and "General timing and accounting" in tail
+
+    # band/dos/other: require force convergence
+    if not check_converged(path):
+        return False
     return True
 
 def restart_from_contcar(path: Path) -> None:
