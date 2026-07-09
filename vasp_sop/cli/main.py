@@ -1373,8 +1373,35 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
 _MAX_RESTART = 5
 
 
+def _parse_max_f(outcar: Path) -> float:
+    """Extract max force from OUTCAR TOTAL-FORCE block."""
+    try:
+        text = outcar.read_text()
+    except Exception:
+        return 0.0
+    idx = text.rfind("TOTAL-FORCE (eV/Angst)")
+    if idx < 0:
+        return 0.0
+    max_f = 0.0
+    for line in text[idx:].splitlines()[2:]:
+        parts = line.strip().split()
+        if len(parts) < 6:
+            break
+        try:
+            max_f = max(max_f, abs(float(parts[3])),
+                        abs(float(parts[4])), abs(float(parts[5])))
+        except ValueError:
+            break
+    return max_f
+
+
 def _handle_unconverged_poll(wd: Path) -> None:
-    """VASP normal exit but unconverged — CONTCAR restart or give up."""
+    """VASP normal exit but unconverged — CONTCAR restart or give up.
+
+    Checks for stall: if max_f hasn't improved by at least 1% since
+    the last restart, the job is stuck and we give up immediately
+    instead of blindly retrying.
+    """
     from vasp_sop.core.job_store import JobStore
     from vasp_sop.vasp.io import restart_from_contcar
     from vasp_sop.core.jobs import submit_vasp
@@ -1383,8 +1410,33 @@ def _handle_unconverged_poll(wd: Path) -> None:
     history = JobStore().history(wd_str)
     attempt = history[-1].get("attempt", 0) if history else 0
 
+    # Read current max_f from the OUTCAR
+    cur_f = _parse_max_f(wd / "OUTCAR")
+    if cur_f == 0.0:
+        cur_f = _parse_max_f(wd / "output" / "OUTCAR")
+
+    # Stall detection: compare with previous restart's max_f
+    if cur_f > 0 and attempt > 0:
+        for h in reversed(history):
+            reason = h.get("reason", "")
+            if reason.startswith("restart,"):
+                for part in reason.split(","):
+                    if part.startswith("prev_f="):
+                        prev_f = float(part.split("=")[1])
+                        if cur_f >= prev_f * 0.99:
+                            JobStore().record(wd_str, "failed",
+                                              reason=f"stalled,max_f={cur_f:.4f}",
+                                              attempt=attempt)
+                            JobStore().untrack(wd_str)
+                            print(f"  ! {wd.name:<18} stalled (max_f {prev_f:.4f}→{cur_f:.4f}), giving up")
+                            return
+                        break
+                break
+
     if attempt >= _MAX_RESTART:
-        JobStore().record(wd_str, "failed", reason="unconverged", attempt=attempt)
+        JobStore().record(wd_str, "failed",
+                          reason=f"unconverged,max_f={cur_f:.4f}",
+                          attempt=attempt)
         JobStore().untrack(wd_str)
         print(f"  ! {wd.name:<18} unconverged after {attempt} restart(s), giving up")
         return
@@ -1404,9 +1456,9 @@ def _handle_unconverged_poll(wd: Path) -> None:
 
     job = submit_vasp(wd.resolve())
     JobStore().record(wd_str, "submitted",
-                      source=job.task_name, attempt=attempt + 1)
-    # tracked stays — still in the check list
-    print(f"  → {wd.name:<18} restart #{attempt+1} ({job.task_name})")
+                      source=job.task_name, attempt=attempt + 1,
+                      reason=f"restart,prev_f={cur_f:.4f}")
+    print(f"  → {wd.name:<18} restart #{attempt+1} (max_f {cur_f:.4f}, {job.task_name})")
 
 def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                exclude: list[str] | None = None) -> None:
