@@ -83,3 +83,40 @@ class TestVaspJobDone:
         output_dir.mkdir()
         _make_outcar(output_dir, nsw=50, last_ionic_step=4, max_force=0.02)
         assert check_converged(tmp_path) is True
+
+    def test_single_point_nsw1(self, tmp_path: Path):
+        """NSW=1 single point → always converged if VASP finished."""
+        (tmp_path / "INCAR").write_text("NSW = 1\nIBRION = -1\n")
+        (tmp_path / "OUTCAR").write_text(
+            " General timing and accounting informations for this job:\n")
+        assert check_converged(tmp_path) is True
+
+    def test_dfpt_dielectric_ibrion8(self, tmp_path: Path):
+        """DFPT dielectric (IBRION=8) → always converged if VASP finished."""
+        (tmp_path / "INCAR").write_text("NSW = 50\nIBRION = 8\nLEPSILON = .TRUE.\n")
+        (tmp_path / "OUTCAR").write_text(
+            " General timing and accounting informations for this job:\n")
+        assert check_converged(tmp_path) is True
+
+    def test_nsw_early_exit_converged(self, tmp_path: Path):
+        """NSW=100, 50 ionic steps → converged (exited early = EDIFFG met)."""
+        _make_outcar(tmp_path, nsw=100, last_ionic_step=50, max_force=0.01)
+        assert check_converged(tmp_path) is True
+
+    def test_nsw_exhausted_unconverged(self, tmp_path: Path):
+        """NSW=50, 50 steps → unconverged (all NSW used)."""
+        _make_outcar(tmp_path, nsw=50, last_ionic_step=50, max_force=0.5)
+        assert check_converged(tmp_path) is False
+
+    def test_md_ibrion0(self, tmp_path: Path):
+        """IBRION=0 molecular dynamics → no relaxation check, converged."""
+        (tmp_path / "INCAR").write_text("NSW = 100\nIBRION = 0\n")
+        (tmp_path / "OUTCAR").write_text(
+            " General timing and accounting informations for this job:\n")
+        assert check_converged(tmp_path) is True
+
+    def test_no_incar_fallback(self, tmp_path: Path):
+        """No INCAR → treated as single point → converged if VASP finished."""
+        (tmp_path / "OUTCAR").write_text(
+            " General timing and accounting informations for this job:\n")
+        assert check_converged(tmp_path) is True
