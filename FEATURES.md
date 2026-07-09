@@ -21,7 +21,7 @@
 | | `progress` | Per-system completion percentage |
 | `defect` | `init` | Generate `plan.yaml` with inference and dynamic comments |
 | | `run` | Run the full point-defect pipeline for one system |
-| | `resume` | Resume pipeline from saved `.pipeline_state.json` |
+| | `resume` | Resume pipeline from saved state (legacy — use `batch run`) |
 | | `status` | Show pipeline stage status for a project |
 | | `build` | Standalone defect structure generation (supercell + inputs) |
 | | `analyze` | Standalone defect post-processing (not yet implemented) |
@@ -65,7 +65,7 @@ material systems in a shared project root directory.
 Each system cycles through a deterministic phase sequence:
 
 ```
-TARGET  →  COMPETING  →  CPD_POST  →  UC_DF  →  DONE
+STRUCTURE_OPT  →  COMPETING  →  CHEM_POT_DIAGRAM  →  UNITCELL_DEFECT  →  COMPLETE
 ```
 
 Phase is determined by filesystem state — OUTCAR presence, convergence
@@ -73,10 +73,9 @@ status, presence of `target_vertices.yaml`, etc. — not from a database.
 
 ### Three-Wave VASP Scheduling
 
-| Wave | Phase | Work |
 |---|---|---|
-| 1 | TARGET | Submit structure_opt VASP; generate all other inputs locally while it runs |
-| 2 | COMPETING + UC + DEFECT | Submit competing phases, unitcell (band/dos/dielectric), perfect, and all defect jobs in parallel |
+| 1 | STRUCTURE_OPT | Submit structure_opt VASP; generate all other inputs locally while it runs |
+| 2 | COMPETING + UNITCELL + DEFECT | Submit competing phases, unitcell (band/dos/dielectric), perfect, and all defect jobs in parallel |
 | 3 | POST-PROCESSING | pydefect analysis, formation energy summary, unitcell YAML generation |
 
 ### Key Behaviors
@@ -390,17 +389,16 @@ Maggma `JSONStore` dual-store at `~/.vasp_sop/`:
   LDAUTYPE, LDAUU, LDAUJ, LDAUL, GGA, IVDW, LASPH, METAGGA)
 - POTCAR species + functional combination
 
-### Submission Tracking
+### Job State Tracking
 
-SQLite database at `~/.vasp_sop/submissions.db` (WAL mode):
+Unified SQLite database at `~/.vasp_sop/jobs.db` (WAL mode) with two tables:
 
-| Function | Purpose |
+| Table | Purpose |
 |---|---|
-| `mark_submitted(dir, task_name)` | Record a VASP job submission |
-| `is_submitted(dir, stale_hours=6)` | Check if job is active (not stale) |
-| `clear_submission(dir)` | Remove record on completion/cancellation |
+| `job_history` | Per-calculation final status: `submitted` / `converged` / `failed` (with `reason`, `attempt` count) |
+| `tracked` | Active submissions awaiting polling (dirs submitted to crisp but not yet completed) |
 
-### Utility Operations
+Legacy `submissions.db` was merged into `jobs.db`.
 
 - **`list_cache(limit=50)`** — most recent cache entries
 - **`cache_stats()`** — aggregate totals: formulas, entries, per-functional breakdown
@@ -459,57 +457,21 @@ Cache operations are transparent: `mp_combo_get/put/restore` and
 
 ## 10. Pipeline State & Resume
 
-The state machine (`vasp_sop/core/state.py`) persists pipeline progress for
-interruption-safe resume.
+State tracking uses **JobStore** (`vasp_sop/core/job_store.py`) — a unified SQLite database at `~/.vasp_sop/jobs.db`.
 
-### StateStore
+Unlike the legacy `StateStore` (file-based `.pipeline_state.json`), JobStore records per-calculation VASP job status:
 
-- File-based persistence at `{root}/.pipeline_state.json`
-- Atomic save via temporary file + `os.replace` (crash-safe write)
-- `load(path)` — deserialize from disk
-- `save(state)` — atomic write to disk
-
-### Stage Statuses
-
-`StepStatus` enum:
-
-| Value | Meaning |
+| Status | Meaning |
 |---|---|
-| `PENDING` | Not yet started |
-| `RUNNING` | In progress |
-| `DONE` | Completed |
-| `FAILED` | Terminated with error |
+| `submitted` | Submitted to crisp, awaiting completion |
+| `converged` | OUTCAR converged (ionic relaxation met or single-point completed) |
+| `failed` | Given up after max retries or VASP crash; `reason` field explains why |
 
-### Structured Stage Results
+System-level phase (`STRUCTURE_OPT` → `COMPLETE`) is derived in real-time from JobStore + marker files by `_phase()`.
 
-| Result Type | Fields |
-|---|---|
-| `CpdResult` | `unitcell_path`, `chem_pot_path`, `standard_energies_path` |
-| `UnitcellResult` | `unitcell_yaml_path`, `band_path`, `dos_path`, `dielectric_path` |
-| `DefectResult` | `defect_energy_summary_path`, `calc_summary_path` |
+### Resume
 
-### PipelineState Dataclass
-
-```
-PipelineState:
-  root                  # Project root Path
-  cpd_status            # StepStatus
-  cpd_result            # CpdResult | None
-  unitcell_status       # StepStatus
-  unitcell_result       # UnitcellResult | None
-  defect_status         # StepStatus
-  defect_result         # DefectResult | None
-  active_jobs           # dict[str, int] — task_name → pid tracking
-```
-
-### Resume Support
-
-- `StateStore.load()` reconstructs full state from disk
-- `PipelineState.is_terminal()` — returns `True` when all stages are `DONE`
-- Active job tracking via `active_jobs` dict enables in-flight monitoring
-- Used by `vasp-sop defect resume` to restart from any completed stage
-
----
+`vasp-sop batch run .` is idempotent — each cycle checks current phase, submits needed jobs, and collects completed results.
 
 ## 11. Defect Compute Loop
 
@@ -570,11 +532,9 @@ When a defect is detected as stalled:
 | 3 Configuration | `vasp_sop/core/config.py` | `PipelineConfig`, `generate_config()`, `DEFAULT_PLAN` |
 | 4 CPD | `vasp_sop/defect/cpd.py` | `run_cpd()`, `compute_chemical_potentials()`, `apply_molecule_corrections()`, `adjust_unstable_phase()` |
 | 5 Supercell & Defect Gen | `vasp_sop/defect/builder.py` | `build_all()`, `_build_supercell_doped()`, `_build_supercell_pydefect()`, `construct_complex_defects()` |
-| 6 VASP Job Mgmt | `vasp_sop/core/jobs.py`, `vasp_sop/vasp/io.py`, `vasp_sop/vasp/errors.py` | `VaspJob`/`LocalVaspJob`/`CrispVaspJob`, `check_converged()`, `diagnose_failure()`, `submit_vasp()`, `wait_all()` |
-| 7 Formation Energy | `vasp_sop/defect/analysis.py` | `analyze()` (11-step pipeline) |
-| 8 Results Cache | `vasp_sop/core/cache.py` | `vasp_results_put()`, `vasp_results_get()`, `query()`, `_content_hash()`, `mark_submitted()` |
+| 8 Results Cache | `vasp_sop/core/cache.py` | `vasp_results_put()`, `vasp_results_get()`, `query()`, `_content_hash()` |
 | 9 MP Integration | `vasp_sop/materials/mp.py` | `fetch_candidate_phases()`, `list_phases()`, `list_potcar_variants()`, `detect_encut()`, `needs_hubbard_u()` |
-| 10 Pipeline State | `vasp_sop/core/state.py` | `StateStore`, `PipelineState`, `StepStatus`, `CpdResult`, `UnitcellResult`, `DefectResult` |
+| 10 Pipeline State | `vasp_sop/core/job_store.py` | `JobStore` (SQLite — `converged`/`failed` + `tracked` table) |
 | 11 Defect Compute Loop | `vasp_sop/defect/compute.py` | `run_vasp()`, `_collect_jobs()`, `_max_f()`, stall detection, POTIM auto-recovery |
 
 ---
