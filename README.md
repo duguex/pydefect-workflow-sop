@@ -1,12 +1,79 @@
-# docs/architecture
+# vasp-sop
 
-vasp-sop 架构文档索引。
+**VASP point-defect high-throughput pipeline orchestrator** (v0.1.0, MIT).
 
-| # | 文档 | 内容 |
-|---|---|---|
-| 01 | [01-overview.md](01-overview.md) | 整体流程、关键改动路线 |
-| 02 | [02-data-storage.md](02-data-storage.md) | 数据库设计 (jobs.db)、job_history + tracked |
-| 03 | [03-batch-loop.md](03-batch-loop.md) | `_batch_run()` 主循环、回填、轮询、CONTCAR 重启 |
-| 04 | [04-phase-machine.md](04-phase-machine.md) | `_phase()` 阶段机、COMPLETE 判断条件 |
-| 05 | [05-advance-system.md](05-advance-system.md) | `_advance_one_system()` 各阶段操作 |
-| 06 | [06-convergence.md](06-convergence.md) | `check_converged()` NSW 逻辑、dielectric 特殊处理 |
+Given a chemical formula and optional dopants, drives competing-phase search → chemical-potential diagram → unitcell properties → supercell/defect enumeration → VASP submission → formation-energy analysis.
+
+**Not** a DFT engine, materials database, or Slurm replacement. Submits work through **`crisp`** (or mpirun) and stores results via **[vasp-cache](https://github.com/duguex/vasp-cache)**.
+
+---
+
+## Quick start
+
+```bash
+# install (editable)
+pip install -e .
+
+# dry-run a project tree (plan.yaml present)
+vasp-sop batch run /path/to/project --dry-run
+
+# advance systems for real
+vasp-sop batch run /path/to/project
+
+# cache / jobs
+vasp-sop cache status --verbose
+```
+
+Tests:
+
+```bash
+python3 -m pytest tests/
+```
+
+---
+
+## Pipeline (short)
+
+| Stage | Meaning |
+|-------|---------|
+| TARGET | Structure optimization of host |
+| COMPETING | Competing phases |
+| CPD_POST | Chemical potential diagram post |
+| UC_DF | Unitcell props + defect supercells + VASP |
+| DONE | Terminal |
+
+Three-wave VASP scheduling and JobStore details: [FEATURES.md](FEATURES.md), [docs/agent-conventions.md](docs/agent-conventions.md).
+
+---
+
+## Documentation roles
+
+| Audience | File | Role |
+|----------|------|------|
+| **Humans** | This README | Install + one-command start |
+| **Coding agents** | [AGENTS.md](AGENTS.md) | **Canonical** agent rules (short) |
+| Deep conventions | [docs/agent-conventions.md](docs/agent-conventions.md) | Architecture, patterns, known issues (ex-AGENTS dump) |
+| Feature inventory | [FEATURES.md](FEATURES.md) | JobStore, phases, capabilities |
+| Project write-up | [PROJECT.md](PROJECT.md) | Longer product narrative |
+
+No root `CLAUDE.md` (by policy: do not invent unless you request scheme A).
+
+---
+
+## Layout (top level)
+
+| Path | Role |
+|------|------|
+| `vasp_sop/` | Package + CLI |
+| `tests/` | pytest suite |
+| `docs/` | Agent conventions + other notes |
+| `issues/` | Tracked issues |
+| `unitcell/` | Unitcell-related assets |
+| `libs/` | Vendored/helpers as present |
+
+---
+
+## Related
+
+- Cache backend: `vasp-cache`  
+- HPC submit path: `crisp` (see your cluster docs)
