@@ -690,10 +690,12 @@ class TestFullPipelineWalkthrough:
         # STRUCTURE_OPT is a no-op when target is not cached — no submission
 
         # ── Phase 2: COMPETING ─────────────────────────────────────
-        # Cache target result to advance past STRUCTURE_OPT
+        # Cache target result + disk OUTCAR so JobStore may record converged
+        # only when check_converged is true (no false converged).
         cache_data[f"{formula}_{mpid}"] = {"total_energy": -12.0}
         td = root / "cpd" / f"{formula}_mp-{mpid}"
         cache_data[str(td.resolve())] = {"total_energy": -12.0}
+        self._write_converged_outcar(td)
 
         # Add unconverged competing dir so _competing_dirs returns it
         comp = root / "cpd" / "Ga_mp-142"
@@ -704,7 +706,7 @@ class TestFullPipelineWalkthrough:
         _write_kpoints(comp)
         self._write_unconverged_outcar(comp)
 
-        # Advance — records cached target as done in JobStore, then submits competing
+        # Advance — records target converged from disk, then submits competing
         _advance_one_system(s, dry_run=False)
         assert _phase(s) != "STRUCTURE_OPT", "system should advance past STRUCTURE_OPT"
         assert str(comp.resolve()) in submit_calls, \
@@ -826,3 +828,362 @@ class TestFullPipelineWalkthrough:
         # dielectric should NOT be re-submitted (OUTCAR only is sufficient)
         assert str((uc / "dielectric").resolve()) not in submit_calls, \
             "dielectric should not re-submit (OUTCAR sufficient)"
+
+
+
+class TestPhaseFailedSkip:
+    """JobStore 'failed' defects must not block COMPLETE (issue #0005 / failed-gate)."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate(self, tmp_path: Path):
+        from vasp_sop.core.cache import override_cache_root
+        override_cache_root(tmp_path / ".vasp_sop")
+
+    def _complete_ready_system(self, tmp_path: Path) -> tuple[dict, Path, Path]:
+        """System with all COMPLETE gates except one optional second defect."""
+        formula, mpid = "GaN", "804"
+        root = tmp_path / formula
+        root.mkdir()
+        plan = {
+            "project": {"formula": formula, "dopant_elements": [],
+                        "poscar_src": f"MP mp-{mpid}"},
+            "parameters": {"functional": "pbesol"},
+            "supercell": {"tool": "doped", "min_distance": 10.0},
+        }
+        (root / "plan.yaml").write_text(yaml.dump(plan))
+        cpd = root / "cpd"
+        cpd.mkdir()
+        target = cpd / f"{formula}_mp-{mpid}"
+        target.mkdir()
+        _write_poscar(target, 2)
+        _write_incar(target)
+        (cpd / "target_vertices.yaml").write_text("tv: 1\n")
+        (cpd / "composition_energies.yaml").write_text("ce: 1\n")
+        (cpd / "standard_energies.yaml").write_text("se: 1\n")
+        (cpd / "chem_pot_diag.json").write_text("{}\n")
+
+        uc = root / "unitcell"
+        uc.mkdir()
+        (uc / "unitcell.yaml").write_text("uy: 1\n")
+        for t in ("band", "dos", "dielectric"):
+            td = uc / t
+            td.mkdir()
+            _write_incar(td)
+
+        df = root / "defect"
+        df.mkdir()
+        (df / "defect_energy_summary.json").write_text("{}\n")
+        perfect = df / "perfect"
+        perfect.mkdir()
+        (perfect / "perfect_band_edge_state.json").write_text("{}\n")
+
+        good = df / "Va_Ga_0"
+        good.mkdir()
+        _write_incar(good)
+        _write_poscar(good, 2)
+        _write_potcar(good)
+        _write_kpoints(good)
+        (good / "calc_results.json").write_text("{}\n")
+        (good / "correction.json").write_text("{}\n")
+        (good / "defect_structure_info.json").write_text("{}\n")
+
+        s = _make_system_dict(root)
+        from vasp_sop.core.job_store import JobStore
+        for d in (uc / "band", uc / "dos", uc / "dielectric", perfect, good):
+            JobStore().record(str(d.resolve()), "converged")
+        return s, root, df
+
+    def test_failed_defect_does_not_block_complete(self, tmp_path: Path):
+        """Failed defect without analysis intermediates must not block COMPLETE."""
+        from vasp_sop.cli.main import _phase
+        from vasp_sop.core.job_store import JobStore
+
+        s, _root, df = self._complete_ready_system(tmp_path)
+        bad = df / "Va_Ga_-3"
+        bad.mkdir()
+        _write_incar(bad)
+        _write_poscar(bad, 2)
+        _write_potcar(bad)
+        _write_kpoints(bad)
+        # No analysis intermediates — only JobStore failed
+        JobStore().record(str(bad.resolve()), "failed", reason="unconverged")
+
+        assert _phase(s) == "COMPLETE"
+
+    def test_unfinished_defect_blocks_complete(self, tmp_path: Path):
+        """Defect without intermediates and not failed stays UNITCELL_DEFECT."""
+        from vasp_sop.cli.main import _phase
+
+        s, _root, df = self._complete_ready_system(tmp_path)
+        pending = df / "Va_Ga_-1"
+        pending.mkdir()
+        _write_incar(pending)
+        _write_poscar(pending, 2)
+        _write_potcar(pending)
+        _write_kpoints(pending)
+
+        assert _phase(s) == "UNITCELL_DEFECT"
+
+    def test_junk_subdir_without_vasp_inputs_ignored(self, tmp_path: Path):
+        """Non-calculation subdirs under defect/ must not block COMPLETE."""
+        from vasp_sop.cli.main import _phase
+
+        s, _root, df = self._complete_ready_system(tmp_path)
+        junk = df / "c3v"
+        junk.mkdir()
+        (junk / "readme.txt").write_text("not a calc\n")
+
+        assert _phase(s) == "COMPLETE"
+
+
+class TestUcFalseConvergedResubmit:
+    """UC tasks marked converged in JobStore but missing vasprun must resubmit."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate(self, tmp_path: Path, monkeypatch):
+        from vasp_sop.core.cache import override_cache_root
+        override_cache_root(tmp_path / ".vasp_sop")
+        monkeypatch.setattr("vasp_sop.defect.builder.build_all", lambda *a, **kw: None)
+        monkeypatch.setattr("vasp_sop.defect.builder._generate_vasp_inputs", lambda *a, **kw: None)
+        monkeypatch.setattr("vasp_sop.vasp.io.prepare_inputs", lambda *a, **kw: None)
+        monkeypatch.setattr("vasp_sop.defect.unitcell._prepare_all_inputs", lambda *a, **kw: None)
+        monkeypatch.setattr("vasp_sop.defect.unitcell.build_unitcell_yaml", lambda *a, **kw: None)
+        monkeypatch.setattr("vasp_sop.defect.analysis.analyze", lambda *a, **kw: None)
+
+    def test_stale_converged_band_resubmits(self, tmp_path: Path, monkeypatch):
+        from vasp_sop.cli.main import _advance_one_system
+        from vasp_sop.core.job_store import JobStore
+
+        formula, mpid = "GaN", "804"
+        root = tmp_path / formula
+        root.mkdir()
+        plan = {
+            "project": {"formula": formula, "dopant_elements": [],
+                        "poscar_src": f"MP mp-{mpid}"},
+            "parameters": {"functional": "pbesol"},
+            "supercell": {"tool": "doped", "min_distance": 10.0},
+        }
+        (root / "plan.yaml").write_text(yaml.dump(plan))
+        cpd = root / "cpd"
+        cpd.mkdir()
+        target = cpd / f"{formula}_mp-{mpid}"
+        target.mkdir()
+        _write_poscar(target, 2)
+        _write_incar(target)
+        (cpd / "target_vertices.yaml").write_text("tv: 1\n")
+        (cpd / "standard_energies.yaml").write_text("se: 1\n")
+
+        uc = root / "unitcell"
+        uc.mkdir()
+        band = uc / "band"
+        band.mkdir()
+        _write_incar(band)
+        # Converged OUTCAR but no vasprun.xml
+        (band / "OUTCAR").write_text(
+            " General timing and accounting\n"
+            " TOTAL-FORCE (eV/Angst)\n"
+            " ---\n"
+            " 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000\n"
+        )
+        JobStore().record(str(band.resolve()), "converged", source="stale")
+
+        # dos/dielectric complete enough to not matter for this assert
+        for t in ("dos", "dielectric"):
+            td = uc / t
+            td.mkdir()
+            _write_incar(td)
+
+        df = root / "defect"
+        df.mkdir()
+
+        submit_calls: list[str] = []
+        monkeypatch.setattr(
+            "vasp_sop.core.jobs.submit_vasp",
+            lambda p: (submit_calls.append(str(p.resolve()))
+                       or type("J", (), {"task_name": "t"})()),
+        )
+
+        s = _make_system_dict(root)
+        _advance_one_system(s, dry_run=False)
+
+        assert str(band.resolve()) in submit_calls, \
+            "band marked converged but missing vasprun.xml must resubmit"
+
+class TestAdvanceAnalyzeStatusPrint:
+    """batch _advance_one_system must surface analyze() full|partial|failed."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate(self, tmp_path: Path, monkeypatch):
+        from vasp_sop.core.cache import override_cache_root
+        override_cache_root(tmp_path / ".vasp_sop")
+        monkeypatch.setattr(
+            "vasp_sop.defect.builder.build_all", lambda *a, **kw: None,
+        )
+        monkeypatch.setattr(
+            "vasp_sop.defect.builder._generate_vasp_inputs",
+            lambda *a, **kw: None,
+        )
+        monkeypatch.setattr(
+            "vasp_sop.vasp.io.prepare_inputs", lambda *a, **kw: None,
+        )
+        monkeypatch.setattr(
+            "vasp_sop.defect.unitcell._prepare_all_inputs",
+            lambda *a, **kw: None,
+        )
+        monkeypatch.setattr(
+            "vasp_sop.defect.unitcell.build_unitcell_yaml",
+            lambda *a, **kw: None,
+        )
+        monkeypatch.setattr(
+            "vasp_sop.core.jobs.submit_vasp",
+            lambda p: type("J", (), {"task_name": "t"})(),
+        )
+        monkeypatch.setattr(
+            "vasp_sop.core.jobs.move_crisp_outputs", lambda *a, **kw: None,
+        )
+
+    def _make_ready_for_postprocess(self, tmp_path: Path) -> Path:
+        """UNITCELL_DEFECT system with VASP complete so analyze is invoked."""
+        formula, mpid = "GaN", "804"
+        root = tmp_path / formula
+        root.mkdir()
+        plan = {
+            "project": {
+                "formula": formula,
+                "dopant_elements": [],
+                "poscar_src": f"MP mp-{mpid}",
+            },
+            "parameters": {"functional": "pbesol"},
+            "supercell": {"tool": "doped", "min_distance": 10.0},
+        }
+        (root / "plan.yaml").write_text(yaml.dump(plan))
+        cpd = root / "cpd"
+        cpd.mkdir()
+        target = cpd / f"{formula}_mp-{mpid}"
+        target.mkdir()
+        for f in ("POSCAR", "INCAR", "POTCAR", "KPOINTS"):
+            (target / f).write_text("x\n")
+        (cpd / "target_vertices.yaml").write_text("tv: 1\n")
+        (cpd / "standard_energies.yaml").write_text("se: 1\n")
+        (cpd / "composition_energies.yaml").write_text("ce: 1\n")
+        (cpd / "chem_pot_diag.json").write_text("{}\n")
+
+        uc = root / "unitcell"
+        uc.mkdir()
+        (uc / "unitcell.yaml").write_text("uy: 1\n")
+        for t in ("band", "dos", "dielectric"):
+            td = uc / t
+            td.mkdir()
+            (td / "INCAR").write_text("NSW = 0\n")
+            # band/dos need vasprun for check_task_complete
+            (td / "OUTCAR").write_text(
+                " General timing and accounting\n"
+                " TOTAL-FORCE (eV/Angst)\n"
+                " ---\n"
+                " 0.0 0.0 0.0 0.0 0.0 0.0\n"
+            )
+            if t != "dielectric":
+                (td / "vasprun.xml").write_text("<xml/>\n")
+
+        df = root / "defect"
+        df.mkdir()
+        perfect = df / "perfect"
+        perfect.mkdir()
+        for f in ("INCAR", "POSCAR", "POTCAR", "KPOINTS"):
+            (perfect / f).write_text("x\n")
+        (perfect / "OUTCAR").write_text(
+            " General timing and accounting\n"
+            " TOTAL-FORCE (eV/Angst)\n ---\n"
+            " 0.0 0.0 0.0 0.0 0.0 0.0\n"
+        )
+        defect = df / "Va_Ga_0"
+        defect.mkdir()
+        for f in ("INCAR", "POSCAR", "POTCAR", "KPOINTS"):
+            (defect / f).write_text("x\n")
+        (defect / "OUTCAR").write_text(
+            " General timing and accounting\n"
+            " TOTAL-FORCE (eV/Angst)\n ---\n"
+            " 0.0 0.0 0.0 0.0 0.0 0.0\n"
+        )
+        from vasp_sop.core.job_store import JobStore
+        for p in (target, uc / "band", uc / "dos", uc / "dielectric",
+                  perfect, defect):
+            JobStore().record(str(p.resolve()), "converged")
+        return root
+
+    def test_partial_status_prints_tilde_not_complete(
+        self, tmp_path: Path, monkeypatch, capsys,
+    ):
+        root = self._make_ready_for_postprocess(tmp_path)
+        monkeypatch.setattr(
+            "vasp_sop.defect.analysis.analyze",
+            lambda *a, **kw: "partial",
+        )
+        from vasp_sop.cli.main import _advance_one_system
+        s = _make_system_dict(root)
+        _advance_one_system(s, dry_run=False)
+        out = capsys.readouterr().out
+        assert "post-process partial" in out
+        assert "pipeline complete" not in out
+
+    def test_full_status_prints_pipeline_complete(
+        self, tmp_path: Path, monkeypatch, capsys,
+    ):
+        root = self._make_ready_for_postprocess(tmp_path)
+        monkeypatch.setattr(
+            "vasp_sop.defect.analysis.analyze",
+            lambda *a, **kw: "full",
+        )
+        from vasp_sop.cli.main import _advance_one_system
+        s = _make_system_dict(root)
+        _advance_one_system(s, dry_run=False)
+        out = capsys.readouterr().out
+        assert "pipeline complete" in out
+
+    def test_failed_status_prints_failed(
+        self, tmp_path: Path, monkeypatch, capsys,
+    ):
+        root = self._make_ready_for_postprocess(tmp_path)
+        monkeypatch.setattr(
+            "vasp_sop.defect.analysis.analyze",
+            lambda *a, **kw: "failed",
+        )
+        from vasp_sop.cli.main import _advance_one_system
+        s = _make_system_dict(root)
+        _advance_one_system(s, dry_run=False)
+        out = capsys.readouterr().out
+        assert "post-process failed" in out
+        assert "pipeline complete" not in out
+
+
+class TestDefectAnalyzeCLI:
+    def test_analyze_invokes_pipeline(self, tmp_path: Path, monkeypatch, capsys):
+        """vasp-sop defect analyze runs analyze() and prints status (#0014)."""
+        from vasp_sop.core.cache import override_cache_root
+        override_cache_root(tmp_path / ".vasp_sop")
+        root = tmp_path / "GaN"
+        root.mkdir()
+        (root / "plan.yaml").write_text("formula: GaN\n")
+        (root / "defect").mkdir()
+        (root / "unitcell").mkdir()
+        (root / "unitcell" / "unitcell.yaml").write_text("x: 1\n")
+        (root / "cpd").mkdir()
+        (root / "cpd" / "standard_energies.yaml").write_text("x: 1\n")
+        (root / "cpd" / "target_vertices.yaml").write_text("target: GaN\n")
+
+        called = {}
+
+        def fake_analyze(df, proj, cfg, uy, se, tv):
+            called["ok"] = True
+            return "partial"
+
+        monkeypatch.setattr("vasp_sop.defect.analysis.analyze", fake_analyze)
+        monkeypatch.setattr(
+            "vasp_sop.core.config.PipelineConfig.from_yaml",
+            lambda *a, **kw: type("C", (), {"formula": "GaN"})(),
+        )
+        from vasp_sop.cli.main import _do_defect_analyze
+        args = type("A", (), {"project_dir": root})()
+        _do_defect_analyze(args)
+        assert called.get("ok")
+        assert "partial" in capsys.readouterr().out

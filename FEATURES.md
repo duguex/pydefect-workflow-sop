@@ -82,7 +82,7 @@ status, presence of `target_vertices.yaml`, etc. — not from a database.
 
 - **Per-system isolation** — a failure in one system does not block others
 - **Parallel execution** — `ProcessPoolExecutor(max_workers=14)` across systems
-- **Cache-aware skip** — saves `.target_submit.json` with `"cached"` when TARGET or COMPETING phase results are found in the global cache
+- **Cache-aware skip** — saves `.target_submit.json` with `"cached"` when STRUCTURE_OPT or COMPETING phase results are found in the global cache
 - **Dry-run mode** — `--dry-run` processes all pipeline stages without submitting any VASP jobs
 - **Orphaned-output cleanup** — stale crisp output directories (`output/`) are detected and consolidated during system advancement
 - **Infinite-loop protection** — `_MAX_ITERATIONS` gate prevents unbounded polling
@@ -318,14 +318,26 @@ runs 11 sequential pydefect steps to produce the final defect energy summary.
 
 ### Skipping Condition
 
-If `defect_energy_summary.json` already exists, the entire pipeline is skipped
-(re-run is idempotent).
+If `defect_energy_summary.json` already exists **and** status is `full`, the
+pipeline is skipped. Incomplete finals are demoted to
+`defect_energy_summary.partial.json` (issue #0007).
+
+### Readiness / honesty
+
+- Ionic convergence via `check_converged` (OUTCAR NSW + force gate)
+- `pydefect_vasp cr` / efnv require `vasprun.xml` or existing `calc_results.json`
+  (issue #0010); OUTCAR-only dirs are tracked as `missing_vasprun`
+- `analyze_status.json` exposes `n_converged`, `n_corrected`, `n_dei`,
+  `missing_vasprun`, `missing_calc_results`, etc. (issue #0013)
+- CLI: `vasp-sop defect analyze <project_dir>` (issue #0014)
 
 ### Output Artifact
 
 | File | Contents |
 |---|---|
-| `defect_energy_summary.json` | Formation energies, charge states, and transition levels |
+| `defect_energy_summary.json` | Formation energies (only when **full**) |
+| `defect_energy_summary.partial.json` | Demoted incomplete summary |
+| `analyze_status.json` | Machine-readable QA counters |
 | `calc_summary.json` | Per-calculation summary metadata |
 
 ### Dependencies
@@ -528,7 +540,7 @@ When a defect is detected as stalled:
 | Section | Primary Source File(s) | Key Functions / Classes |
 |---|---|---|
 | 1 CLI | `vasp_sop/cli/main.py` | `main()`, 8 `_add_*_parser()` functions, 4 `_handle_*()` dispatch functions |
-| 2 Batch Orchestration | `vasp_sop/cli/main.py`, `vasp_sop/defect/pipeline.py` | `_batch_run()`, `_advance_one_system()`, `_phase()`, `run_point_defect_pipeline()` |
+| 2 Batch Orchestration | `vasp_sop/cli/main.py` | `_batch_run()`, `_advance_one_system()`, `_phase()` |
 | 3 Configuration | `vasp_sop/core/config.py` | `PipelineConfig`, `generate_config()`, `DEFAULT_PLAN` |
 | 4 CPD | `vasp_sop/defect/cpd.py` | `run_cpd()`, `compute_chemical_potentials()`, `apply_molecule_corrections()`, `adjust_unstable_phase()` |
 | 5 Supercell & Defect Gen | `vasp_sop/defect/builder.py` | `build_all()`, `_build_supercell_doped()`, `_build_supercell_pydefect()`, `construct_complex_defects()` |
