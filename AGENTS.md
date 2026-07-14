@@ -13,7 +13,7 @@
 ## Always-on
 
 - **What this is**: **vasp-sop** — VASP **point-defect high-throughput orchestrator** (not a DFT code, not Slurm, not a materials DB). Depends on **vasp-cache**. Submits via **`crisp`** / mpirun.  
-- **State machine** (batch): `TARGET → COMPETING → CPD_POST → UC_DF → DONE` via `_advance_one_system`.  
+- **State machine** (batch): `STRUCTURE_OPT → COMPETING → CHEM_POT_DIAGRAM → UNITCELL_DEFECT → COMPLETE` via `_advance_one_system`.
 - **Three-wave VASP schedule**: Wave1 structure_opt → Wave2 competing+UC+defects parallel → Wave3 pydefect post.  
 - **CLI**: `vasp-sop batch run .` (`--dry-run`), `defect build`, `cache status|query|…`, `materials fetch`.  
 - **Config**: `plan.yaml` per project; JobStore/Maggma JSONStore for job/cache state.  

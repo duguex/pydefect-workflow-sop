@@ -33,3 +33,9 @@ JobStore 状态：`waiting` → `running` → `done`
 1. CONTCAR 重启逻辑如何集成到 crisp 轮询路径
 2. 少数未收敛缺陷是否应阻塞全系统分析（放宽条件）
 3. JobStore 状态扩展
+
+## Status update (2026-07-14)
+
+- 阻塞 1：CONTCAR 重启已接入 `_handle_unconverged_poll`（crisp 路径）。**仍有缺口**：从未 `track` 的 target（如 ZnO）不会进入 poll 重启 — 见 #0008。
+- 阻塞 2：`df_vasp_ondisk` 已允许 JobStore `failed`；但大量缺陷缺 `correction.json` 仍不标 failed → 后处理部分跳过 + COMPLETE 卡住 — 见 #0007。
+- 阻塞 3：JobStore 已扩展为 `pending/submitted/converged/failed`（不再是 waiting/running/done）。

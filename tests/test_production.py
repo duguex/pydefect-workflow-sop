@@ -3,14 +3,14 @@
 This test scans a real production directory (e.g. 2025_undergo_spin_defect)
 and verifies that each system's on-disk state is self-consistent:
   - Phase-level artifact inventory (expected files present/absent)
-  - defect_energy_summary.json structure validity
+  - defect_energy_summary.json structure + correction coverage
   - Cross-file invariants (e.g. target_vertices → unitcell.yaml chain)
   - Anomaly detection (artifacts out of phase, stale lock files)
 
 Run with:
-    python3 -m pytest tests/test_production.py --production-dir /path/to/project -v
+    VASP_SOP_PROD_DIR=/path/to/project python3 -m pytest tests/test_production.py -v
 
-Skips automatically if --production-dir is not supplied (safe for CI).
+Skips automatically if VASP_SOP_PROD_DIR is not set (safe for CI).
 """
 
 from __future__ import annotations
@@ -39,10 +39,28 @@ def _plan(root: Path) -> dict:
 
 
 def _phase_of(root: Path) -> str:
-    """Replicate _phase() logic from main.py using filesystem + cache stubs.
+    """Filesystem-only phase estimate aligned with current phase names.
 
-    Simplified — uses only filesystem gates, no cache queries.
+    Prefer the real ``_phase()`` when JobStore is available; fall back to
+    marker files so CI without a job DB still gets a coarse signal.
     """
+    try:
+        from vasp_sop.core.config import PipelineConfig
+        from vasp_sop.cli.main import _phase
+
+        cfg = PipelineConfig.from_yaml(root / "plan.yaml", root=root)
+        src = cfg.poscar_src
+        mpid = src.split("mp-", 1)[1] if src.startswith("MP mp-") else None
+        return _phase({
+            "name": root.name,
+            "root": root,
+            "config": cfg,
+            "formula": cfg.formula,
+            "mpid": mpid,
+        })
+    except Exception:
+        pass
+
     cpd = root / "cpd"
     tv = cpd / "target_vertices.yaml"
     ce = cpd / "composition_energies.yaml"
@@ -50,23 +68,20 @@ def _phase_of(root: Path) -> str:
     df = root / "defect"
     es = df / "defect_energy_summary.json" if df.is_dir() else None
 
-    # Phase-persistence gate
     if tv.is_file():
         has_uc_inputs = any(
             (uc / t / "INCAR").is_file()
             for t in ("band", "dos", "dielectric")
         )
         if not has_uc_inputs:
-            return "UC_DF"
-        if es and es.is_file():
-            return "DONE"
-        return "UC_DF"
+            return "UNITCELL_DEFECT"
+        if es and es.is_file() and (uc / "unitcell.yaml").is_file():
+            return "COMPLETE"
+        return "UNITCELL_DEFECT"
 
-    # Upstream phases
     if not cpd.is_dir():
-        return "TARGET"
+        return "STRUCTURE_OPT"
 
-    # Check for any OUTCARs in cpd subdirs
     for sub in cpd.iterdir():
         if sub.is_dir():
             try:
@@ -76,7 +91,7 @@ def _phase_of(root: Path) -> str:
                 continue
 
     if ce.is_file():
-        return "CPD_POST"
+        return "CHEM_POT_DIAGRAM"
     return "COMPETING"
 
 
@@ -89,7 +104,6 @@ def _check_summary_invariants(path: Path) -> list[str]:
         errors.append(f"not valid JSON: {exc}")
         return errors
 
-    # Structural invariants
     for key in ("@module", "@class", "title", "defect_energies"):
         if key not in data:
             errors.append(f"missing key {key!r}")
@@ -98,6 +112,20 @@ def _check_summary_invariants(path: Path) -> list[str]:
         errors.append("defect_energies is not a dict")
 
     return errors
+
+
+def _eligible_defect_dirs(df: Path) -> list[Path]:
+    out: list[Path] = []
+    if not df.is_dir():
+        return out
+    for child in df.iterdir():
+        if not child.is_dir() or child.name == "perfect":
+            continue
+        if "_" not in child.name:
+            continue
+        if (child / "OUTCAR").is_file() or (child / "calc_results.json").is_file():
+            out.append(child)
+    return out
 
 
 @pytest.fixture(scope="module")
@@ -136,35 +164,48 @@ def test_phase_artifact_inventory(prod_dir: Path):
         uc = d / "unitcell"
         df = d / "defect"
         es = df / "defect_energy_summary.json" if df.is_dir() else None
+        partial = (
+            df / "defect_energy_summary.partial.json" if df.is_dir() else None
+        )
 
-        if phase in ("DONE", "UC_DF"):
-            # Must have CPD artifacts
+        if phase in ("COMPLETE", "UNITCELL_DEFECT"):
             if not tv.is_file():
-                anomalies.append(f"{d.name}: {phase} but missing target_vertices.yaml")
+                anomalies.append(
+                    f"{d.name}: {phase} but missing target_vertices.yaml"
+                )
             if not se.is_file():
-                anomalies.append(f"{d.name}: {phase} but missing standard_energies.yaml")
-            # Must have UC root
+                anomalies.append(
+                    f"{d.name}: {phase} but missing standard_energies.yaml"
+                )
             if not uc.is_dir():
                 anomalies.append(f"{d.name}: {phase} but no unitcell/")
-            # Must have defect dir
             if not df.is_dir():
                 anomalies.append(f"{d.name}: {phase} but no defect/")
         elif phase == "COMPETING":
             if es and es.is_file():
-                # Summary exists without CPD completion — stale data
-                anomalies.append(f"{d.name}: COMPETING but defect_energy_summary.json exists")
-        elif phase == "CPD_POST":
+                anomalies.append(
+                    f"{d.name}: COMPETING but defect_energy_summary.json exists"
+                )
+            if partial and partial.is_file():
+                anomalies.append(
+                    f"{d.name}: COMPETING but defect_energy_summary.partial.json exists"
+                )
+        elif phase == "CHEM_POT_DIAGRAM":
             if not ce.is_file():
-                anomalies.append(f"{d.name}: CPD_POST but no composition_energies.yaml")
+                anomalies.append(
+                    f"{d.name}: CHEM_POT_DIAGRAM but no composition_energies.yaml"
+                )
             if df.is_dir() and es and es.is_file():
-                anomalies.append(f"{d.name}: CPD_POST but defect_energy_summary.json exists (orphaned)")
+                anomalies.append(
+                    f"{d.name}: CHEM_POT_DIAGRAM but final defect_energy_summary.json exists"
+                )
 
     if anomalies:
         pytest.fail("Artifact anomalies found:\n  " + "\n  ".join(anomalies))
 
 
 def test_defect_summary_integrity(prod_dir: Path):
-    """Every defect_energy_summary.json must be valid JSON with expected keys."""
+    """Every *final* defect_energy_summary.json must be valid JSON."""
     errors: list[str] = []
     for d in _systems(prod_dir):
         es = d / "defect" / "defect_energy_summary.json"
@@ -178,16 +219,57 @@ def test_defect_summary_integrity(prod_dir: Path):
         pytest.fail("Summary integrity violations:\n  " + "\n  ".join(errors))
 
 
+def test_final_summary_has_correction_coverage_or_status(prod_dir: Path):
+    """Final summary implies full correction coverage or analyze_status=full.
+
+    Exposes incomplete post-process left as a final summary (issue #0007).
+    Partial work must live in defect_energy_summary.partial.json instead.
+    """
+    errors: list[str] = []
+    for d in _systems(prod_dir):
+        df = d / "defect"
+        es = df / "defect_energy_summary.json"
+        if not es.is_file():
+            continue
+        eligible = _eligible_defect_dirs(df)
+        if not eligible:
+            continue
+        missing = [
+            c.name for c in eligible if not (c / "correction.json").is_file()
+        ]
+        status_path = df / "analyze_status.json"
+        status = None
+        if status_path.is_file():
+            try:
+                status = json.loads(status_path.read_text()).get("status")
+            except (json.JSONDecodeError, OSError):
+                status = None
+        if missing and status != "full":
+            # Allow analyze_status full only when no missing; otherwise error
+            errors.append(
+                f"{d.name}: final summary but {len(missing)}/{len(eligible)} "
+                f"eligible defects lack correction.json "
+                f"(analyze_status={status!r}); sample missing={missing[:5]}"
+            )
+        if status is not None and status not in ("full", "partial", "failed"):
+            errors.append(f"{d.name}: bad analyze_status {status!r}")
+
+    if errors:
+        pytest.fail(
+            "Final summary coverage violations:\n  " + "\n  ".join(errors)
+        )
+
+
 def test_unitcell_yaml_structure(prod_dir: Path):
-    """unitcell/unitcell.yaml must exist and parse for DONE systems."""
+    """unitcell/unitcell.yaml must exist and parse for COMPLETE systems."""
     errors: list[str] = []
     for d in _systems(prod_dir):
         phase = _phase_of(d)
-        if phase != "DONE":
+        if phase != "COMPLETE":
             continue
         uy = d / "unitcell" / "unitcell.yaml"
         if not uy.is_file():
-            errors.append(f"{d.name}: DONE but missing unitcell/unitcell.yaml")
+            errors.append(f"{d.name}: COMPLETE but missing unitcell/unitcell.yaml")
             continue
         try:
             data = yaml.safe_load(uy.read_text())
@@ -209,13 +291,11 @@ def test_no_orphan_submission_files(prod_dir: Path):
             try:
                 data = json.loads(target_submit.read_text())
                 if data.get("task_name") == "cached":
-                    # Cached entries are clean
                     pass
             except (json.JSONDecodeError, Exception):
                 orphans.append(str(target_submit))
 
-        # Check for any .submitted files
-        for root_dir, dirs, files in os.walk(str(d)):
+        for root_dir, _dirs, files in os.walk(str(d)):
             for f in files:
                 if f == ".submitted":
                     orphans.append(os.path.join(root_dir, f))

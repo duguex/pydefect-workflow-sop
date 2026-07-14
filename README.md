@@ -36,11 +36,11 @@ python3 -m pytest tests/
 
 | Stage | Meaning |
 |-------|---------|
-| TARGET | Structure optimization of host |
+| STRUCTURE_OPT | Structure optimization of host |
 | COMPETING | Competing phases |
-| CPD_POST | Chemical potential diagram post |
-| UC_DF | Unitcell props + defect supercells + VASP |
-| DONE | Terminal |
+| CHEM_POT_DIAGRAM | Chemical potential diagram post |
+| UNITCELL_DEFECT | Unitcell props + defect supercells + VASP |
+| COMPLETE | Terminal |
 
 Three-wave VASP scheduling and JobStore details: [FEATURES.md](FEATURES.md), [docs/agent-conventions.md](docs/agent-conventions.md).
 

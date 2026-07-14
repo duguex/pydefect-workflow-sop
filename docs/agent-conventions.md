@@ -21,7 +21,7 @@ vasp-sop 是一个**编排层**，把整条链路封装成一条命令。给定�
 | 维度 | 实现 |
 |---|---|
 | 一次配置 | `plan.yaml` 定义化学式、掺杂、泛函、超胞参数 |
-| 自动阶段推进 | `TARGET → COMPETING → CPD_POST → UC_DF → DONE` 状态机 |
+| 自动阶段推进 | `STRUCTURE_OPT → COMPETING → CHEM_POT_DIAGRAM → UNITCELL_DEFECT → COMPLETE` 状态机 |
 | 一键批量 | `vasp-sop batch run .` 串行推进所有体系 |
 | 三波 VASP 调度 | Wave 1: 结构优化 → Wave 2: 竞争相+能带+DOS+介电+缺陷全并行 → Wave 3: 后处理 |
 | 容错 | CONTCAR 重启（最多 20 次）、12 种错误诊断、单体系失败不阻塞其他 |
@@ -58,10 +58,10 @@ CLI (vasp-sop command)
   │
   ├── batch run .          ← multi-system pipeline orchestrator
   │   └── _advance_one_system()  ← per-system state machine
-  │       ├── TARGET      → submit structure_opt VASP
-  │       ├── COMPETING   → submit/check competing phases
-  │       ├── CPD_POST    → run chemical potential diagram
-  │       └── UC_DF       → build defect structures + submit VASP
+  │       ├── STRUCTURE_OPT → submit structure_opt VASP
+  │       ├── COMPETING      → submit/check competing phases
+  │       ├── CHEM_POT_DIAGRAM → run chemical potential diagram
+  │       └── UNITCELL_DEFECT → build defect structures + submit VASP
   │
   ├── defect build .       ← standalone defect structure generation
   ├── cache status/query/verify/migrate  ← JSONStore cache inspection & query
@@ -70,11 +70,11 @@ CLI (vasp-sop command)
 
 ### Three-Wave VASP Scheduling
 
-The pipeline orchestrator in `defect/pipeline.py` uses a three-wave model:
+The batch orchestrator in `cli/main.py` (`_batch_run` / `_advance_one_system`) uses a three-wave model:
 
 | Wave | Phase | Work |
 |------|-------|------|
-| 1 | TARGET | structure_opt + generate all inputs while target runs |
+| 1 | STRUCTURE_OPT | structure_opt + generate all inputs while target runs |
 | 2 | COMPETING + UC + DEFECT | competing phases, band/dos/dielectric, perfect, all defects |
 | 3 | POST-PROCESSING | pydefect analysis, formation energy summary |
 
@@ -94,7 +94,7 @@ sub-tasks + defect calculations). Wave 3 runs after all Wave 2 jobs complete.
 | CPD | `vasp_sop/defect/cpd.py` | Competing phase diagram pipeline |
 | Unitcell | `vasp_sop/defect/unitcell.py` | Perfect-cell band/DOS/dielectric |
 | Analysis | `vasp_sop/defect/analysis.py` | Formation energy post-processing (10 pydefect steps) |
-| Pipeline | `vasp_sop/defect/pipeline.py` | Three-wave VASP orchestration |
+| Batch orchestrator | `vasp_sop/cli/main.py` | Three-wave VASP orchestration (`_batch_run`, `_advance_one_system`) |
 | Compute | `vasp_sop/defect/compute.py` | Defect VASP execution with CONTCAR restart loop |
 | VASP I/O | `vasp_sop/vasp/io.py` | `check_converged()`, `prepare_inputs()`, `restart_from_contcar()` |
 | VASP Errors | `vasp_sop/vasp/errors.py` | Error pattern diagnosis (12 modes), fix suggestions |
@@ -121,12 +121,12 @@ plan.yaml → PipelineConfig
 Each system cycles through phases determined by `_phase()`:
 
 ```
-TARGET → COMPETING → CPD_POST → UC_DF → DONE
+STRUCTURE_OPT → COMPETING → CHEM_POT_DIAGRAM → UNITCELL_DEFECT → COMPLETE
 ```
 
 - Phase is determined by filesystem state (OUTCAR presence, convergence, target_vertices.yaml, etc.)
 - `--dry-run` does one pass and exits (no VASP submission)
-- Cache hit in TARGET/COMPETING skips submission (saves `.target_submit.json` with `"cached"`)
+- Cache hit in STRUCTURE_OPT/COMPETING skips submission (saves `.target_submit.json` with `"cached"`)
 - Errors in `_advance_one_system` are caught per-system — one failure doesn't block others
 
 ## Key Directories
@@ -364,7 +364,7 @@ Notable gaps:
 | `vasp_sop/core/job_store.py` | JobStore, per-calculation state tracking |
 | `vasp_sop/defect/builder.py` | Supercell + defect generation |
 | `vasp_sop/defect/cpd.py` | Chemical potential diagram |
-| `vasp_sop/defect/pipeline.py` | Three-wave orchestration |
+| `vasp_sop/cli/main.py` | Batch orchestrator / three-wave schedule |
 | `vasp_sop/defect/compute.py` | Defect VASP execution with CONTCAR restart + error diagnosis |
 | `vasp_sop/defect/analysis.py` | Formation energy post-processing |
 | `vasp_sop/vasp/io.py` | `check_converged()`, `prepare_inputs()`, `restart_from_contcar()` |
@@ -393,10 +393,10 @@ Notable gaps:
 
 | Phase | 数量 | 系统 |
 |-------|------|------|
-| ✅ DONE | 9 | AlN, diamond, GaN, hBN, MoS₂, SiC, CaO, MgO, orth-SiC |
-| ▶️ UC_DF | 8 | BaTe, Ca₂Ge₇O₁₆, CaCO₃, CeO₂, MgCO₃, Sr₂MgSi₂O₇, SrO, SrTe |
-| ⏳ COMPETING | 21 | Ba₂MgGe₂O₇, Ba₂MgSi₂O₇, Ba₂TeO, BaGe₂S₅, BaGe₄O₉, BaO, BaO₂, BaS, BaS₃, BaSe, CaMg₂(SO₄)₃, CaS, CaSe, GeSe₂, Mg₃TeO₆, MgS, SeO₂, Sn(SeO₃)₂, Sr₂MgGe₂O₇, SrGe₄O₉, SrS, SrSe |
-| ❓ 待确认 | 1 | ZnO（CPD_POST 但缺 target_vertices.yaml） |
+| ✅ COMPLETE | 8 | AlN, BaO, CaO, CeO₂, GaN, MgO, MoS₂, SrO |
+| ▶️ UNITCELL_DEFECT | 30 | most remaining hosts (VASP/postprocess incomplete) |
+| ⏳ STRUCTURE_OPT | 2 | CaMg₂(SO₄)₃, ZnO |
+| 备注 | | hBN/SiC 等缺 band/dos `vasprun.xml` 已重提；后处理常卡在 perfect/vasprun.xml |
 
 **常用命令：**
 
@@ -413,14 +413,14 @@ vasp-sop cache status --verbose
 ```
 ## Known Issues
 
-- `cache_target_results` in CPD_POST calls `calc_results_put` then `calc_cpd_put`;
+- `cache_target_results` in CHEM_POT_DIAGRAM calls `calc_results_put` then `calc_cpd_put`;
   if the target dir lacks OUTCAR (e.g. cached result restored without files),
   the put silently skips. Verify converged flag before calling.
 - CPD target composition lookup in `relative_energies.yaml` can fail
   intermittently (pydefect key format instability). See `issues/0001-srte-cpd-target-lookup-false-positive-failure.md`.
 - 4-element CPD diagrams fail in pydefect (halfspace >3D). Handled via
   dimension check in `cpd.py`. See `issues/0002-skip-4d-cpd-diagram.md`.
-- Dry-run UC_DF phase reports "already complete" when `defect_energy_summary.json`
+- Dry-run UNITCELL_DEFECT phase reports "already complete" when `defect_energy_summary.json`
   exists, "would post-process" when artifacts are present but analysis hasn't run,
   and "post-process blocked" when artifacts are missing.
 - `compute.run_vasp()` stalled detection threshold (99% of previous max-force)
