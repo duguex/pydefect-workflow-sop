@@ -234,21 +234,91 @@ def wait_all(jobs: list[VaspJob], poll_interval: int = 60) -> None:
 
 
 def move_crisp_outputs(work_dir: Path) -> None:
-    """Move VASP results from crisp's ``output/`` dir up one level."""
+    """Promote crisp ``output/`` results into *work_dir* (mtime-preferring).
+
+    For each entry under ``work_dir/output/``:
+
+    - missing at root → move/copy up
+    - both exist as files → keep the **newer mtime**; drop the older copy
+    - directories → merge with ``dirs_exist_ok`` then remove source tree
+
+    Always removes empty ``output/`` when done (if still present).
+    """
     output_dir = work_dir / "output"
     if not output_dir.is_dir():
         return
     import shutil
+
     for f in list(output_dir.iterdir()):
         dest = work_dir / f.name
         if f.is_dir():
-            shutil.copytree(str(f), str(dest), dirs_exist_ok=True)
-            shutil.rmtree(str(f))
-        elif not dest.exists():
+            if dest.exists() and dest.is_dir():
+                # merge then drop source; nested files use same mtime rule
+                for child in list(f.rglob("*")):
+                    if not child.is_file():
+                        continue
+                    rel = child.relative_to(f)
+                    target = dest / rel
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    if not target.exists():
+                        shutil.move(str(child), str(target))
+                    else:
+                        try:
+                            if child.stat().st_mtime >= target.stat().st_mtime:
+                                target.unlink()
+                                shutil.move(str(child), str(target))
+                            else:
+                                child.unlink()
+                        except OSError:
+                            try:
+                                child.unlink()
+                            except OSError:
+                                pass
+                shutil.rmtree(str(f), ignore_errors=True)
+            else:
+                if dest.exists():
+                    # dest is a file, source is dir — prefer newer tree if possible
+                    try:
+                        dest.unlink()
+                    except OSError:
+                        pass
+                shutil.move(str(f), str(dest))
+            continue
+
+        # file
+        if not dest.exists():
+            shutil.move(str(f), str(dest))
+            continue
+        try:
+            src_m = f.stat().st_mtime
+            dst_m = dest.stat().st_mtime
+        except OSError:
+            try:
+                f.unlink()
+            except OSError:
+                pass
+            continue
+        if src_m >= dst_m:
+            # output/ is newer or equal → replace root
+            try:
+                dest.unlink()
+            except OSError:
+                pass
             shutil.move(str(f), str(dest))
         else:
-            f.unlink()
-    shutil.rmtree(str(output_dir))
+            # root is newer → drop stale output copy
+            try:
+                f.unlink()
+            except OSError:
+                pass
+
+    if output_dir.is_dir():
+        try:
+            # remove if empty or only empty dirs left
+            shutil.rmtree(str(output_dir), ignore_errors=True)
+        except OSError:
+            pass
+
 
 
 # ══════════════════════════════════════════════════════════════════════════

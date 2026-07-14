@@ -34,7 +34,7 @@ reached required accuracy - stopping structural energy minimisation
    禁止用「续跑已改过的 INCAR NSW」去解释旧 OUTCAR。  
 3. 离子弛豫且 `EDIFFG < 0`：  
    - 实现侧用最后一块 `TOTAL-FORCE` 的 `max|F| ≤ |EDIFFG|` 作硬门。  
-   - 在 `2025_undergo_spin_defect` 缺陷集上，该力门控与 **`reached required accuracy…` 一致**（未发现「有 reached 却力失败 / 力达标却无 reached」的系统性冲突）。  
+   - 在 `2025_undergo_spin_defect` 缺陷集上，该力门控与 **`reached required accuracy…` 一致**。  
 4. `EDIFFG ≥ 0` 或无法解析力：回退 `n_ionic < NSW_run`（pymatgen 风格提前退出启发式）。
 
 **文档立场：** 语义上以 **`reached required accuracy - stopping structural energy minimisation`** 为结构弛豫收敛定义；实现目前以力门控为主，并与上述字符串在生产数据上对齐。后续实现可改为 **显式识别该字符串（优先或并列）**。
@@ -69,9 +69,11 @@ crisp 把结果放在计算目录下的 **`output/`**，不是只认根目录。
 
 - `check_converged`：`OUTCAR` → **`output/OUTCAR`**
 - `has_vasprun`：`vasprun.xml` → **`output/vasprun.xml`**
-- poll / orphan：`move_crisp_outputs(calc)` 将 `output/*` 移到上一级
+- poll / orphan / analyze / recovery：`move_crisp_outputs(calc)` 将 `output/*` 提到上一级
 
-**注意：** 若根上已有同名文件，`move_crisp_outputs` **不会覆盖**，并可能删除 `output/` 里的副本。根上残缺、完整文件只在 `output/` 时需人工检查（已知边角）。
+**上提冲突：按 `mtime` 择优。**  
+根与 `output/` 同名时保留 **较新** 的文件（避免旧根 OUTCAR 挡住新 fetch）。  
+实现：`vasp_sop/core/jobs.py::move_crisp_outputs`。
 
 ---
 
@@ -79,8 +81,8 @@ crisp 把结果放在计算目录下的 **`output/`**，不是只认根目录。
 
 | 场景 | 策略 |
 |------|------|
-| 离子未收敛 + 有 timing | CONTCAR 重启（`restart_from_contcar`），**不擅自改 NSW/IBRION 物理参数**（用户策略；见 #0016） |
-| 离子已收敛但缺 `vasprun.xml` | 先 `move_crisp` + cache；仍缺则 **仅 CONTCAR→POSCAR + ISTART=1** 再提交，**不改 NSW/IBRION** |
+| 离子未收敛 + 有 timing | CONTCAR 重启（`restart_from_contcar`），**不擅自改 NSW/IBRION**（#0016） |
+| 离子已收敛但缺 `vasprun.xml` | 先 `move_crisp` + cache；仍缺再考虑重交（优先补文件，避免对已 `reached` 的盲目重弛豫） |
 | 形成能 | `pydefect_vasp cr` 需要 `vasprun.xml`；缺则 `missing_vasprun`（#0010） |
 
 ---
@@ -104,12 +106,13 @@ crisp 把结果放在计算目录下的 **`output/`**，不是只认根目录。
 
 ## 测试
 
-`tests/test_defects.py::TestVaspJobDone`：NSW bump 假阳性、满 NSW 力达标、力失败等。  
-`TestVasprunRecovery`：续跑只 CONTCAR、不改 NSW/IBRION。
+- `tests/test_defects.py::TestVaspJobDone`：NSW bump、力达标/失败  
+- `TestVasprunRecovery`：续跑只 CONTCAR、不改 NSW/IBRION  
+- `tests/test_jobs_move_crisp.py`：`output/` 与根 `mtime` 择优  
 
 ---
 
 ## 相关 issue
 
-- #0010 missing vasprun · #0016 recovery 同参数 · #0017 recovery 后 re-analyze  
+- #0010 missing vasprun · #0016 recovery · #0017 recovery 后 re-analyze  
 - #0018 zero-gap unitcell · #0019 COMPLETE vs analyze  

@@ -296,11 +296,11 @@ SCF no convergence, BRION error, EDWAV error) via `recommended_fix()`.
 
 ### Output Consolidation
 
-`move_crisp_outputs(work_dir)` — moves VASP results from crisp's `output/`
-subdirectory up one level, then removes empty `output/`. **Does not overwrite**
-files already present at the work-dir root (existing root wins; duplicate under
-`output/` may be discarded). Convergence helpers still read `output/` if root
-file is missing.
+`move_crisp_outputs(work_dir)` — promotes crisp `output/` into the work dir,
+then removes `output/`. **Per-file mtime wins**: if both root and `output/` have
+the same name, the **newer** copy is kept (avoids a stale root OUTCAR blocking a
+fresh fetch). Convergence helpers still read `output/` if root is missing.
+
 
 
 ---
