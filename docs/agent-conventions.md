@@ -268,15 +268,23 @@ crisp jobs                # List all jobs (JSON output)
 
 ### VASP Convergence Detection
 
-`check_converged()` in `vasp/vasp/io.py`:
-- Parses OUTCAR for EDIFFG regex match + TOTAL-FORCE block max-force comparison
-- Returns `bool`, never raises
-- 7-case test matrix in `tests/test_defects.py`
+`check_converged()` in `vasp_sop/vasp/io.py` (detail: `docs/architecture/06-convergence.md`):
 
-CONTCAR restart loop in `defect/compute.py`:
-- Copies CONTCAR → POSCAR, sets ISTART=1, doubles NSW (capped at 3200)
-- Stalled detection via max-force comparison (no progress threshold = 99% of previous)
-- Up to 20 restart attempts
+- **Relaxation vs non-relaxation:** force/EDIFFG only for ionic relax
+  (`IBRION∈{1,2,3}` and `NSW>1`). Single-point / DFPT / NSW≤1 use job completion
+  (`General timing`), never ionic forces.
+- **Structural relax (VASP semantics):** look for
+  `reached required accuracy - stopping structural energy minimisation` in the log/OUTCAR.
+  Code currently implements the equivalent force gate; production scans match that string.
+- **OUTCAR location:** `{calc}/OUTCAR` or **`{calc}/output/OUTCAR`** (crisp pull path).
+- Run tags (NSW/IBRION/EDIFFG) preferred from **this OUTCAR**, not a rewritten INCAR after restart.
+- Returns `bool`, never raises; tests in `tests/test_defects.py`
+
+CONTCAR restart (`restart_from_contcar` / poll unconverged):
+- Copies CONTCAR → POSCAR, sets ISTART=1
+- **User policy:** re-runs for missing `vasprun` must **not** rewrite NSW/IBRION (same physics params)
+- Stalled detection / attempt limits in `_handle_unconverged_poll` and `defect/compute.py`
+
 
 ### Imports
 

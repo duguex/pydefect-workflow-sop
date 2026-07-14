@@ -257,10 +257,16 @@ VaspJob  (poll, done, task_name, work_dir)
 
 ### Convergence Detection (`check_converged`)
 
-- Parses OUTCAR for `EDIFFG` regex match
-- Compares maximum force from `TOTAL-FORCE` block against `EDIFFG`
+See full rules: [`docs/architecture/06-convergence.md`](docs/architecture/06-convergence.md).
+
+- **Structural relaxation** (`IBRION∈{1,2,3}`, `NSW>1`): ionic convergence.
+  - VASP authority string: `reached required accuracy - stopping structural energy minimisation`
+  - Implementation: last-block `max|F| ≤ |EDIFFG|` when `EDIFFG<0` (aligned with that message on production data); parameters from **OUTCAR** not restarted INCAR
+- **Non-relaxation** (`NSW≤1` or `IBRION∉{1,2,3}`): **not** force-based — `General timing` only
+- Looks for OUTCAR at `{dir}/OUTCAR` then **`{dir}/output/OUTCAR`** (crisp layout)
 - Returns `bool` (never raises)
-- Head + tail bounded read (~96 KB total) for performance on large OUTCARs
+
+`check_task_complete(path, task_type)`: band/dos also require `vasprun.xml` (root or `output/`); dielectric is timing-only.
 
 ### Error Diagnosis (11 Modes)
 
@@ -291,7 +297,11 @@ SCF no convergence, BRION error, EDWAV error) via `recommended_fix()`.
 ### Output Consolidation
 
 `move_crisp_outputs(work_dir)` — moves VASP results from crisp's `output/`
-subdirectory up one level, cleans up the empty `output/` directory.
+subdirectory up one level, then removes empty `output/`. **Does not overwrite**
+files already present at the work-dir root (existing root wins; duplicate under
+`output/` may be discarded). Convergence helpers still read `output/` if root
+file is missing.
+
 
 ---
 

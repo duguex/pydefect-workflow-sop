@@ -35,7 +35,7 @@
 | 轮询: tracked_dirs + crisp jobs | 无需 submissions.db | 07-08 |
 | 轮询: 收敛/不收敛/崩溃 三分支 | 不让不收敛的卡死 | 07-08 |
 | CONTCAR 重启 + 停滞检测 | 自动恢复不收敛的缺陷 | 07-08 |
-| check_converged: 受力 → NSW 比较 | 和 pymatgen 一致 | 07-08 |
-| check_task_complete: dielectric 跳过受力 | DFPT 不做弛豫 | 07-08 |
+| check_converged: 弛豫用力/VASP reached…；非弛豫只看结束 | 任务类型分流，见 06-convergence | 07-14 |
+| check_task_complete: dielectric 跳过受力；band/dos 要 vasprun | DFPT / 能带产物 | 07-08 |
 | Phase 改名 | 更直观 | 07-08 |
 | _phase() 跳过 failed 缺陷 | 不阻塞 COMPLETE | 07-08 |
