@@ -54,6 +54,8 @@ class TestVaspJobDone:
     def test_empty_outcar(self, tmp_path: Path):
         """OUTCAR exists but is empty."""
         (tmp_path / "OUTCAR").write_text("")
+        assert check_converged(tmp_path) is False
+
     def test_missing_force_block(self, tmp_path: Path):
         """Relaxation OUTCAR has completion but no TOTAL-FORCE block → unconverged."""
         (tmp_path / "INCAR").write_text("NSW = 50\nIBRION = 2\nEDIFFG = -0.03\n")
@@ -120,3 +122,21 @@ class TestVaspJobDone:
         (tmp_path / "OUTCAR").write_text(
             " General timing and accounting informations for this job:\n")
         assert check_converged(tmp_path) is True
+
+    def test_incar_nsw_bump_does_not_false_converge(self, tmp_path: Path):
+        """INCAR NSW raised for restart must not make exhausted OUTCAR look converged."""
+        _make_outcar(tmp_path, nsw=50, last_ionic_step=50, max_force=0.08)
+        # Simulate bulk CONTCAR restart bump
+        (tmp_path / "INCAR").write_text("NSW = 250\nIBRION = 2\nEDIFFG = -0.03\n")
+        assert check_converged(tmp_path) is False
+
+    def test_force_ok_at_full_nsw_is_converged(self, tmp_path: Path):
+        """n_ionic == NSW but max|F| <= |EDIFFG| → converged (avoid FN)."""
+        _make_outcar(tmp_path, nsw=50, last_ionic_step=50, max_force=0.02)
+        assert check_converged(tmp_path) is True
+
+    def test_force_fail_even_if_early_exit_counts(self, tmp_path: Path):
+        """If forces still high, do not trust n_ionic < NSW alone."""
+        _make_outcar(tmp_path, nsw=100, last_ionic_step=40, max_force=0.2)
+        assert check_converged(tmp_path) is False
+

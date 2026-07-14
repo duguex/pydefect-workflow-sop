@@ -86,43 +86,146 @@ def check_complete(path: Path) -> bool:
 # mtime-based memoisation: avoid re-reading unchanged OUTCARs across
 # successive batch-run cycles.
 _check_converged_cache: dict[Path, tuple[float, bool]] = {}
-# EDIFFG cached per directory (INCAR rarely changes).
-_ediffg_cache: dict[Path, float] = {}
+
+_NSW_RE = _re.compile(r"NSW\s*=\s*(\d+)", _re.I)
+_IBRION_RE = _re.compile(r"IBRION\s*=\s*(-?\d+)", _re.I)
+_EDIFFG_RE = _re.compile(
+    r"EDIFFG\s*=\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", _re.I
+)
+_FORCE_HDR = "TOTAL-FORCE (eV/Angst)"
+_TIMING_MARK = "General timing and accounting"
 
 
 def _tail_text(path: Path, n: int = 4096) -> str | None:
     """Read the last *n* bytes of *path* (no full-file read for large files)."""
-    size = path.stat().st_size
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
     if size <= n:
-        return path.read_text()
-    with path.open("rb") as f:
-        f.seek(size - n)
-        return f.read().decode("utf-8", errors="replace")
+        try:
+            return path.read_text()
+        except OSError:
+            return None
+    try:
+        with path.open("rb") as f:
+            f.seek(size - n)
+            return f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
 
 
-def _get_ediffg(path: Path) -> float:
-    """Return the EDIFFG value from INCAR (cached)."""
-    cached = _ediffg_cache.get(path)
-    if cached is not None:
-        return cached
-    incar_path = path / "INCAR"
-    efg = 0.03
-    if incar_path.is_file():
-        head = incar_path.read_text()[:4096]
-        m = _re.search(r"EDIFFG\s*=\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", head)
-        if m:
-            efg = abs(float(m.group(1)))
-    _ediffg_cache[path] = efg
-    return efg
+def _head_text(path: Path, n: int = 65536) -> str:
+    """Read the first *n* bytes of *path*."""
+    try:
+        with path.open("rb") as f:
+            return f.read(n).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _parse_run_tags(text: str) -> tuple[int | None, int | None, float | None]:
+    """Return (nsw, ibrion, ediffg_signed) from VASP tag text (OUTCAR/INCAR)."""
+    nsw = ibrion = None
+    ediffg: float | None = None
+    m = list(_NSW_RE.finditer(text))
+    if m:
+        nsw = int(m[-1].group(1))
+    m = list(_IBRION_RE.finditer(text))
+    if m:
+        ibrion = int(m[-1].group(1))
+    m = list(_EDIFFG_RE.finditer(text))
+    if m:
+        ediffg = float(m[-1].group(1))
+    return nsw, ibrion, ediffg
+
+
+def _count_total_force_blocks(outcar: Path) -> int:
+    """Count TOTAL-FORCE headers (≈ ionic steps) without loading whole file."""
+    needle = _FORCE_HDR.encode("ascii")
+    n = 0
+    try:
+        with outcar.open("rb") as f:
+            buf = b""
+            while True:
+                chunk = f.read(1024 * 1024)
+                if not chunk:
+                    break
+                data = buf + chunk
+                n += data.count(needle)
+                buf = data[-(len(needle) - 1) :] if len(needle) > 1 else b""
+    except OSError:
+        return 0
+    return n
+
+
+def _last_max_force(outcar: Path) -> float | None:
+    """Max |F| on atoms from the last TOTAL-FORCE block (eV/Å)."""
+    # Prefer a large tail window so the final ionic block is included.
+    try:
+        size = outcar.stat().st_size
+    except OSError:
+        return None
+    window = min(size, 2_500_000)
+    text = _tail_text(outcar, n=window) if window else None
+    if not text:
+        return None
+    idx = text.rfind(_FORCE_HDR)
+    if idx < 0:
+        return None
+    block = text[idx + len(_FORCE_HDR) :]
+    # Drop dashed separator line(s)
+    lines = block.splitlines()
+    forces: list[float] = []
+    started = False
+    for line in lines:
+        s = line.strip()
+        if not s:
+            if started:
+                break
+            continue
+        if set(s) <= {"-"}:
+            started = True
+            continue
+        if s.lower().startswith("total drift"):
+            break
+        if not started:
+            # synthetic OUTCARs may omit the dashed line
+            started = True
+        parts = s.split()
+        if len(parts) < 6:
+            if forces:
+                break
+            continue
+        try:
+            fx, fy, fz = float(parts[3]), float(parts[4]), float(parts[5])
+        except ValueError:
+            if forces:
+                break
+            continue
+        forces.append((fx * fx + fy * fy + fz * fz) ** 0.5)
+    if not forces:
+        return None
+    return max(forces)
 
 
 def check_converged(path: Path) -> bool:
-    """Ionic convergence check, aligned with pymatgen Vasprun.converged_ionic.
+    """Ionic / job-completion check for a VASP calculation directory.
 
-    For relaxation jobs (IBRION=1/2/3, NSW>1):
-      converged if VASP exited before max NSW (EDIFFG was met).
-    For single-point / DFPT (NSW≤1 or IBRION≠1/2/3):
-      converged if OUTCAR exists and VASP finished normally.
+    Rules
+    -----
+    1. OUTCAR must exist and contain ``General timing and accounting``
+       (VASP finished writing results).
+    2. Run parameters prefer **OUTCAR** (this job) over **INCAR** (may already
+       be edited for a CONTCAR restart / NSW bump).
+    3. Single-point / DFPT / MD (``NSW≤1`` or ``IBRION∉{1,2,3}``): timing only.
+    4. Ionic relaxation (``IBRION∈{1,2,3}`` and ``NSW>1``):
+       - If ``EDIFFG < 0`` (force criterion): **hard gate**
+         ``max|F| ≤ |EDIFFG|`` on the last TOTAL-FORCE block.
+       - Else (energy criterion / missing forces): fall back to
+         ``n_ionic < NSW_run`` (pymatgen-style early-exit heuristic).
+
+    Never raises.
     """
     outcar: Path | None = None
     for cand in (path / "OUTCAR", path / "output" / "OUTCAR"):
@@ -140,39 +243,69 @@ def check_converged(path: Path) -> bool:
     if cached is not None and cached[0] == mtime:
         return cached[1]
 
-    # VASP must have finished normally
-    tail = _tail_text(outcar, n=4096)
-    if tail is None or "General timing and accounting" not in tail:
+    tail = _tail_text(outcar, n=8192)
+    if tail is None or _TIMING_MARK not in tail:
         _check_converged_cache[outcar] = (mtime, False)
         return False
 
-    # Read INCAR for NSW, IBRION
-    nsw = 0
-    ibrion = -1
-    incar_path = path / "INCAR"
-    if incar_path.is_file():
-        incar_text = incar_path.read_text()[:4096]
-        m = _re.search(r"NSW\s*=\s*(\d+)", incar_text)
-        if m:
-            nsw = int(m.group(1))
-        m = _re.search(r"IBRION\s*=\s*(\d+)", incar_text)
-        if m:
-            ibrion = int(m.group(1))
+    # Prefer OUTCAR tags (run that produced this OUTCAR); INCAR is fallback only.
+    head = _head_text(outcar, 65536)
+    nsw, ibrion, ediffg = _parse_run_tags(head)
+    # OUTCAR sometimes prints tags late in the file (rare); also search tail.
+    if nsw is None or ibrion is None or ediffg is None:
+        t_nsw, t_ibr, t_ed = _parse_run_tags(tail)
+        if nsw is None:
+            nsw = t_nsw
+        if ibrion is None:
+            ibrion = t_ibr
+        if ediffg is None:
+            ediffg = t_ed
 
-    # Single-point / DFPT / NSW≤1 → no relaxation check needed
+    incar_path = path / "INCAR"
+    if incar_path.is_file() and (nsw is None or ibrion is None or ediffg is None):
+        try:
+            incar_text = incar_path.read_text()[:8192]
+        except OSError:
+            incar_text = ""
+        i_nsw, i_ibr, i_ed = _parse_run_tags(incar_text)
+        if nsw is None:
+            nsw = i_nsw
+        if ibrion is None:
+            ibrion = i_ibr
+        if ediffg is None:
+            ediffg = i_ed
+
+    if nsw is None:
+        nsw = 0
+    if ibrion is None:
+        ibrion = -1
+
+    # Single-point / DFPT / MD / unknown-static: finished job is enough
     if nsw <= 1 or ibrion not in (1, 2, 3):
         _check_converged_cache[outcar] = (mtime, True)
         return True
 
-    # Relaxation (IBRION=1/2/3, NSW>1):
-    # converged if VASP exited before max NSW (EDIFFG was met)
-    text = outcar.read_text()
-    n_ionic = text.count("TOTAL-FORCE (eV/Angst)")
-    # Must have at least 1 ionic step (initial structure) and fewer than NSW
-    result = n_ionic >= 1 and n_ionic < nsw
+    # --- Ionic relaxation ---
+    max_f = _last_max_force(outcar)
 
+    # Force criterion (EDIFFG < 0): hard gate — eliminates NSW-bump FP
+    if ediffg is not None and ediffg < 0:
+        if max_f is None:
+            result = False
+        else:
+            result = max_f <= abs(ediffg) + 1e-8
+        _check_converged_cache[outcar] = (mtime, result)
+        return result
+
+    # Energy criterion or missing EDIFFG: NSW early-exit with *run* NSW
+    n_ionic = _count_total_force_blocks(outcar)
+    if n_ionic < 1:
+        result = False
+    else:
+        result = n_ionic < nsw
     _check_converged_cache[outcar] = (mtime, result)
     return result
+
 
 _REQUIRED_UC_OUTPUTS: dict[str, list[str]] = {
     "band":       ["OUTCAR", "vasprun.xml"],
