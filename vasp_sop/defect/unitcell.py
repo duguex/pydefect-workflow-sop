@@ -152,5 +152,23 @@ def build_unitcell_yaml(uc_root: Path, config: PipelineConfig) -> None:
     )
     try:
         run_local(cmd, cwd=uc_root)
-    except Exception:
-        logger.warning("pydefect_vasp u failed (likely zero band gap), skipping unitcell.yaml.")
+    except Exception as exc:
+        logger.warning(
+            "pydefect_vasp u failed (likely zero band gap or missing "
+            "vasprun): %s — unitcell.yaml not written",
+            exc,
+        )
+        try:
+            (uc_root / "unitcell_build_status.json").write_text(
+                '{"status": "failed", "reason": "pydefect_vasp_u_failed"}\n'
+            )
+        except OSError:
+            pass
+        return
+    if uc_yaml.is_file():
+        try:
+            (uc_root / "unitcell_build_status.json").write_text(
+                '{"status": "ok"}\n'
+            )
+        except OSError:
+            pass
