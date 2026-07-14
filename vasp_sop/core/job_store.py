@@ -1,7 +1,7 @@
 """Per-calculation VASP job state tracking — SQLite-backed.
 
 Tracks each VASP calculation directory through:
-    pending -> submitted -> converged
+    pending -> submitted -> converged | unconverged | failed
 
 Also supports a tracked table for active job directories awaiting
 completion checks.
@@ -23,11 +23,14 @@ _DEFAULT_DB = "jobs.db"
 def _db_path(given: Path | None) -> Path:
     if given is not None:
         return given
-    from vasp_sop.core.cache import CACHE_ROOT
-    return CACHE_ROOT / _DEFAULT_DB
+    # Job lifecycle state lives under ~/.vasp_sop (not vasp-cache results root).
+    from vasp_sop.core.cache import SOP_ROOT
+    return SOP_ROOT / _DEFAULT_DB
 
 
-_VALID_STATUSES = frozenset({"pending", "submitted", "converged", "failed"})
+_VALID_STATUSES = frozenset({
+    "pending", "submitted", "converged", "unconverged", "failed",
+})
 
 
 class JobStore:
@@ -178,3 +181,78 @@ class JobStore:
 
     def close(self) -> None:
         pass
+
+
+def calc_done_on_disk(path: Path, *, task_type: str = "") -> bool:
+    """True if *path* is complete enough to record as converged.
+
+    Unitcell band/dos/dielectric use :func:`check_task_complete`; all other
+    calcs use ionic :func:`check_converged`.
+    """
+    path = Path(path)
+    name = task_type or path.name
+    if name in ("band", "dos", "dielectric"):
+        from vasp_sop.vasp.io import check_task_complete
+        return check_task_complete(path, name)
+    from vasp_sop.vasp.io import check_converged
+    return check_converged(path)
+
+
+def record_if_done(
+    store: JobStore,
+    path: Path,
+    *,
+    source: str = "batch_run",
+    task_type: str = "",
+    task_name: str = "",
+) -> str:
+    """Record converged or unconverged from disk truth. Returns status written."""
+    path = Path(path)
+    p = str(path.resolve())
+    if calc_done_on_disk(path, task_type=task_type):
+        store.record(p, "converged", source=source, task_name=task_name)
+        return "converged"
+    # Finished but not done, or incomplete — only mark unconverged if OUTCAR exists
+    out = path / "OUTCAR"
+    if not out.is_file():
+        out = path / "output" / "OUTCAR"
+    if out.is_file():
+        store.record(
+            p, "unconverged", source=source, task_name=task_name,
+            reason="disk_not_converged",
+        )
+        return "unconverged"
+    return store.latest(p) or "pending"
+
+
+def reconcile_false_converged(
+    store: JobStore | None = None,
+    *,
+    path_prefix: str | None = None,
+) -> dict[str, int]:
+    """Rewrite latest==converged entries that fail disk checks → unconverged.
+
+    Returns counts: checked, fixed, kept.
+    """
+    store = store or JobStore()
+    stats = {"checked": 0, "fixed": 0, "kept": 0, "missing": 0}
+    for dir_path, status in store.latest_all().items():
+        if status != "converged":
+            continue
+        if path_prefix and not dir_path.startswith(path_prefix):
+            continue
+        stats["checked"] += 1
+        p = Path(dir_path)
+        if not p.is_dir():
+            stats["missing"] += 1
+            continue
+        if calc_done_on_disk(p):
+            stats["kept"] += 1
+            continue
+        store.record(
+            dir_path, "unconverged", source="reconcile",
+            reason="false_converged",
+        )
+        store.untrack(dir_path)
+        stats["fixed"] += 1
+    return stats

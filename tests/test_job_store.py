@@ -62,3 +62,28 @@ class TestJobStore:
         import re
         with pytest.raises(ValueError, match="Invalid status"):
             store.record("/sys/x", "invalid_status")
+
+    def test_unconverged_status_valid(self, store):
+        store.record("/sys/def", "unconverged", reason="nsw_exhausted")
+        assert store.latest("/sys/def") == "unconverged"
+
+    def test_reconcile_false_converged(self, store, tmp_path: Path, monkeypatch):
+        from vasp_sop.core import job_store as js_mod
+
+        d = tmp_path / "Va_X_0"
+        d.mkdir()
+        (d / "OUTCAR").write_text("no timing\n")
+        store.record(str(d.resolve()), "converged")
+        monkeypatch.setattr(js_mod, "calc_done_on_disk", lambda p, task_type="": False)
+        stats = js_mod.reconcile_false_converged(store)
+        assert stats["fixed"] == 1
+        assert store.latest(str(d.resolve())) == "unconverged"
+
+    def test_record_if_done_converged(self, store, tmp_path: Path, monkeypatch):
+        from vasp_sop.core import job_store as js_mod
+
+        d = tmp_path / "band"
+        d.mkdir()
+        monkeypatch.setattr(js_mod, "calc_done_on_disk", lambda p, task_type="": True)
+        assert js_mod.record_if_done(store, d) == "converged"
+        assert store.latest(str(d.resolve())) == "converged"
