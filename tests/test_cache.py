@@ -224,8 +224,8 @@ class TestVaspResultsCache:
         assert result["total_energy"] == -9.18
         assert result["converged"] == 1
         assert result["nsites"] == 1
-        assert result["incar_json"] is not None
-
+        # blob JSON fields abandoned with JSONStore; file payload is in vasp-cache
+        assert result.get("total_energy") == -9.18
     def test_vasp_results_put_missing_src_files(self, tmp_path: Path):
         """Partial files still produce an entry (energy only)."""
         src = tmp_path / "src"
@@ -236,9 +236,8 @@ class TestVaspResultsCache:
         result = _cache.vasp_results_get("GaN", "804")
         assert result is not None
         assert result["total_energy"] == -9.18
-        assert result["converged"] == 1
-        assert result["incar_json"] is None
-        assert result["structure_json"] is None
+        assert result.get("total_energy") == -9.18
+        assert result.get("converged") == 1
 
     def test_vasp_results_put_skips_no_outcar(self, tmp_path: Path):
         """No OUTCAR produces no cache entry."""
