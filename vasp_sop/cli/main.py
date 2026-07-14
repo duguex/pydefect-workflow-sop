@@ -1343,19 +1343,63 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
                 _submit_or_skip(task_dir, f"uc-{task}", s["name"])
 
             if df_root.is_dir() and not (df_root / "defect_energy_summary.json").is_file():
+                from vasp_sop.vasp.io import (
+                    has_vasprun,
+                    recover_vasprun_artifacts,
+                    prepare_vasprun_recovery_run,
+                )
                 for child in sorted(df_root.iterdir()):
-                    if not child.is_dir():
+                    if not child.is_dir() or child.name == "perfect":
                         continue
                     if not input_ready(child):
                         continue
-                    if check_converged(child):
-                        if JobStore().latest(str(child.resolve())) != "converged":
-                            JobStore().record(str(child.resolve()), "converged", source="backfill")
-                        continue
                     latest = JobStore().latest(str(child.resolve()))
-                    if latest in ("submitted", "failed", "converged", "unconverged"):
+                    if latest == "submitted":
+                        continue
+
+                    # Ion-converged but missing vasprun/calc_results → recovery (#0016)
+                    if check_converged(child):
+                        has_cr = (child / "calc_results.json").is_file()
+                        if has_cr or has_vasprun(child) or recover_vasprun_artifacts(child):
+                            if JobStore().latest(str(child.resolve())) != "converged":
+                                JobStore().record(
+                                    str(child.resolve()), "converged", source="backfill",
+                                )
+                            continue
+                        # Still no vasprun: single-point from CONTCAR
+                        if latest in ("failed",) and "vasprun_recovery" not in (
+                            (JobStore().history(str(child.resolve())) or [{}])[-1].get(
+                                "reason", ""
+                            )
+                        ):
+                            # allow one recovery after failed recovery
+                            pass
+                        if not prepare_vasprun_recovery_run(child):
+                            logger.warning(
+                                "%s: cannot prep vasprun recovery (inputs)", child.name,
+                            )
+                            continue
+                        logger.info(
+                            "%s: resubmit for missing vasprun (CONTCAR/static)",
+                            child.name,
+                        )
+                        job = _submit_or_skip(
+                            child, f"df-vr-{child.name}", s["name"],
+                        )
+                        # _submit_or_skip records submitted; add reason via history
+                        if JobStore().latest(str(child.resolve())) == "submitted":
+                            JobStore().record(
+                                str(child.resolve()),
+                                "submitted",
+                                source="vasprun_recovery",
+                                reason="vasprun_recovery",
+                            )
+                        continue
+
+                    if latest in ("failed", "converged", "unconverged"):
                         continue
                     _submit_or_skip(child, f"df-{child.name}", s["name"])
+
 
             # UC done only when disk outputs are complete (not JobStore alone).
             from vasp_sop.vasp.io import check_task_complete as _ctc

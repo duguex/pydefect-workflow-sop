@@ -371,3 +371,65 @@ def restart_from_contcar(path: Path) -> None:
     if not has_istart:
         new_lines.append("ISTART = 1")
     incar.write_text("\n".join(new_lines) + "\n")
+
+def has_vasprun(path: Path) -> bool:
+    """True if vasprun.xml exists at *path* or path/output/."""
+    return (path / "vasprun.xml").is_file() or (
+        path / "output" / "vasprun.xml"
+    ).is_file()
+
+
+def recover_vasprun_artifacts(path: Path) -> bool:
+    """Try to surface vasprun.xml via crisp output/ + cache. Return True if present."""
+    from vasp_sop.core.jobs import move_crisp_outputs
+    from vasp_sop.core.cache import restore_from_cache
+
+    move_crisp_outputs(path)
+    if has_vasprun(path):
+        return True
+    try:
+        restore_from_cache(path)
+    except Exception:
+        pass
+    return has_vasprun(path)
+
+
+def prepare_vasprun_recovery_run(path: Path) -> bool:
+    """Prep a cheap single-point VASP run to regenerate vasprun.xml (#0016).
+
+    - CONTCAR → POSCAR when CONTCAR exists (else keep POSCAR)
+    - ISTART=1, NSW=0, IBRION=-1 (static electronic SCF only)
+
+    Returns True if inputs look submittable afterward.
+    """
+    contcar = path / "CONTCAR"
+    if contcar.is_file():
+        restart_from_contcar(path)
+    incar = path / "INCAR"
+    if not incar.is_file():
+        return input_ready(path)
+    text = incar.read_text()
+    lines_out: list[str] = []
+    seen = {"NSW": False, "IBRION": False, "ISTART": False}
+    for line in text.splitlines():
+        s = line.strip().upper()
+        if s.startswith("NSW"):
+            lines_out.append("NSW = 0")
+            seen["NSW"] = True
+        elif s.startswith("IBRION"):
+            lines_out.append("IBRION = -1")
+            seen["IBRION"] = True
+        elif s.startswith("ISTART"):
+            lines_out.append("ISTART = 1")
+            seen["ISTART"] = True
+        else:
+            lines_out.append(line)
+    if not seen["NSW"]:
+        lines_out.append("NSW = 0")
+    if not seen["IBRION"]:
+        lines_out.append("IBRION = -1")
+    if not seen["ISTART"]:
+        lines_out.append("ISTART = 1")
+    incar.write_text("\n".join(lines_out) + "\n")
+    return input_ready(path)
+
