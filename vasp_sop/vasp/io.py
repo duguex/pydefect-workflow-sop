@@ -395,41 +395,17 @@ def recover_vasprun_artifacts(path: Path) -> bool:
 
 
 def prepare_vasprun_recovery_run(path: Path) -> bool:
-    """Prep a cheap single-point VASP run to regenerate vasprun.xml (#0016).
+    """Prep resubmit for missing vasprun.xml (#0016).
 
-    - CONTCAR → POSCAR when CONTCAR exists (else keep POSCAR)
-    - ISTART=1, NSW=0, IBRION=-1 (static electronic SCF only)
+    Policy (user): **do not change calculation parameters** on re-run.
+    Only CONTCAR → POSCAR and ISTART=1 when CONTCAR exists.
 
     Returns True if inputs look submittable afterward.
     """
     contcar = path / "CONTCAR"
     if contcar.is_file():
         restart_from_contcar(path)
-    incar = path / "INCAR"
-    if not incar.is_file():
-        return input_ready(path)
-    text = incar.read_text()
-    lines_out: list[str] = []
-    seen = {"NSW": False, "IBRION": False, "ISTART": False}
-    for line in text.splitlines():
-        s = line.strip().upper()
-        if s.startswith("NSW"):
-            lines_out.append("NSW = 0")
-            seen["NSW"] = True
-        elif s.startswith("IBRION"):
-            lines_out.append("IBRION = -1")
-            seen["IBRION"] = True
-        elif s.startswith("ISTART"):
-            lines_out.append("ISTART = 1")
-            seen["ISTART"] = True
-        else:
-            lines_out.append(line)
-    if not seen["NSW"]:
-        lines_out.append("NSW = 0")
-    if not seen["IBRION"]:
-        lines_out.append("IBRION = -1")
-    if not seen["ISTART"]:
-        lines_out.append("ISTART = 1")
-    incar.write_text("\n".join(lines_out) + "\n")
     return input_ready(path)
+
+
 

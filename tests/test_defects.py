@@ -141,20 +141,22 @@ class TestVaspJobDone:
         assert check_converged(tmp_path) is False
 
 
-
 class TestVasprunRecovery:
-    def test_prepare_copies_contcar_and_static_incar(self, tmp_path: Path):
+    def test_prepare_copies_contcar_keeps_nsw_ibrion(self, tmp_path: Path):
+        """Re-run must not rewrite NSW/IBRION — only CONTCAR→POSCAR + ISTART."""
         from vasp_sop.vasp.io import prepare_vasprun_recovery_run
 
         (tmp_path / "CONTCAR").write_text("contcar-body\n")
         (tmp_path / "POSCAR").write_text("old-poscar\n")
-        (tmp_path / "INCAR").write_text("NSW = 50\nIBRION = 2\n")
+        (tmp_path / "INCAR").write_text("NSW = 50\nIBRION = 2\nEDIFFG = -0.03\n")
         (tmp_path / "POTCAR").write_text("p\n")
         (tmp_path / "KPOINTS").write_text("k\n")
         assert prepare_vasprun_recovery_run(tmp_path)
         assert (tmp_path / "POSCAR").read_text() == "contcar-body\n"
         text = (tmp_path / "INCAR").read_text()
-        assert "NSW = 0" in text
-        assert "IBRION = -1" in text
+        assert "NSW = 50" in text
+        assert "IBRION = 2" in text
+        assert "EDIFFG = -0.03" in text
         assert "ISTART = 1" in text
+
 

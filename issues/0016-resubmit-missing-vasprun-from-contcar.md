@@ -11,10 +11,9 @@ Ionically converged defects without `vasprun.xml` never re-enter submit (`check_
 ## Strategy
 
 1. `move_crisp_outputs` + cache restore  
-2. If still no vasprun / calc_results: **`restart_from_contcar`** (CONTCAR→POSCAR, ISTART=1), set **NSW=0 / IBRION=-1** single-point recovery run, `submit_vasp`  
-3. JobStore reason=`vasprun_recovery`
-
-## Acceptance
+2. If still no vasprun / calc_results: **`restart_from_contcar` only**  
+   (CONTCAR→POSCAR, ISTART=1). **Do not change NSW/IBRION/ENCUT or other physics tags.**  
+3. `submit_vasp`, JobStore reason=`vasprun_recovery`
 
 - Converged + missing vasprun no longer permanently skipped  
 - Recovery uses CONTCAR when present  
