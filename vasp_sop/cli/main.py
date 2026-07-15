@@ -1704,102 +1704,92 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
     if dry_run:
         _print_info("Dry-run mode: will build defect structures and generate inputs, NO VASP submission.\n")
 
-    if not dry_run:
-        # ── Backfill cache ──────────────────────────────────────────
-        backfilled = 0
-        for s in sys_list:
-            cpd_root = s["root"] / _CPD
-            if not cpd_root.is_dir():
-                continue
-            for pd in cpd_root.iterdir():
-                if not pd.is_dir() or "_mp-" not in pd.name:
-                    continue
-                from vasp_sop.core.job_store import JobStore
-                if JobStore().latest(str(pd.resolve())) == "converged":
-                    continue
-                if not check_converged(pd):
-                    continue
-                from vasp_sop.core.jobs import move_crisp_outputs
-                move_crisp_outputs(pd)
-                formula, mpid = pd.name.split("_mp-", 1)
-                _cache_put(pd, formula=formula, task_name=f"{formula}_mp-{mpid}")
-                backfilled += 1
-                JobStore().record(str(pd.resolve()), "converged", source="backfill")
-        if backfilled:
-            logger.info("Backfilled %d already-converged phase results into cache.", backfilled)
-
-        # ── Sweep for orphan crisp outputs ──────────────────────────
-        orphaned = 0
-        for s in sys_list:
-            for root_dir in (s["root"] / _UC, s["root"] / _DF):
-                if not root_dir.is_dir():
-                    continue
-                for child in root_dir.iterdir():
-                    if not child.is_dir():
-                        continue
-                    output_dir = child / "output"
-                    if not output_dir.is_dir():
-                        continue
-                    if not (output_dir / "OUTCAR").is_file():
-                        continue
-                    move_crisp_outputs(child)
-                    # Only cache converged dirs — TaskDoc parse of partial
-                    # OUTCARs is expensive and pollutes the store (issue #0006).
-                    if check_converged(child) and cache_lookup(child) is None:
-                        _cache_phase_results(child)
-                    orphaned += 1
-        if orphaned:
-            logger.info("Processed %d orphaned crisp outputs.", orphaned)
-
-        # ── Poll tracked dirs ──────────────────────────────────────
-        from vasp_sop.vasp.io import check_converged, _tail_text
-        from vasp_sop.core.jobs import move_crisp_outputs
-        import time as _time
-        completed = 0
-        crispy = _crisp_active_dirs(skip=False)
-        from vasp_sop.core.job_store import JobStore
-
-        for row in JobStore().tracked_dirs():
-            wd = Path(row["dir_path"])
-            wd_str = str(wd.resolve())
-
-            if wd_str in crispy:
-                continue
-
-            if check_converged(wd):
-                move_crisp_outputs(wd)
-                _cache_phase_results(wd)
-                JobStore().record(wd_str, "converged")
-                JobStore().untrack(wd_str)
-                completed += 1
-                continue
-
-            outcar = wd / "OUTCAR"
-            if not outcar.is_file():
-                outcar = wd / "output" / "OUTCAR"
-            if not outcar.is_file():
-                if _time.time() - row["submitted_at"] > 7 * 86400:
-                    JobStore().record(wd_str, "failed", reason="orphaned")
-                    JobStore().untrack(wd_str)
-                continue
-
-            tail = _tail_text(outcar, 4096)
-            if not tail or "General timing and accounting" not in tail:
-                JobStore().record(wd_str, "failed", reason="vasp_crash")
-                JobStore().untrack(wd_str)
-                continue
-
-            # VASP 正常结束但未收敛 → CONTCAR 重启
-            _handle_unconverged_poll(wd)
-
-        if completed:
-            _print_info(f"  Cached {completed} completed calculation(s).")
 
     # ── Loop context ────────────────────────────────────────────
     first_pass = True
 
     try:
         while True:
+            if not dry_run:
+                # ── Backfill cache ──────────────────────────────────
+                from vasp_sop.core.job_store import JobStore
+                from vasp_sop.vasp.io import check_converged as _cc, _tail_text
+                from vasp_sop.core.jobs import move_crisp_outputs
+                import time as _time
+
+                backfilled = 0
+                for s in sys_list:
+                    cpd_root = s["root"] / _CPD
+                    if not cpd_root.is_dir():
+                        continue
+                    for pd in cpd_root.iterdir():
+                        if not pd.is_dir() or "_mp-" not in pd.name:
+                            continue
+                        if JobStore().latest(str(pd.resolve())) == "converged":
+                            continue
+                        if not _cc(pd):
+                            continue
+                        move_crisp_outputs(pd)
+                        formula, mpid = pd.name.split("_mp-", 1)
+                        _cache_put(pd, formula=formula, task_name=f"{formula}_mp-{mpid}")
+                        backfilled += 1
+                        JobStore().record(str(pd.resolve()), "converged", source="backfill")
+                if backfilled:
+                    logger.info("Backfilled %d already-converged phase results.", backfilled)
+
+                # ── Sweep orphan ───────────────────────────────────
+                orphaned = 0
+                for s in sys_list:
+                    for root_dir in (s["root"] / _UC, s["root"] / _DF):
+                        if not root_dir.is_dir():
+                            continue
+                        for child in root_dir.iterdir():
+                            if not child.is_dir():
+                                continue
+                            out_dir = child / "output"
+                            if not out_dir.is_dir():
+                                continue
+                            if not (out_dir / "OUTCAR").is_file():
+                                continue
+                            move_crisp_outputs(child)
+                            if _cc(child) and cache_lookup(child) is None:
+                                _cache_phase_results(child)
+                            orphaned += 1
+                if orphaned:
+                    logger.info("Processed %d orphaned crisp outputs.", orphaned)
+
+                # ── Poll tracked dirs ───────────────────────────────
+                completed = 0
+                crispy = _crisp_active_dirs(skip=False)
+                for row in JobStore().tracked_dirs():
+                    wd = Path(row["dir_path"])
+                    wd_str = str(wd.resolve())
+                    if wd_str in crispy:
+                        continue
+                    if _cc(wd):
+                        move_crisp_outputs(wd)
+                        _cache_phase_results(wd)
+                        JobStore().record(wd_str, "converged")
+                        JobStore().untrack(wd_str)
+                        completed += 1
+                        continue
+                    outcar = wd / "OUTCAR"
+                    if not outcar.is_file():
+                        outcar = wd / "output" / "OUTCAR"
+                    if not outcar.is_file():
+                        if _time.time() - row["submitted_at"] > 7 * 86400:
+                            JobStore().record(wd_str, "failed", reason="orphaned")
+                            JobStore().untrack(wd_str)
+                        continue
+                    tail = _tail_text(outcar, 4096)
+                    if not tail or "General timing and accounting" not in tail:
+                        JobStore().record(wd_str, "failed", reason="vasp_crash")
+                        JobStore().untrack(wd_str)
+                        continue
+                    _handle_unconverged_poll(wd)
+                if completed:
+                    _print_info(f"  Cached {completed} completed calculation(s).")
+
             n_skipped = 0
             errors: list[tuple[str, str]] = []  # (name, reason)
             for idx, s in enumerate(sys_list, 1):
