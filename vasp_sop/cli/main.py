@@ -1522,6 +1522,9 @@ def _handle_unconverged_poll(wd: Path) -> None:
     the last restart, the job is stuck and we give up immediately
     instead of blindly retrying.
     """
+    import logging
+
+    _log = logging.getLogger(__name__)
     from vasp_sop.core.job_store import JobStore
     from vasp_sop.vasp.io import restart_from_contcar
     from vasp_sop.core.jobs import submit_vasp
@@ -1548,7 +1551,7 @@ def _handle_unconverged_poll(wd: Path) -> None:
                                               reason=f"stalled,max_f={cur_f:.4f}",
                                               attempt=attempt)
                             JobStore().untrack(wd_str)
-                            print(f"  ! {wd.name:<18} stalled (max_f {prev_f:.4f}→{cur_f:.4f}), giving up")
+                            _log.warning("! %s stalled (max_f %.4f→%.4f), giving up", wd.name, prev_f, cur_f)
                             return
                         break
                 break
@@ -1558,7 +1561,7 @@ def _handle_unconverged_poll(wd: Path) -> None:
                           reason=f"unconverged,max_f={cur_f:.4f}",
                           attempt=attempt)
         JobStore().untrack(wd_str)
-        print(f"  ! {wd.name:<18} unconverged after {attempt} restart(s), giving up")
+        _log.error("! %s unconverged after %d restart(s), giving up", wd.name, attempt)
         return
 
     restart_from_contcar(wd)
@@ -1578,7 +1581,7 @@ def _handle_unconverged_poll(wd: Path) -> None:
     JobStore().record(wd_str, "submitted",
                       source=job.task_name, attempt=attempt + 1,
                       reason=f"restart,prev_f={cur_f:.4f}")
-    print(f"  → {wd.name:<18} restart #{attempt+1} (max_f {cur_f:.4f}, {job.task_name})")
+    _log.info("→ %s restart #%d (max_f %.4f, %s)", wd.name, attempt + 1, cur_f, job.task_name)
 
 def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                exclude: list[str] | None = None, loop: bool = False) -> None:
