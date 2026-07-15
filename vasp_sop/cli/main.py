@@ -816,6 +816,9 @@ def _add_batch_parser(subparsers) -> None:
         "--exclude", action="append", default=[],
         help="Exclude a system by directory name (repeatable: --exclude hBN --exclude orth-SiC)",
     )
+    rp.add_argument("--loop", action="store_true",
+                    help="Keep polling and advancing until all systems complete")
+
 
     # progress
     pp = sub.add_parser("progress", help="Show per-system completion percentage")
@@ -833,11 +836,11 @@ def _handle_batch(args: argparse.Namespace) -> None:
         _batch_history(args.root.resolve(), system=args.system)
     elif args.batch_action == "generate-inputs":
         _batch_generate_inputs(args.root.resolve(), unitcell=args.unitcell)
-    elif args.batch_action == "submit":
-        _batch_submit(args.root.resolve(), all_phases=args.all_phases)
+        _batch_run(args.root.resolve(), poll_interval=args.poll, dry_run=args.dry_run,
+                   exclude=args.exclude, loop=args.loop)
     elif args.batch_action == "run":
         _batch_run(args.root.resolve(), poll_interval=args.poll, dry_run=args.dry_run,
-                   exclude=args.exclude)
+                   exclude=args.exclude, loop=args.loop)
     elif args.batch_action == "progress":
         _batch_progress(args.root.resolve())
 
@@ -1562,17 +1565,11 @@ def _handle_unconverged_poll(wd: Path) -> None:
     print(f"  → {wd.name:<18} restart #{attempt+1} (max_f {cur_f:.4f}, {job.task_name})")
 
 def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
-               exclude: list[str] | None = None) -> None:
-    """Batch pipeline — advance all systems by one cycle (single pass).
+               exclude: list[str] | None = None, loop: bool = False) -> None:
+    """Batch pipeline — advance all systems by one cycle (single pass or loop).
 
-    One-shot: advances each system once by its current phase, submits
-    ready VASP jobs, then exits.  No background loop, no worker pool —
-    runs serially so output is real-time and no orphan processes leak.
-
-    When *dry_run* is True, build/regenerate inputs locally but do NOT
-    submit any VASP jobs.
-
-    *exclude* — list of system directory names to skip.
+    One-shot: advances each system once, submits ready VASP jobs, then exits.
+    Use ``--loop`` on the CLI for continuous poll-and-advance mode.
     """
     import time as _time
     from vasp_sop.vasp.io import check_converged, input_ready, prepare_inputs
@@ -1766,48 +1763,61 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
         if completed:
             print(f"  Cached {completed} completed calculation(s).")
 
-    # ── Advance all systems (serial, single pass) ────────────────────
-    n_skipped = 0
-    errors: list[tuple[str, str]] = []  # (name, reason)
-    for idx, s in enumerate(sys_list, 1):
-        name = s["name"]
-        p = _phase(s)
-        if p in ("COMPLETE", "NO_TARGET"):
-            n_skipped += 1
-            continue
+    # ── Loop context ────────────────────────────────────────────
+    first_pass = True
 
-        print(f"  [{idx}/{len(sys_list)}] {name:<18} {p} ...", end="", flush=True)
-        try:
-            _advance_one_system(s, dry_run=dry_run)
-            print(" done")
-        except Exception as exc:
-            reason = str(exc).split("(")[0].strip() or type(exc).__name__
-            _logger.error("%s advance failed: %s", name, exc)
-            print(f" FAILED ({reason})")
-            errors.append((name, reason))
+    try:
+        while True:
+            n_skipped = 0
+            errors: list[tuple[str, str]] = []  # (name, reason)
+            for idx, s in enumerate(sys_list, 1):
+                name = s["name"]
+                p = _phase(s)
+                if p in ("COMPLETE", "NO_TARGET"):
+                    n_skipped += 1
+                    continue
 
-    if n_skipped:
-        print(f"  [{n_skipped}/{len(sys_list)} systems already done, skipped]\n")
+                print(f"  [{idx}/{len(sys_list)}] {name:<18} {p} ...", end="", flush=True)
+                try:
+                    _advance_one_system(s, dry_run=dry_run)
+                    print(" done")
+                except Exception as exc:
+                    reason = str(exc).split("(")[0].strip() or type(exc).__name__
+                    _logger.error("%s advance failed: %s", name, exc)
+                    print(f" FAILED ({reason})")
+                    errors.append((name, reason))
 
-    # ── Final status ──────────────────────────────────────────────
-    phases = [_phase(s) for s in sys_list]
-    done_count = sum(1 for p in phases if p in ("COMPLETE", "NO_TARGET"))
-    counts = {p: phases.count(p) for p in sorted(set(phases))}
-    parts = [f"{p}={n}" for p, n in sorted(counts.items())]
-    print(f"{'  '.join(parts)}")
+            if n_skipped:
+                print(f"  [{n_skipped}/{len(sys_list)} systems already done, skipped]\n")
 
-    if errors:
-        print(f"\n  ⚠ {len(errors)} system(s) with errors:")
-        for name, reason in errors:
-            print(f"    {name:<18}  {reason}")
+            # ── Status ──────────────────────────────────────────
+            phases = [_phase(s) for s in sys_list]
+            done_count = sum(1 for p in phases if p in ("COMPLETE", "NO_TARGET"))
+            counts = {p: phases.count(p) for p in sorted(set(phases))}
+            parts = [f"{p}={n}" for p, n in sorted(counts.items())]
+            print(f"{'  '.join(parts)}")
 
-    if done_count == len(sys_list):
-        print("\nAll systems complete.")
-    else:
-        still = len(sys_list) - done_count
-        blocked = len(errors)
-        running = still - blocked
-        print(f"\n{running} running, {blocked} blocked, {still} remaining — re-run `vasp-sop batch run .` after VASP jobs complete.")
+            if errors:
+                print(f"\n  ⚠ {len(errors)} system(s) with errors:")
+                for name, reason in errors:
+                    print(f"    {name:<18}  {reason}")
+
+            if done_count == len(sys_list):
+                print("\nAll systems complete.")
+                break
+
+            if not loop:
+                still = len(sys_list) - done_count
+                blocked = len(errors)
+                running = still - blocked
+                print(f"\n{running} running, {blocked} blocked, {still} remaining — re-run `vasp-sop batch run .` after VASP jobs complete.")
+                break
+
+            print(f"\n  Sleeping {poll_interval}s … (Ctrl+C to interrupt)")
+            _time.sleep(poll_interval)
+            first_pass = False
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
 
 
 def _batch_generate_inputs(root: Path, *, unitcell: bool = False) -> None:
