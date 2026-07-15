@@ -35,6 +35,30 @@ class TestBuildUnitcellYaml:
         assert any("pydefect_vasp le" in c for c in recorded)
         assert any("pydefect_vasp u" in c for c in recorded)
 
+    def test_quotes_paths_with_parentheses(self, tmp_path: Path, monkeypatch):
+        """All pydefect_vasp u path args are shell-safe (#0023)."""
+        import shlex
+
+        uc = tmp_path / "Sn(SeO3)2" / "unitcell"
+        for d in ("band", "dos", "dielectric"):
+            (uc / d).mkdir(parents=True)
+            (uc / d / "OUTCAR").write_text("converged\n")
+        (uc / "band" / "vasprun.xml").write_text("<xml/>\n")
+        recorded = []
+        monkeypatch.setattr(
+            "vasp_sop.defect.unitcell.run_local",
+            lambda cmd, cwd, **kw: recorded.append(cmd),
+        )
+
+        from vasp_sop.defect.unitcell import build_unitcell_yaml
+
+        build_unitcell_yaml(uc, PipelineConfig(formula="Sn(SeO3)2"))
+        cmd = next(c for c in recorded if "pydefect_vasp u" in c)
+        assert shlex.quote(str((uc / "band" / "vasprun.xml").resolve())) in cmd
+        assert shlex.quote(str((uc / "band" / "OUTCAR").resolve())) in cmd
+        assert shlex.quote(str((uc / "dielectric" / "OUTCAR").resolve())) in cmd
+        assert shlex.quote("Sn(SeO3)2") in cmd
+
     def test_dielectric_failure_nonfatal(self, tmp_path: Path, monkeypatch):
         """vise pdf failure logs a warning, does not crash."""
         for d in ("band", "dos", "dielectric"):

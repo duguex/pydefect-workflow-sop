@@ -7,6 +7,7 @@ band-structure, DOS, and dielectric-response calculations.
 from __future__ import annotations
 
 import logging
+import shlex
 import shutil
 from pathlib import Path
 
@@ -146,9 +147,11 @@ def build_unitcell_yaml(uc_root: Path, config: PipelineConfig) -> None:
             logger.warning("vise pdf failed (likely no band gap), skipping dielectric plot.")
 
     cmd = (
-        f"pydefect_vasp u -vb {band_vasprun} -ob {band_outcar} "
-        f"-odc {dielectric_outcar} -odi {dielectric_outcar} "
-        f"-n '{config.formula}'"
+        f"pydefect_vasp u -vb {shlex.quote(str(band_vasprun))} "
+        f"-ob {shlex.quote(str(band_outcar))} "
+        f"-odc {shlex.quote(str(dielectric_outcar))} "
+        f"-odi {shlex.quote(str(dielectric_outcar))} "
+        f"-n {shlex.quote(config.formula)}"
     )
     try:
         run_local(cmd, cwd=uc_root)

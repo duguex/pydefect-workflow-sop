@@ -80,6 +80,32 @@ def _cr_ready_dirs(dirs: list[Path]) -> list[Path]:
 def _quote_names(dirs: list[Path]) -> str:
     return " ".join(shlex.quote(d.name) for d in dirs)
 
+def _run_dir_batches(
+    command_prefix: str,
+    dirs: list[Path],
+    *,
+    cwd: Path,
+    command_suffix: str = "",
+    batch_size: int = 20,
+    timeout: int = 600,
+) -> None:
+    """Run a per-directory pydefect step in bounded, resumable batches.
+
+    ``command_prefix`` includes ``-d``. ``command_suffix`` should include its
+    own leading space when non-empty. A failed batch raises to the caller;
+    previous batches' per-directory artifacts remain for the next rerun.
+    """
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
+    for start in range(0, len(dirs), batch_size):
+        batch = dirs[start:start + batch_size]
+        run_local(
+            f"{command_prefix} {_quote_names(batch)}{command_suffix}",
+            cwd=cwd,
+            timeout=timeout,
+        )
+
+
 
 def _inventory(defect_root: Path) -> dict[str, Any]:
     """Collect lists used by classify / status / analyze."""
@@ -400,11 +426,11 @@ def analyze(
     elif not efnv_targets:
         logger.warning("No efnv targets (need converged + calc_results).")
 
-    # ── dsi / dvf on converged only (#0012)
+    # ── dsi / dvf on converged only (#0012, #0024)
     dsi_targets = [d for d in converged_now if not (d / "defect_structure_info.json").is_file()]
     if dsi_targets:
         try:
-            run_local(f"pydefect dsi -d {_quote_names(dsi_targets)}", cwd=defect_root)
+            _run_dir_batches("pydefect dsi -d", dsi_targets, cwd=defect_root, timeout=600)
         except Exception as exc:
             logger.warning("pydefect dsi failed: %s", exc)
     else:
@@ -415,7 +441,7 @@ def analyze(
     ]
     if dvf_targets:
         try:
-            run_local(f"pydefect_util dvf -d {_quote_names(dvf_targets)}", cwd=defect_root)
+            _run_dir_batches("pydefect_util dvf -d", dvf_targets, cwd=defect_root, timeout=600)
         except Exception:
             logger.warning(
                 "pydefect_util dvf failed (may be slow on NFS or missing inputs), "
@@ -432,18 +458,25 @@ def analyze(
         except Exception as exc:
             logger.warning("pydefect_vasp pbes failed (vasprun?): %s", exc)
 
-    # ── beoi + bes on converged only
+    # ── beoi + bes on converged only, batched (#0024)
     if pbes_json.is_file() and converged_now:
         q_pbes = shlex.quote(str(pbes_json))
-        names = _quote_names(converged_now)
+        suffix = f" -pbes {q_pbes}"
         try:
-            run_local(f"pydefect_vasp beoi -d {names} -pbes {q_pbes}", cwd=defect_root)
+            _run_dir_batches(
+                "pydefect_vasp beoi -d", converged_now,
+                cwd=defect_root, command_suffix=suffix, timeout=600,
+            )
         except Exception as exc:
             logger.warning("pydefect_vasp beoi failed: %s", exc)
         try:
-            run_local(f"pydefect bes -d {names} -pbes {q_pbes}", cwd=defect_root)
+            _run_dir_batches(
+                "pydefect bes -d", converged_now,
+                cwd=defect_root, command_suffix=suffix, timeout=600,
+            )
         except Exception as exc:
             logger.warning("pydefect bes failed: %s", exc)
+
 
     # ── dei: corrected dirs
     if perfect_cr.is_file() and unitcell_yaml.is_file() and standard_energies.is_file():

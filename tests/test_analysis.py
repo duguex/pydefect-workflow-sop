@@ -22,6 +22,32 @@ def _force_converged(monkeypatch, dirs=None):
     monkeypatch.setattr(an, "_converged_dirs", _conv)
 
 
+def test_run_dir_batches_covers_targets_once(tmp_path: Path, monkeypatch):
+    """Large pydefect steps split explicit dirs into bounded batches (#0024)."""
+    from vasp_sop.defect import analysis as an
+
+    dirs = []
+    for i in range(45):
+        d = tmp_path / f"Va_X_{i}"
+        d.mkdir()
+        dirs.append(d)
+    commands = []
+    monkeypatch.setattr(
+        an, "run_local", lambda cmd, cwd, **kw: commands.append((cmd, kw)),
+    )
+
+    an._run_dir_batches(
+        "pydefect dsi -d", dirs, cwd=tmp_path, batch_size=20, timeout=123,
+    )
+
+    assert len(commands) == 3
+    assert all(kwargs["timeout"] == 123 for _, kwargs in commands)
+    names = []
+    for cmd, _ in commands:
+        names.extend(cmd.split()[3:])
+    assert sorted(names) == sorted(d.name for d in dirs)
+    assert len(names) == len(set(names))
+
 class TestAnalyze:
     """analyze() — defect energetics post-processing."""
 
