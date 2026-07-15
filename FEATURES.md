@@ -294,6 +294,25 @@ SCF no convergence, BRION error, EDWAV error) via `recommended_fix()`.
 `wait_all(jobs, poll_interval)` — polls all jobs at a configurable interval
 (default 60 s), raises `RuntimeError` on the first job failure (fail-fast).
 
+
+### Loop Logging (batch `--loop`)
+
+When run with `--loop`, batch outputs are split:
+
+| Destination | Level | Content |
+|-------------|-------|---------|
+| `{root}/batch_run.log` | INFO+ | All submission, poll, post-process events |
+| Terminal (stderr) | WARNING+ | Errors and warnings only |
+| `{root}/batch_snapshot.json` | — | Latest per-system phases, analyze status, crisp counts (overwritten each round) |
+| `{root}/batch_timeline.jsonl` | — | JSON line per round (appended, with timestamps) |
+
+Usage:
+```bash
+vasp-sop batch run . --loop         # silent terminal, logs + snapshots on disk
+tail -f batch_run.log               # monitor progress
+cat batch_snapshot.json | jq .phases
+```
+
 ### Output Consolidation
 
 **Current crisp:** VASP writes **directly** into the calculation directory; Slurm
