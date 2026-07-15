@@ -1272,3 +1272,16 @@ class TestBatchRunLoopObservability:
 
         from vasp_sop.cli.main import _batch_run
         _batch_run(root, dry_run=True, loop=False)
+
+
+    def test_empty_campaign_logs_warning(self, tmp_path: Path, caplog, capsys):
+        from vasp_sop.cli.main import _batch_run
+
+        _batch_run(tmp_path, loop=True)
+
+        assert any(
+            record.name == "vasp_sop.cli.main"
+            and record.getMessage() == "No systems found."
+            for record in caplog.records
+        )
+        assert capsys.readouterr().out == ""

@@ -1633,7 +1633,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
         sys_list = [s for s in sys_list if s["name"] not in exclude]
 
     if not sys_list:
-        print("No systems found.")
+        logger.warning("No systems found.")
         return
 
     if loop:
