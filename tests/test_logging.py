@@ -1,6 +1,7 @@
 """Tests for vasp_sop.core.logging — file handler and terminal level."""
 
 import logging
+import sys
 from pathlib import Path
 
 import pytest
@@ -56,14 +57,15 @@ def test_file_handler_writes_and_terminal_warning_only(
     assert "should-only-be-in-file" in content
     assert "should-be-in-both" in content
 
-    console_handlers = [
+    stderr_handlers = [
         handler
         for handler in root.handlers
         if isinstance(handler, logging.StreamHandler)
         and not isinstance(handler, logging.FileHandler)
+        and handler.stream is sys.stderr
     ]
-    assert console_handlers
-    assert all(handler.level == logging.WARNING for handler in console_handlers)
+    assert stderr_handlers
+    assert all(handler.level == logging.WARNING for handler in stderr_handlers)
 
 
 def test_idempotent_calls_dont_duplicate(
