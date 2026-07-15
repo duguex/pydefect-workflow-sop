@@ -80,7 +80,7 @@ class TestVaspJobDone:
         assert check_converged(tmp_path) is True
 
     def test_converged_output_subdir(self, tmp_path: Path):
-        """OUTCAR in output/ subdirectory (crisp style)."""
+        """OUTCAR in legacy output/ subdirectory still detected."""
         output_dir = tmp_path / "output"
         output_dir.mkdir()
         _make_outcar(output_dir, nsw=50, last_ionic_step=4, max_force=0.02)

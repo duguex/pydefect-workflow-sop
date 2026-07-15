@@ -256,15 +256,18 @@ Dual backend selected by `config.supercell_tool`:
 
 ### Job Management (CRISP)
 
-**CRITICAL:** All HPC operations MUST go through `crisp` CLI, never through
-`scancel`/`sbatch`/`squeue` directly. Load `skill://crisp` before any cluster
-operation.
+All cluster job operations go through the `crisp` CLI (never raw `sbatch`/`scancel`):
 
 ```bash
 crisp submit              # Submit VASP job
 crisp cancel -n TASK_NAME # Cancel job
 crisp jobs                # List all jobs (JSON output)
 ```
+
+**Layout (current crisp):** results land **in the work dir** (no `output/`
+subdir). Slurm stdout/stderr log: **`{slurm_job_id}.log`**.  
+`move_crisp_outputs()` remains for **legacy** `output/` trees only (mtime merge).
+
 
 ### VASP Convergence Detection
 

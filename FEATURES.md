@@ -296,10 +296,15 @@ SCF no convergence, BRION error, EDWAV error) via `recommended_fix()`.
 
 ### Output Consolidation
 
-`move_crisp_outputs(work_dir)` — promotes crisp `output/` into the work dir,
-then removes `output/`. **Per-file mtime wins**: if both root and `output/` have
-the same name, the **newer** copy is kept (avoids a stale root OUTCAR blocking a
-fresh fetch). Convergence helpers still read `output/` if root is missing.
+**Current crisp:** VASP writes **directly** into the calculation directory; Slurm
+logs are ``{jobid}.log``. No ``output/`` staging.
+
+`move_crisp_outputs(work_dir)` — **legacy**: if an old ``output/`` tree exists,
+promote into the work dir with **per-file mtime preference**, then remove
+``output/``. No-op when ``output/`` is absent (normal for new jobs).
+
+Convergence helpers still accept OUTCAR/vasprun under root **or** legacy
+``output/``.
 
 
 

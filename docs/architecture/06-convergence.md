@@ -51,29 +51,33 @@ NSW ≤ 1  或  IBRION ∉ {1,2,3}
 
 | 任务 | 额外要求 (`check_task_complete`) |
 |------|----------------------------------|
-| `band` / `dos` | 收敛 OUTCAR + `vasprun.xml`（根目录或 `output/`） |
+| `band` / `dos` | 收敛 OUTCAR + `vasprun.xml`（根目录；兼容遗留 `output/`） |
 | `dielectric` | OUTCAR + timing（DFPT，无力判据） |
 
 ---
 
-## 文件位置：crisp `output/` 与工作目录
+## 文件位置：crisp 当前布局 vs 遗留 `output/`
 
-crisp 把结果放在计算目录下的 **`output/`**，不是只认根目录。
+### 当前 crisp（2026-07 起）
+
+| 约定 | 说明 |
+|------|------|
+| **结果直写工作目录** | `OUTCAR` / `vasprun.xml` / `CONTCAR` 等直接在 `{calc}/`，**废除** `output/` 中转 |
+| **Slurm 日志** | `{slurm_job_id}.log`（例如 `205890.log`），不再依赖固定的 `vasp_stdout.log` 唯一名 |
+
+`move_crisp_outputs({calc})` 在无 `output/` 时为 **no-op**（可安全每次调用）。
+
+### 遗留目录（旧作业仍可能存在）
 
 | 路径 | 角色 |
 |------|------|
-| `{calc}/output/OUTCAR`、`vasprun.xml`、… | crisp 拉回的原始结果 |
-| `{calc}/OUTCAR`、… | `move_crisp_outputs` 上提后的工作副本 |
+| `{calc}/output/*` | 旧 crisp 拉回路径 |
+| 查找 | `check_converged` / `has_vasprun` 仍：**根优先，再 `output/`** |
+| 上提 | `move_crisp_outputs`：按 **mtime 择优** 合并到根，然后删除 `output/` |
 
-**查找顺序（实现已遵守）：**
+### 混合树注意
 
-- `check_converged`：`OUTCAR` → **`output/OUTCAR`**
-- `has_vasprun`：`vasprun.xml` → **`output/vasprun.xml`**
-- poll / orphan / analyze / recovery：`move_crisp_outputs(calc)` 将 `output/*` 提到上一级
-
-**上提冲突：按 `mtime` 择优。**  
-根与 `output/` 同名时保留 **较新** 的文件（避免旧根 OUTCAR 挡住新 fetch）。  
-实现：`vasp_sop/core/jobs.py::move_crisp_outputs`。
+生产可能同时有「新直写」与「旧 `output/`」。以 **根目录最新文件** 为准；上提时 mtime 更新的 `output/` 会覆盖更旧的根文件。
 
 ---
 
@@ -82,7 +86,7 @@ crisp 把结果放在计算目录下的 **`output/`**，不是只认根目录。
 | 场景 | 策略 |
 |------|------|
 | 离子未收敛 + 有 timing | CONTCAR 重启（`restart_from_contcar`），**不擅自改 NSW/IBRION**（#0016） |
-| 离子已收敛但缺 `vasprun.xml` | 先 `move_crisp` + cache；仍缺再考虑重交（优先补文件，避免对已 `reached` 的盲目重弛豫） |
+| 离子已收敛但缺 `vasprun.xml` | 先确认直写/`output/`/cache；仍缺再考虑重交（优先补文件，避免对已 `reached` 盲目重弛豫） |
 | 形成能 | `pydefect_vasp cr` 需要 `vasprun.xml`；缺则 `missing_vasprun`（#0010） |
 
 ---
@@ -90,7 +94,7 @@ crisp 把结果放在计算目录下的 **`output/`**，不是只认根目录。
 ## 规则摘要（实现伪代码）
 
 ```text
-1. 无 OUTCAR（含 output/）或无 General timing → False
+1. 无 OUTCAR（含遗留 output/）或无 General timing → False
 
 2. 参数：OUTCAR 优先，INCAR 回退
 
@@ -106,13 +110,13 @@ crisp 把结果放在计算目录下的 **`output/`**，不是只认根目录。
 
 ## 测试
 
-- `tests/test_defects.py::TestVaspJobDone`：NSW bump、力达标/失败  
-- `TestVasprunRecovery`：续跑只 CONTCAR、不改 NSW/IBRION  
-- `tests/test_jobs_move_crisp.py`：`output/` 与根 `mtime` 择优  
+- `tests/test_defects.py::TestVaspJobDone`  
+- `TestVasprunRecovery`  
+- `tests/test_jobs_move_crisp.py`（遗留 `output/` mtime 择优；无 `output/` 为 no-op）  
 
 ---
 
 ## 相关 issue
 
-- #0010 missing vasprun · #0016 recovery · #0017 recovery 后 re-analyze  
-- #0018 zero-gap unitcell · #0019 COMPLETE vs analyze  
+- #0010 missing vasprun · #0016 recovery · #0017 re-analyze  
+- #0022 crisp direct-write + `jobid.log`  

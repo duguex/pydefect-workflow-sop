@@ -44,3 +44,12 @@ def test_missing_root_moves(tmp_path: Path):
 
     assert (tmp_path / "vasprun.xml").read_text() == "<ok/>\n"
     assert not out.exists()
+
+
+def test_no_output_dir_is_noop(tmp_path: Path):
+    """Current crisp writes in-place; move_crisp_outputs must not require output/."""
+    (tmp_path / "OUTCAR").write_text("direct\\n")
+    move_crisp_outputs(tmp_path)
+    assert (tmp_path / "OUTCAR").read_text() == "direct\\n"
+    assert not (tmp_path / "output").exists()
+

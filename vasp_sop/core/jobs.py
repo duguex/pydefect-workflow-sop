@@ -234,15 +234,18 @@ def wait_all(jobs: list[VaspJob], poll_interval: int = 60) -> None:
 
 
 def move_crisp_outputs(work_dir: Path) -> None:
-    """Promote crisp ``output/`` results into *work_dir* (mtime-preferring).
+    """Promote legacy crisp ``output/`` into *work_dir* (mtime-preferring).
 
-    For each entry under ``work_dir/output/``:
+    **Current crisp** writes VASP outputs **directly** into ``work_dir`` (no
+    ``output/``). Call is then a no-op. Slurm logs are ``{jobid}.log``.
 
-    - missing at root → move/copy up
+    **Legacy** jobs may still have ``work_dir/output/``. For each entry:
+
+    - missing at root → move up
     - both exist as files → keep the **newer mtime**; drop the older copy
-    - directories → merge with ``dirs_exist_ok`` then remove source tree
+    - directories → merge with the same mtime rule
 
-    Always removes empty ``output/`` when done (if still present).
+    Removes ``output/`` when finished (if present). Safe to call always.
     """
     output_dir = work_dir / "output"
     if not output_dir.is_dir():
