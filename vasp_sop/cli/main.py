@@ -1145,7 +1145,7 @@ def _crisp_active_dirs(*, skip: bool = False) -> set[str]:
             if j.get("status") in alive and j.get("local_dir")}
 
 
-def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
+def _advance_one_system(s: dict, *, dry_run: bool = False, log_to_logger: bool = False) -> None:
     """Advance one system by one cycle (runs serially in batch mode)."""
     # Re-imports needed for module-level dispatch
     import logging
@@ -1162,10 +1162,16 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
     from vasp_sop.core.job_store import JobStore
     _logger = logging.getLogger(__name__)
 
+    def _info(message: str) -> None:
+        if log_to_logger:
+            _logger.info("%s", message)
+        else:
+            print(message)
+
     def _submit_or_skip(path: Path, label: str, sys_name: str) -> object:
         if dry_run:
             if not label.startswith("df-"):
-                print(f"  [dry-run] {sys_name:<18} would submit: {label}")
+                _info(f"  [dry-run] {sys_name:<18} would submit: {label}")
             return None
         try:
             job = submit_vasp(path.resolve())
@@ -1173,7 +1179,7 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
             js.track(str(path.resolve()))
             js.record(str(path.resolve()), "submitted", source=job.task_name)
             js.close()
-            print(f"  → {sys_name:<18} {label}: {job.task_name}")
+            _info(f"  → {sys_name:<18} {label}: {job.task_name}")
             return job
         except Exception as exc:
             _logger.warning("%s/%s submit failed: %s", sys_name, label, exc)
@@ -1222,7 +1228,7 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
             if p == "STRUCTURE_OPT":
                 parts.append("perfect")
             if parts:
-                print(f"  [dry-run] {s['name']:<18} would submit: {' '.join(parts)}")
+                _info(f"  [dry-run] {s['name']:<18} would submit: {' '.join(parts)}")
     if p == "STRUCTURE_OPT":
         td = _target_dir(s)
         if td and JobStore().latest(str(td.resolve())) != "submitted":
@@ -1276,7 +1282,8 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
                         pass
             except Exception as exc:
                 _logger.error("%s CPD failed: %s", s["name"], exc)
-                print(f"  ✗ {s['name']:<18} CPD post-processing FAILED")
+                if not log_to_logger:
+                    print(f"  ✗ {s['name']:<18} CPD post-processing FAILED")
         return
     if p == "UNITCELL_DEFECT":
         # ── Dry-run artifact-based preview ────────────────────────────
@@ -1302,17 +1309,17 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
                 missing.append("defect/CONTCAR")
             done_summary = df_root / "defect_energy_summary.json"
             if not missing and not done_summary.is_file():
-                print(
+                _info(
                     f"  [dry-run] {s['name']:<18} would post-process "
                     f"(artifacts present, no analysis run)"
                 )
             elif not missing and done_summary.is_file():
-                print(
+                _info(
                     f"  [dry-run] {s['name']:<18} already complete "
                     f"(summary exists)"
                 )
             else:
-                print(
+                _info(
                     f"  [dry-run] {s['name']:<18} post-process blocked "
                     f"(missing: {', '.join(missing)})"
                 )
@@ -1457,22 +1464,31 @@ def _advance_one_system(s: dict, *, dry_run: bool = False) -> None:
                         target_vertices=cpd_root / "target_vertices.yaml",
                     )
                     if status == "full":
-                        print(f"  ✓ {s['name']:<18} pipeline complete")
+                        _info(f"  ✓ {s['name']:<18} pipeline complete")
                     elif status == "partial":
-                        print(
+                        message = (
                             f"  ~ {s['name']:<18} post-process partial "
                             f"(see defect/analyze_status.json)"
                         )
+                        if log_to_logger:
+                            _logger.warning("%s", message)
+                        else:
+                            print(message)
                     else:
-                        print(
+                        message = (
                             f"  ✗ {s['name']:<18} post-process failed "
                             f"(see defect/analyze_status.json)"
                         )
+                        if log_to_logger:
+                            _logger.error("%s", message)
+                        else:
+                            print(message)
                 except Exception as exc:
                     _logger.error("%s post-processing failed: %s", s["name"], exc)
         except Exception as exc:
             _logger.error("%s UNITCELL_DEFECT failed: %s", s["name"], exc)
-            print(f"  ✗ {s['name']:<18} UNITCELL_DEFECT FAILED")
+            if not log_to_logger:
+                print(f"  ✗ {s['name']:<18} UNITCELL_DEFECT FAILED")
 
 _MAX_RESTART = 5
 
@@ -1617,7 +1633,20 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
         print("No systems found.")
         return
 
-    print(f"Batch run: {len(sys_list)} systems\n")
+    if loop:
+        from vasp_sop.core.logging import setup_file_logging
+        from vasp_sop.core.snapshot import SnapshotWriter
+
+        setup_file_logging(root)
+        sw = SnapshotWriter(root)
+
+    def _print_info(message: str) -> None:
+        if loop:
+            logger.info("%s", message)
+        else:
+            print(message)
+
+    _print_info(f"Batch run: {len(sys_list)} systems\n")
 
 
     # ── Populate submission DB from crisp + filesystem ────────────────
@@ -1670,7 +1699,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
             return None
 
     if dry_run:
-        print("Dry-run mode: will build defect structures and generate inputs, NO VASP submission.\n")
+        _print_info("Dry-run mode: will build defect structures and generate inputs, NO VASP submission.\n")
 
     if not dry_run:
         # ── Backfill cache ──────────────────────────────────────────
@@ -1761,7 +1790,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
             _handle_unconverged_poll(wd)
 
         if completed:
-            print(f"  Cached {completed} completed calculation(s).")
+            _print_info(f"  Cached {completed} completed calculation(s).")
 
     # ── Loop context ────────────────────────────────────────────
     first_pass = True
@@ -1777,33 +1806,96 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                     n_skipped += 1
                     continue
 
-                print(f"  [{idx}/{len(sys_list)}] {name:<18} {p} ...", end="", flush=True)
-                try:
-                    _advance_one_system(s, dry_run=dry_run)
-                    print(" done")
-                except Exception as exc:
-                    reason = str(exc).split("(")[0].strip() or type(exc).__name__
-                    _logger.error("%s advance failed: %s", name, exc)
-                    print(f" FAILED ({reason})")
-                    errors.append((name, reason))
+                if loop:
+                    try:
+                        _advance_one_system(s, dry_run=dry_run, log_to_logger=True)
+                        logger.info("  [%d/%d] %-18s %s ... done", idx, len(sys_list), name, p)
+                    except Exception as exc:
+                        reason = str(exc).split("(")[0].strip() or type(exc).__name__
+                        logger.error("%s advance failed: %s", name, exc)
+                        errors.append((name, reason))
+                else:
+                    print(f"  [{idx}/{len(sys_list)}] {name:<18} {p} ...", end="", flush=True)
+                    try:
+                        _advance_one_system(s, dry_run=dry_run)
+                        print(" done")
+                    except Exception as exc:
+                        reason = str(exc).split("(")[0].strip() or type(exc).__name__
+                        _logger.error("%s advance failed: %s", name, exc)
+                        print(f" FAILED ({reason})")
+                        errors.append((name, reason))
 
             if n_skipped:
-                print(f"  [{n_skipped}/{len(sys_list)} systems already done, skipped]\n")
+                _print_info(f"  [{n_skipped}/{len(sys_list)} systems already done, skipped]\n")
 
             # ── Status ──────────────────────────────────────────
             phases = [_phase(s) for s in sys_list]
             done_count = sum(1 for p in phases if p in ("COMPLETE", "NO_TARGET"))
             counts = {p: phases.count(p) for p in sorted(set(phases))}
             parts = [f"{p}={n}" for p, n in sorted(counts.items())]
-            print(f"{'  '.join(parts)}")
+            _print_info(f"{'  '.join(parts)}")
 
             if errors:
-                print(f"\n  ⚠ {len(errors)} system(s) with errors:")
-                for name, reason in errors:
-                    print(f"    {name:<18}  {reason}")
+                if loop:
+                    logger.warning("%d system(s) with errors:", len(errors))
+                    for name, reason in errors:
+                        logger.warning("  %-18s  %s", name, reason)
+                else:
+                    print(f"\n  ⚠ {len(errors)} system(s) with errors:")
+                    for name, reason in errors:
+                        print(f"    {name:<18}  {reason}")
+            if loop:
+                from vasp_sop.defect.analysis import classify_analyze_status
+                import json
+                import subprocess
+
+                analyze_counts = {"full": 0, "partial": 0, "failed": 0}
+                for s in sys_list:
+                    defect_root = s["root"] / _DF
+                    if defect_root.is_dir():
+                        try:
+                            analyze_counts[classify_analyze_status(defect_root)] += 1
+                        except Exception:
+                            pass
+
+                crisp_active = crisp_running = crisp_failed = -1
+                try:
+                    result = subprocess.run(
+                        ["crisp", "jobs", "-a"], capture_output=True, text=True, timeout=30,
+                    )
+                    jobs = json.loads(result.stdout).get("jobs") or []
+                    project_jobs = [
+                        job for job in jobs
+                        if (job.get("local_dir") or "").startswith(str(root))
+                    ]
+                    crisp_active = sum(
+                        1 for job in project_jobs
+                        if job.get("status") in (
+                            "submit", "submitted", "running", "ready_fetch", "pending",
+                        )
+                    )
+                    crisp_running = sum(
+                        1 for job in project_jobs if job.get("status") == "running"
+                    )
+                    crisp_failed = sum(
+                        1 for job in project_jobs if job.get("status") == "failed"
+                    )
+                except Exception:
+                    pass
+
+                sw.write({
+                    "phases": dict(counts),
+                    "analyze": analyze_counts,
+                    "crisp_active": crisp_active,
+                    "crisp_running": crisp_running,
+                    "crisp_failed": crisp_failed,
+                    "errors": [
+                        {"system": name, "reason": reason} for name, reason in errors
+                    ],
+                })
 
             if done_count == len(sys_list):
-                print("\nAll systems complete.")
+                _print_info("\nAll systems complete.")
                 break
 
             if not loop:
@@ -1813,11 +1905,11 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                 print(f"\n{running} running, {blocked} blocked, {still} remaining — re-run `vasp-sop batch run .` after VASP jobs complete.")
                 break
 
-            print(f"\n  Sleeping {poll_interval}s … (Ctrl+C to interrupt)")
+            _print_info(f"\n  Sleeping {poll_interval}s … (Ctrl+C to interrupt)")
             _time.sleep(poll_interval)
             first_pass = False
     except KeyboardInterrupt:
-        print("\nInterrupted.")
+        _print_info("\nInterrupted.")
 
 
 def _batch_generate_inputs(root: Path, *, unitcell: bool = False) -> None:

@@ -1187,3 +1187,88 @@ class TestDefectAnalyzeCLI:
         _do_defect_analyze(args)
         assert called.get("ok")
         assert "partial" in capsys.readouterr().out
+
+
+class TestBatchRunLoopObservability:
+    """Loop-mode batch runs configure logging and persist a cycle snapshot."""
+
+    def _campaign(self, tmp_path: Path) -> Path:
+        root = tmp_path / "campaign"
+        system = root / "GaN"
+        system.mkdir(parents=True)
+        (system / "plan.yaml").write_text("project: {}\n")
+        (system / "defect").mkdir()
+        return root
+
+    def test_loop_configures_logging_and_writes_cycle_snapshot(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        root = self._campaign(tmp_path)
+        calls: dict[str, object] = {}
+
+        class FakeSnapshotWriter:
+            def __init__(self, observed_root: Path) -> None:
+                calls["snapshot_root"] = observed_root
+
+            def write(self, state: dict) -> None:
+                calls["state"] = state
+
+        monkeypatch.setattr(
+            "vasp_sop.core.logging.setup_file_logging",
+            lambda observed_root: calls.setdefault("logging_root", observed_root),
+        )
+        monkeypatch.setattr(
+            "vasp_sop.core.snapshot.SnapshotWriter", FakeSnapshotWriter,
+        )
+        monkeypatch.setattr(
+            "vasp_sop.core.config.PipelineConfig.from_yaml",
+            lambda *args, **kwargs: type("Config", (), {
+                "poscar_src": "", "formula": "GaN",
+            })(),
+        )
+        monkeypatch.setattr("vasp_sop.cli.main._phase", lambda system: "COMPLETE")
+        monkeypatch.setattr(
+            "vasp_sop.defect.analysis.classify_analyze_status",
+            lambda defect_root: "full",
+        )
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda *args, **kwargs: (_ for _ in ()).throw(OSError("crisp unavailable")),
+        )
+
+        from vasp_sop.cli.main import _batch_run
+        _batch_run(root, dry_run=True, loop=True)
+
+        assert calls["logging_root"] == root
+        assert calls["snapshot_root"] == root
+        assert calls["state"] == {
+            "phases": {"COMPLETE": 1},
+            "analyze": {"full": 1, "partial": 0, "failed": 0},
+            "crisp_active": -1,
+            "crisp_running": -1,
+            "crisp_failed": -1,
+            "errors": [],
+        }
+
+    def test_single_pass_does_not_enable_loop_observability(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        root = self._campaign(tmp_path)
+        monkeypatch.setattr(
+            "vasp_sop.core.config.PipelineConfig.from_yaml",
+            lambda *args, **kwargs: type("Config", (), {
+                "poscar_src": "", "formula": "GaN",
+            })(),
+        )
+        monkeypatch.setattr("vasp_sop.cli.main._phase", lambda system: "COMPLETE")
+        monkeypatch.setattr(
+            "vasp_sop.core.logging.setup_file_logging",
+            lambda root: (_ for _ in ()).throw(AssertionError("unexpected logging setup")),
+        )
+        monkeypatch.setattr(
+            "vasp_sop.core.snapshot.SnapshotWriter",
+            lambda root: (_ for _ in ()).throw(AssertionError("unexpected snapshot setup")),
+        )
+
+        from vasp_sop.cli.main import _batch_run
+        _batch_run(root, dry_run=True, loop=False)
