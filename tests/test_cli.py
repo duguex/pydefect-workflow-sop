@@ -1285,3 +1285,49 @@ class TestBatchRunLoopObservability:
             for record in caplog.records
         )
         assert capsys.readouterr().out == ""
+
+
+class TestHandleUnconvergedPoll:
+    """_handle_unconverged_poll: CONTCAR restart without parameter changes."""
+
+    def test_nsw_ibrion_preserved_on_restart(self, tmp_path: Path, monkeypatch):
+        """CONTCAR→POSCAR must NOT rewrite NSW or IBRION (user policy)."""
+        from vasp_sop.core.job_store import JobStore
+        from vasp_sop.core.cache import override_cache_root
+
+        override_cache_root(tmp_path / ".vasp_sop")
+
+        # Set up a fresh INCAR with original relaxation params
+        (tmp_path / "INCAR").write_text("NSW = 50\nIBRION = 2\nEDIFFG = -0.03\n")
+        (tmp_path / "POSCAR").write_text("old\n")
+        (tmp_path / "CONTCAR").write_text("contcar\n")
+        (tmp_path / "POTCAR").write_text("p\n")
+        (tmp_path / "KPOINTS").write_text("k\n")
+        # Make OUTCAR appear finished but unconverged
+        (tmp_path / "OUTCAR").write_text(
+            " General timing and accounting informations for this job:\n"
+            " TOTAL-FORCE (eV/Angst)\n ---\n 0.0 0.0 0.0 0.5 0.0 0.0\n"
+        )
+
+        # JobStore must have a "submitted" record for the path
+        wd_str = str(tmp_path.resolve())
+        js = JobStore()
+        js.record(wd_str, "submitted", source="test", reason="restart,prev_f=0.5")
+        js.track(wd_str)
+
+        monkeypatch.setattr(
+            "vasp_sop.core.jobs.submit_vasp",
+            lambda path: type("Job", (), {"task_name": "fake"}),  # return fake job
+        )
+
+        from vasp_sop.cli.main import _handle_unconverged_poll
+        _handle_unconverged_poll(tmp_path)
+
+        # POSCAR replaced from CONTCAR
+        assert (tmp_path / "POSCAR").read_text() == "contcar\n"
+        # INCAR must keep original NSW and IBRION
+        incar = (tmp_path / "INCAR").read_text()
+        assert "NSW = 50" in incar, f"NSW modified: {incar}"
+        assert "IBRION = 2" in incar, f"IBRION modified: {incar}"
+        assert "EDIFFG = -0.03" in incar
+        assert "ISTART = 1" in incar
