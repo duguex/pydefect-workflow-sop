@@ -1565,17 +1565,7 @@ def _handle_unconverged_poll(wd: Path) -> None:
         return
 
     restart_from_contcar(wd)
-    # Increase NSW
-    incar_path = wd / "INCAR"
-    if incar_path.is_file():
-        text = incar_path.read_text()
-        m = re.search(r"NSW\s*=\s*(\d+)", text)
-        nsw = int(m.group(1)) + 500 if m else 1000
-        if m:
-            text = re.sub(r"NSW\s*=\s*\d+", f"NSW = {nsw}", text)
-        else:
-            text += f"\nNSW = {nsw}"
-        incar_path.write_text(text)
+
 
     job = submit_vasp(wd.resolve())
     JobStore().record(wd_str, "submitted",
