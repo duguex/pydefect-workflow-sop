@@ -1666,14 +1666,16 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
     # ── Submit helper ──────────────────────────────────────────────
     def _submit_or_skip(path: Path, label: str, sys_name: str) -> object:
         if dry_run:
-            print(f"  [dry-run] {sys_name:<18} would submit: {label}")
+            _print_info(f"  [dry-run] {sys_name:<18} would submit: {label}")
             return None
         try:
             from vasp_sop.core.cache import lattice_too_large
             if lattice_too_large(path):
-                logger.error("%s/%s: lattice too large (>MAX_LATTICE=%.1f Å), skipped",
-                             sys_name, label, 25.0)
-                print(f"  ✗ {sys_name:<18} {label}: lattice too large, skipped")
+                msg = f"  ✗ {sys_name:<18} {label}: lattice too large, skipped"
+                if loop:
+                    logger.error(msg)
+                else:
+                    print(msg)
                 return None
             job = submit_vasp(path.resolve())
             from vasp_sop.core.job_store import JobStore
@@ -1681,15 +1683,27 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
             js.track(str(path.resolve()))
             js.record(str(path.resolve()), "submitted", source=job.task_name)
             js.close()
-            print(f"  → {sys_name:<18} {label}: {job.task_name}")
+            msg = f"  → {sys_name:<18} {label}: {job.task_name}"
+            if loop:
+                logger.info(msg)
+            else:
+                print(msg)
             return job
         except RuntimeError as exc:
-            logger.error("%s/%s submit failed (RuntimeError): %s", sys_name, label, exc)
-            print(f"  ✗ {sys_name:<18} {label}: {exc}")
+            msg = f"  ✗ {sys_name:<18} {label}: {exc}"
+            if loop:
+                logger.error(msg)
+            else:
+                print(msg)
             return None
         except Exception as exc:
-            logger.warning("%s/%s submit failed: %s", sys_name, label, exc)
+            msg = f"  ✗ {sys_name:<18} {label}: {exc}"
+            if loop:
+                logger.warning(msg)
+            else:
+                print(msg)
             return None
+
 
     if dry_run:
         _print_info("Dry-run mode: will build defect structures and generate inputs, NO VASP submission.\n")

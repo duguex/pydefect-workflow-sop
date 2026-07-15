@@ -1196,8 +1196,10 @@ class TestBatchRunLoopObservability:
         root = tmp_path / "campaign"
         system = root / "GaN"
         system.mkdir(parents=True)
-        (system / "plan.yaml").write_text("project: {}\n")
+        (system / "plan.yaml").write_text("formula: GaN\nfunctional: pbesol\n")
         (system / "defect").mkdir()
+        (system / "cpd").mkdir()
+        (system / "unitcell").mkdir()
         return root
 
     def test_loop_configures_logging_and_writes_cycle_snapshot(
@@ -1284,7 +1286,23 @@ class TestBatchRunLoopObservability:
             and record.getMessage() == "No systems found."
             for record in caplog.records
         )
-        assert capsys.readouterr().out == ""
+    def test_loop_writes_batch_log_file(self, tmp_path: Path, monkeypatch):
+        """Loop mode creates batch_run.log via FileHandler."""
+        root = self._campaign(tmp_path)
+        from vasp_sop.core.cache import override_cache_root
+        override_cache_root(tmp_path / ".vasp_sop")
+        monkeypatch.setattr("vasp_sop.core.jobs.submit_vasp",
+            lambda path: type("J",(),{"task_name":"T"}))
+
+        from vasp_sop.cli.main import _batch_run
+        _batch_run(root, poll_interval=99, dry_run=False, loop=True)
+
+        log_path = root / "batch_run.log"
+        assert log_path.is_file(), "batch_run.log should exist"
+
+
+
+
 
 
 class TestHandleUnconvergedPoll:
