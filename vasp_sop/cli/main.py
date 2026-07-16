@@ -818,9 +818,17 @@ def _add_batch_parser(subparsers) -> None:
     )
     rp.add_argument("--loop", action="store_true",
                     help="Keep polling and advancing until all systems complete")
+    rp.add_argument("--daemon", action="store_true",
+                    help="Detach and run in background (requires --loop)")
 
+    # start
+    sp_start = sub.add_parser("start", help="Start background batch loop")
+    sp_start.add_argument("root", type=Path, help="Project root directory")
 
-    # progress
+    # stop
+    sp_stop = sub.add_parser("stop", help="Stop background batch loop")
+    sp_stop.add_argument("root", type=Path, help="Project root directory")
+
     pp = sub.add_parser("progress", help="Show per-system completion percentage")
     pp.add_argument(
         "root", type=Path,
@@ -832,6 +840,10 @@ def _add_batch_parser(subparsers) -> None:
 def _handle_batch(args: argparse.Namespace) -> None:
     if args.batch_action == "status":
         _batch_status(args.root.resolve())
+    elif args.batch_action == "start":
+        _batch_start(args.root.resolve())
+    elif args.batch_action == "stop":
+        _batch_stop(args.root.resolve())
     elif args.batch_action == "history":
         _batch_history(args.root.resolve(), system=args.system)
     elif args.batch_action == "generate-inputs":
@@ -845,6 +857,23 @@ def _handle_batch(args: argparse.Namespace) -> None:
         _batch_progress(args.root.resolve())
 
 
+
+
+
+from vasp_sop.core.batch_lifecycle import daemonize, stop as _lifecycle_stop, is_stop_requested, cleanup
+
+
+def _batch_start(root: Path) -> None:
+    if daemonize(root):
+        try:
+            _batch_run(root, loop=True)
+        finally:
+            cleanup(root)
+
+
+
+def _batch_stop(root: Path) -> None:
+    _lifecycle_stop(root.resolve())
 
 
 def _batch_progress(root: Path) -> None:
@@ -1713,7 +1742,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
     first_pass = True
 
     try:
-        while True:
+        while not is_stop_requested():
             if not dry_run:
                 # ── Backfill cache ──────────────────────────────────
                 from vasp_sop.core.job_store import JobStore
