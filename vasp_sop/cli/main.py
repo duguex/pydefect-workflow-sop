@@ -876,6 +876,67 @@ def _batch_stop(root: Path) -> None:
     _lifecycle_stop(root.resolve())
 
 
+def _batch_loop_status(root: Path) -> None:
+    """Print loop PID, uptime, and the latest phase snapshot."""
+    import json
+    import time
+
+    from vasp_sop.core.batch_lifecycle import _is_alive, _pid_file
+
+    pid_path = _pid_file(root)
+    if not pid_path.is_file():
+        print("Loop stopped (no PID file)")
+        return
+    try:
+        lines = pid_path.read_text().splitlines()
+        pid = int(lines[0])
+    except (OSError, ValueError, IndexError):
+        pid_path.unlink(missing_ok=True)
+        print("Loop stopped (corrupt PID file cleaned)")
+        return
+    if not _is_alive(pid):
+        pid_path.unlink(missing_ok=True)
+        print("Loop stopped (stale PID file cleaned)")
+        return
+
+    try:
+        started_at = float(lines[2])
+    except (IndexError, ValueError):
+        started_at = pid_path.stat().st_mtime
+    elapsed = max(0, int(time.time() - started_at))
+    minutes, seconds = divmod(elapsed, 60)
+    hours, minutes = divmod(minutes, 60)
+    days, hours = divmod(hours, 24)
+    if days:
+        uptime = f"{days}d{hours}h{minutes:02d}m"
+    elif hours:
+        uptime = f"{hours}h{minutes:02d}m"
+    else:
+        uptime = f"{minutes}m{seconds:02d}s"
+
+    snapshot = root / "batch_snapshot.json"
+    summary: list[str] = []
+    snapshot_time = ""
+    if snapshot.is_file():
+        try:
+            state = json.loads(snapshot.read_text())
+            summary = [
+                f"{phase}={count}"
+                for phase, count in sorted(state.get("phases", {}).items())
+            ]
+            snapshot_time = str(state.get("timestamp", ""))
+        except (OSError, json.JSONDecodeError, AttributeError):
+            pass
+    details = "  ".join(summary)
+    if snapshot_time:
+        details = (
+            f"{details}  snapshot={snapshot_time}"
+            if details else f"snapshot={snapshot_time}"
+        )
+    suffix = f"  {details}" if details else ""
+    print(f"Loop running (PID {pid})  uptime={uptime}{suffix}")
+
+
 def _batch_progress(root: Path) -> None:
     """Print per-system completion percentage (completed / total pipeline dirs)."""
     import subprocess, json
@@ -908,8 +969,10 @@ def _batch_progress(root: Path) -> None:
     for pct, name, nc, nu, nd, cpd_ok, uc_ok, df_ok in rows:
         print(f"{name:22s}  {pct:3d}%  {cpd_ok:>2d}/{nc:<3d}  {uc_ok:>2d}/{nu:<3d}  {df_ok:>3d}/{nd:<3d}")
 
+
 def _batch_status(root: Path) -> None:
     """Scan *root* for vasp-sop systems and print status table."""
+    _batch_loop_status(root)
     from vasp_sop.core.job_store import JobStore
     from vasp_sop.core.config import PipelineConfig
 
@@ -935,28 +998,27 @@ def _batch_status(root: Path) -> None:
 
         phase = _phase(s)
         prefix = str(d.resolve())
-        # Per-stage breakdown from JobStore paths
         cpd_prefix = prefix + "/cpd/"
         uc_prefix = prefix + "/unitcell/"
         df_prefix = prefix + "/defect/"
         cpd_r = sum(1 for p, st in all_jobs.items()
-                     if p.startswith(cpd_prefix) and st == "submitted")
+                    if p.startswith(cpd_prefix) and st == "submitted")
         cpd_d = sum(1 for p, st in all_jobs.items()
-                     if p.startswith(cpd_prefix) and st == "converged")
+                    if p.startswith(cpd_prefix) and st == "converged")
         uc_r = sum(1 for p, st in all_jobs.items()
-                    if p.startswith(uc_prefix) and st == "submitted")
+                   if p.startswith(uc_prefix) and st == "submitted")
         uc_d = sum(1 for p, st in all_jobs.items()
-                    if p.startswith(uc_prefix) and st == "converged")
+                   if p.startswith(uc_prefix) and st == "converged")
         df_r = sum(1 for p, st in all_jobs.items()
-                    if p.startswith(df_prefix) and st == "submitted")
+                   if p.startswith(df_prefix) and st == "submitted")
         df_d = sum(1 for p, st in all_jobs.items()
-                    if p.startswith(df_prefix) and st == "converged")
+                   if p.startswith(df_prefix) and st == "converged")
 
         pri = _PRIORITY_MAP.get(d.name, "\u2014")
         rows.append({"name": d.name, "pri": pri, "phase": phase,
-                      "cpd_r": cpd_r, "cpd_d": cpd_d,
-                      "uc_r": uc_r, "uc_d": uc_d,
-                      "df_r": df_r, "df_d": df_d})
+                     "cpd_r": cpd_r, "cpd_d": cpd_d,
+                     "uc_r": uc_r, "uc_d": uc_d,
+                     "df_r": df_r, "df_d": df_d})
 
     if not rows:
         print(f"No vasp-sop systems found in {root}")
@@ -966,18 +1028,19 @@ def _batch_status(root: Path) -> None:
     print(f"{'':22s} {'':3s} {'':10s} {'D/T':>8} {'D/T':>8} {'D/T':>9}")
     print("-" * 62)
     for r in rows:
-        cpd_total = r['cpd_d'] + r['cpd_r']
-        cpd_s = f"{r['cpd_d']}/{cpd_total}" if cpd_total else "\u00b7"
-        uc_total = r['uc_d'] + r['uc_r']
-        uc_s = f"{r['uc_d']}/{uc_total}" if uc_total else "\u00b7"
-        df_total = r['df_d'] + r['df_r']
-        df_s = f"{r['df_d']}/{df_total}" if df_total else "\u00b7"
+        cpd_total = r["cpd_d"] + r["cpd_r"]
+        cpd_s = f"{r['cpd_d']}/{cpd_total}" if cpd_total else "·"
+        uc_total = r["uc_d"] + r["uc_r"]
+        uc_s = f"{r['uc_d']}/{uc_total}" if uc_total else "·"
+        df_total = r["df_d"] + r["df_r"]
+        df_s = f"{r['df_d']}/{df_total}" if df_total else "·"
         print(f"{r['name']:<22} {r['pri']:<3} {r['phase']:<10} "
               f"{cpd_s:>8} {uc_s:>8} {df_s:>9}")
     print("-" * 62)
     done_count = sum(1 for r in rows if r["phase"] == "COMPLETE")
     print(f"Total: {len(rows)}  Done: {done_count}  "
           f"Remaining: {len(rows) - done_count}")
+
 
 def _batch_history(root: Path, *, system: str | None = None) -> None:
     """Print job state history for one or all systems from JobStore."""

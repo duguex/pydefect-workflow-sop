@@ -2,22 +2,27 @@
 
 from __future__ import annotations
 
+import errno
+import fcntl
 import os
 import signal
+import tempfile
 import time
 from pathlib import Path
 
-# Guard: signal handlers fail in non-main threads/test runners.
+_STOP_REQUESTED = False
+
+
+def _handle_sigterm(signum, frame):
+    global _STOP_REQUESTED
+    _STOP_REQUESTED = True
+
+
 try:
-    _STOP_REQUESTED = False
-
-    def _handle_sigterm(signum, frame):
-        global _STOP_REQUESTED
-        _STOP_REQUESTED = True
-
     signal.signal(signal.SIGTERM, _handle_sigterm)
 except ValueError:
-    _STOP_REQUESTED = False
+    # Importing from a non-main thread is supported by the test suite.
+    pass
 
 
 def is_stop_requested() -> bool:
@@ -32,88 +37,143 @@ def _lock_file(root: Path) -> Path:
     return root / ".batch_loop.lock"
 
 
+def _read_pid(root: Path) -> int | None:
+    try:
+        pid = int(_pid_file(root).read_text().splitlines()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+    return pid if pid > 0 else None
+
+
 def _verify_pid(root: Path, pid: int) -> bool:
-    """Check PID alive and likely our batch loop."""
+    """Check that *pid* is alive and belongs to this batch loop."""
     try:
         os.kill(pid, 0)
     except OSError:
         return False
     try:
-        with open(f"/proc/{pid}/cmdline", "rb") as f:
-            cmd = f.read()
-        root_bytes = str(root).encode()
-        return root_bytes in cmd and b"batch" in cmd
-    except Exception:
-        return True  # can't verify on this OS — trust alive
+        with open(f"/proc/{pid}/cmdline", "rb") as stream:
+            cmdline = stream.read()
+    except OSError:
+        return True
+    return str(root).encode() in cmdline and b"batch" in cmdline
+
+
+def _release_lock(lock_fd: int) -> None:
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
 
 
 def _acquire_lock(root: Path) -> int:
-    """Create exclusive lock file; return open fd (held by caller)."""
-    lf = _lock_file(root)
+    """Acquire a process lock without trusting an unpublished PID file."""
+    lock_fd = os.open(_lock_file(root), os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        return os.open(lf, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        pf = _pid_file(root)
-        try:
-            pid = int(pf.read_text().strip().splitlines()[0])
-            os.kill(pid, 0)
-            raise SystemExit(f"Already running (PID {pid})")
-        except (ValueError, IndexError):
-            pf.unlink(missing_ok=True)
-            lf.unlink(missing_ok=True)
-            return _acquire_lock(root)
-        except OSError:
-            pf.unlink(missing_ok=True)
-            lf.unlink(missing_ok=True)
-            return _acquire_lock(root)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(lock_fd)
+        if exc.errno not in (errno.EACCES, errno.EAGAIN):
+            raise
+        pid = _read_pid(root)
+        if pid is None:
+            raise SystemExit(
+                "Already running (PID unavailable; startup in progress)"
+            )
+        raise SystemExit(f"Already running (PID {pid})")
+
+    old_pid = _read_pid(root)
+    if old_pid is not None and _verify_pid(root, old_pid):
+        _release_lock(lock_fd)
+        raise SystemExit(f"Already running (PID {old_pid})")
+    _pid_file(root).unlink(missing_ok=True)
+    return lock_fd
+
+
+def _write_pid(root: Path) -> None:
+    """Publish PID metadata atomically after the child process exists."""
+    payload = f"{os.getpid()}\n{root}\n{time.time():.6f}\n"
+    fd, temporary = tempfile.mkstemp(
+        dir=root, prefix=".batch_loop.pid.", text=True
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, _pid_file(root))
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def daemonize(root: Path) -> bool:
+    """Fork the loop and return True only in the child process."""
     root = root.resolve()
     lock_fd = _acquire_lock(root)
-    pid = os.fork()
+    try:
+        pid = os.fork()
+    except BaseException:
+        _release_lock(lock_fd)
+        raise
     if pid != 0:
         os.close(lock_fd)
         print(f"Started background loop (PID {pid})")
         return False
     os.setsid()
-    pf = _pid_file(root)
-    with open(pf, "w") as f:
-        f.write(str(os.getpid()) + "\n")
-        f.write(str(root) + "\n")
+    _write_pid(root)
     return True
 
 
+def _is_zombie(pid: int) -> bool:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    closing_paren = stat.rfind(")")
+    return (
+        closing_paren >= 0
+        and len(stat) > closing_paren + 2
+        and stat[closing_paren + 2] == "Z"
+    )
+
+
+def _is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return not _is_zombie(pid)
+
+
 def stop(root: Path) -> None:
-    """Send SIGTERM to running loop, wait up to 10 s."""
+    """Send SIGTERM to the loop and wait up to ten seconds for exit."""
     root = root.resolve()
     pf = _pid_file(root)
     if not pf.is_file():
         print("No loop running.")
         return
-    try:
-        lines = pf.read_text().strip().splitlines()
-        pid = int(lines[0])
-    except (ValueError, IndexError, OSError):
+    pid = _read_pid(root)
+    if pid is None:
         pf.unlink(missing_ok=True)
-        _lock_file(root).unlink(missing_ok=True)
         print("PID file corrupt — cleaned up.")
         return
     if not _verify_pid(root, pid):
         pf.unlink(missing_ok=True)
-        _lock_file(root).unlink(missing_ok=True)
         print("PID stale — cleaned up.")
         return
-    os.kill(pid, signal.SIGTERM)
-    for _ in range(100):
-        try:
-            os.kill(pid, 0)
-            time.sleep(0.1)
-        except OSError:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        cleanup(root)
+        print(f"Stopped (PID {pid}).")
+        return
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if not _is_alive(pid):
+            cleanup(root)
             print(f"Stopped (PID {pid}).")
-            pf.unlink(missing_ok=True)
-            _lock_file(root).unlink(missing_ok=True)
             return
+        time.sleep(0.1)
     print(f"Sent SIGTERM but PID {pid} still alive after 10 s.")
 
 

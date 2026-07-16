@@ -5,6 +5,8 @@ submission, and that cached submission logic isn't silently skipped.
 """
 
 from pathlib import Path
+import os
+import time
 import yaml
 import pytest
 
@@ -276,6 +278,35 @@ class TestBatchStatus:
         _batch_status(tmp_path)
         captured = capsys.readouterr().out
         assert "No vasp-sop systems found" in captured
+
+    def test_batch_status_reports_loop_and_keeps_phase_table(
+        self, tmp_path, capsys
+    ):
+        """Status includes lifecycle details and the existing phase table."""
+        self._make_system(tmp_path)
+        from vasp_sop.core.batch_lifecycle import _pid_file
+
+        _pid_file(tmp_path).write_text(
+            f"{os.getpid()}\n{tmp_path}\n{time.time() - 3661}\n"
+        )
+        (tmp_path / "batch_snapshot.json").write_text(
+            '{"timestamp":"2026-07-16T00:00:00Z",'
+            '"phases":{"COMPLETE":1,"COMPETING":2}}'
+        )
+        try:
+            from vasp_sop.cli.main import _batch_status
+            _batch_status(tmp_path)
+        finally:
+            _pid_file(tmp_path).unlink(missing_ok=True)
+
+        captured = capsys.readouterr().out
+        assert "Loop running" in captured
+        assert f"PID {os.getpid()}" in captured
+        assert "uptime" in captured.lower()
+        assert "COMPLETE=1" in captured
+        assert "System" in captured
+        assert "Phase" in captured
+
 
 class TestAdvanceDryRunPostprocess:
     """Issue #20: dry-run in UNITCELL_DEFECT phase must preview post-processing
