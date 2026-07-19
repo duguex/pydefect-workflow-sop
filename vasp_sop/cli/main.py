@@ -17,6 +17,12 @@ import sys
 from pathlib import Path
 from vasp_sop import __version__
 from vasp_sop.core.config import PipelineConfig
+from vasp_sop.core.batch_lifecycle import (
+    cleanup,
+    daemonize,
+    is_stop_requested,
+    stop as _lifecycle_stop,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +159,26 @@ def _handle_vasp(args: argparse.Namespace) -> None:
             print(f"{wd}: NOT converged or not complete")
 
 
+def _handle_report(args: argparse.Namespace) -> None:
+    from vasp_sop.core.report import generate_report
+
+    report_path = generate_report(args.system_dir, args.output)
+    print(f"Report written to {report_path}")
+
+
+def _add_report_parser(subparsers) -> None:
+    """Add the read-only calculation report command."""
+    report_parser = subparsers.add_parser(
+        "report", help="Generate a calculation report from project artifacts"
+    )
+    report_parser.add_argument(
+        "system_dir", type=Path, help="System directory containing plan.yaml"
+    )
+    report_parser.add_argument(
+        "--output", type=Path, help="Output Markdown path (default: system_dir/calculation_report.md)"
+    )
+
+
 def _handle_cpd(args: argparse.Namespace) -> None:
     from vasp_sop.materials import get_intrinsic_elements
     from vasp_sop.defect.cpd import compute_chemical_potentials, adjust_unstable_phase
@@ -174,7 +200,6 @@ def _handle_cpd(args: argparse.Namespace) -> None:
     elif args.action == "diagram":
         from vasp_sop.defect.cpd import adjust_unstable_phase
         from pymatgen.core import Composition
-        from pathlib import Path
         rel = cpd_dir / "relative_energies.yaml"
         adjust_unstable_phase(cpd_dir, rel, target_comp, config)
         print(f"Phase diagram processed in {cpd_dir}")
@@ -213,8 +238,9 @@ def main() -> None:
     _add_cpd_parser(subparsers)
     _add_unitcell_parser(subparsers)
     _add_defect_parser(subparsers)
-    _add_cache_parser(subparsers)
+    _add_report_parser(subparsers)
     _add_batch_parser(subparsers)
+    _add_cache_parser(subparsers)
 
     args = parser.parse_args()
 
@@ -232,7 +258,9 @@ def main() -> None:
         )
 
     # ── Dispatch ────────────────────────────────────────────────────
-    if args.command == "materials":
+    if args.command == "report":
+        _handle_report(args)
+    elif args.command == "materials":
         _handle_materials(args)
     elif args.command == "vasp":
         _handle_vasp(args)
@@ -466,10 +494,12 @@ def _run_pipeline(config: PipelineConfig) -> None:
         for d in other_dirs:
             from vasp_sop.vasp.io import prepare_inputs
             prepare_inputs(d, config)
+        from vasp_sop.vasp.io import input_ready
+        if target_dir and not input_ready(target_dir):
+            from vasp_sop.vasp.io import prepare_inputs
+            prepare_inputs(target_dir, config)
         if df_root.is_dir() and target_dir and (target_dir / "POSCAR").is_file():
             _build_defects(df_root, target_dir, config)
-        if uc_root.is_dir() and target_dir:
-            _uc._prepare_all_inputs(uc_root, target_dir, config)
 
     # ── Polling loop (same semantics as _batch_run) ─────────────────
     import time as _time
@@ -547,7 +577,9 @@ _PRIORITY_MAP: dict[str, str] = {
 
 def _add_cache_parser(subparsers) -> None:
     """Add ``cache`` subcommand with actions."""
-    p = subparsers.add_parser("cache", help="Manage calculation caches")
+    p = subparsers.add_parser("cache", help="Manage VASP calculation results cache")
+    p.add_argument("--cache-root", type=Path, default=None,
+                   help="vasp-cache root directory (default: $VASP_CACHE_ROOT or ~/.cache/vasp_cache)")
     sub = p.add_subparsers(dest="cache_action", required=True)
 
     # status
@@ -563,13 +595,8 @@ def _add_cache_parser(subparsers) -> None:
                     help="Recursively scan directory tree for OUTCARs")
 
     # query
-    sp = sub.add_parser("query", help="Semantic cross-project cache query")
+    sp = sub.add_parser("query", help="Cross-project cache query")
     sp.add_argument("--formula", "-f", help="Filter by chemical formula")
-    sp.add_argument("--functional", help="Filter by functional (e.g. PBE, HSE, SCAN)")
-    sp.add_argument("--calc-type", help="Filter by calc type (e.g. Static, Relax)")
-    sp.add_argument("--tags", help="Filter by tags (e.g. DFT+U, spin)")
-    sp.add_argument("--bandgap-min", type=float, help="Minimum bandgap (eV)")
-    sp.add_argument("--max-lattice", type=float, help="Max lattice constant a/b/c (Å), filters out large cells")
     sp.add_argument("--limit", type=int, default=50, help="Max results")
 
     # migrate
@@ -580,13 +607,14 @@ def _add_cache_parser(subparsers) -> None:
     # verify
     sub.add_parser("verify", help="Check store consistency")
 
-
 def _handle_cache(args: argparse.Namespace) -> None:
     from vasp_sop.core.cache import (
         cache_lookup, vasp_results_put, query, list_cache,
-        cache_stats, migrate_from_sqlite, _get_stores,
+        cache_stats, migrate_from_sqlite,
     )
     from pathlib import Path
+    cr = args.cache_root
+
     if args.cache_action == "put":
         if args.recursive:
             root = args.path.resolve()
@@ -596,7 +624,6 @@ def _handle_cache(args: argparse.Namespace) -> None:
 
             from tqdm import tqdm
 
-            # Phase 1: collect all OUTCAR dirs (single-pass rglob)
             all_dirs: list[Path] = []
             for outcar in sorted(root.rglob("OUTCAR")):
                 d = outcar.parent
@@ -608,13 +635,12 @@ def _handle_cache(args: argparse.Namespace) -> None:
                 print("No OUTCARs found.")
                 return
 
-            # Phase 2: classify serially (NFS-friendly, cache-aware)
             to_cache: list[Path] = []
             unconverged: list[Path] = []
 
             for d in tqdm(all_dirs, desc="Scanning", unit=" dirs"):
-                if cache_lookup(d) is not None:
-                    continue  # already cached
+                if cache_lookup(d, cache_root=cr) is not None:
+                    continue
                 outcar = d / "OUTCAR"
                 if not outcar.is_file():
                     unconverged.append(d)
@@ -632,41 +658,23 @@ def _handle_cache(args: argparse.Namespace) -> None:
                 else:
                     unconverged.append(d)
 
-            # Phase 3: report cached + unconverged
             cached_count = len(all_dirs) - len(to_cache) - len(unconverged)
             if cached_count:
                 print(f"  {cached_count} directories already cached, skipped.")
             for d in unconverged:
                 print(f"  ! {d} (not converged)")
 
-
-            # Phase 4: cache serially (parse + write incrementally)
             if to_cache:
-                from vasp_sop.core.cache import _parse_and_build, _get_stores
-                meta_store, blob_store = _get_stores()
-                meta_docs, blob_docs = [], []
                 total_cached = 0
                 for d in tqdm(to_cache, desc="Caching", unit=" dirs"):
                     try:
-                        r = _parse_and_build(d)
-                        if r:
-                            meta_docs.append(r["meta"])
-                            if r.get("blob"):
-                                blob_docs.append(r["blob"])
-                        if len(meta_docs) >= 100:
-                            meta_store.update(meta_docs)
-                            if blob_docs:
-                                blob_store.update(blob_docs)
-                            total_cached += len(meta_docs)
-                            meta_docs, blob_docs = [], []
+                        key = vasp_results_put(d, cache_root=cr)
+                        if key:
+                            total_cached += 1
+                        else:
+                            print(f"\n  ! {d} (identity failed)")
                     except Exception as exc:
-                        print(f"\n  ! {d} (parse failed: {exc})")
-
-                if meta_docs:
-                    meta_store.update(meta_docs)
-                    if blob_docs:
-                        blob_store.update(blob_docs)
-                    total_cached += len(meta_docs)
+                        print(f"\n  ! {d} (put failed: {exc})")
                 print(f"Cached {total_cached} directories under {root}")
 
             if unconverged:
@@ -680,81 +688,64 @@ def _handle_cache(args: argparse.Namespace) -> None:
             return
         text = outcar.read_text()
         converged = "General timing and accounting" in text[-4096:]
-        vasp_results_put(path, formula=args.formula,
-                         task_name=getattr(args, "task_name", None))
+        key = vasp_results_put(path, cache_root=cr)
         status = "converged" if converged else "not converged"
-        print(f"Cached {path} ({status})")
+        print(f"Cached {path} ({status})" + (f"  key={key}" if key else ""))
         return
 
     if args.cache_action == "status":
-        stats = cache_stats()
-        print(f"vasp_results: {stats['total_entries']} entries  "
-              f"({stats['converged_entries']} converged)  "
-              f"{len(stats['formulas'])} unique formulas")
-        if stats["formulas"]:
-            print(f"Formulas: {', '.join(stats['formulas'][:20])}")
+        stats = cache_stats(cache_root=cr)
+        n_entries = stats.get("entries", 0)
+        n_formulas = stats.get("formulas", 0)
+        blob_bytes = stats.get("total_blob_bytes", 0)
+        print(f"vasp_results: {n_entries} entries  "
+              f"({n_formulas} unique formulas)  "
+              f"{blob_bytes:,} B blob storage")
 
         if args.verbose:
             print()
-            for entry in list_cache(limit=200):
-                c = "C" if entry.get("converged") else " "
-                e = f"{entry.get('total_energy', 0):.4f}" if entry.get("total_energy") is not None else "?"
-                sg = entry.get("space_group") or "?"
-                ns = str(entry.get("nsites") or "?")
-                src = entry.get("source_dir") or "?"
-                import datetime
-                ts = datetime.datetime.fromtimestamp(
-                    entry.get("cached_at", 0)
-                ).strftime("%Y-%m-%d %H:%M:%S")
-                print(f"  {c} {entry['formula']:12s} {entry.get('content_hash', '')[:12]:12s}"
-                      f"  E={e}  {ns:>4s} sites  {sg:8s}"
-                      f"  {ts}  {src}")
+            for entry in list_cache(limit=200, cache_root=cr):
+                c = "✓" if entry.get("converged_ionic") else " "
+                e_val = entry.get("final_energy")
+                e = f"{e_val:.4f}" if e_val is not None else "?"
+                src = entry.get("source_path") or "?"
+                ts = entry.get("created_at") or "?"
+                ident = entry.get("identity_key", "")[:12]
+                print(f"  {c} {entry['formula']:12s} {ident:12s}"
+                      f"  E={e}  {ts}  {src}")
 
     elif args.cache_action == "query":
-        results = query(
-            formula=args.formula,
-            functional=args.functional,
-            calc_type=args.calc_type,
-            tags_contains=args.tags,
-            bandgap_min=args.bandgap_min,
-            lattice_max=args.max_lattice,
-            limit=args.limit,
-        )
+        results = query(formula=args.formula, limit=args.limit, cache_root=cr)
         print(f"{len(results)} results:")
         for r in results:
-            e = f"{r.get('total_energy', 0):.4f}" if r.get('total_energy') is not None else "?"
-            bg = f"{r.get('bandgap', 0):.2f}" if r.get('bandgap') is not None else "?"
-            abc = f"{r.get('max_abc', 0):.1f}" if r.get('max_abc') else "?"
-            print(f"  {r['formula']:12s}  E={e}  gap={bg}eV  max_abc={abc}Å"
-                  f"  {r.get('calc_type') or '':10s}  tags={r.get('tags', '')}")
+            e_val = r.get("final_energy")
+            e = f"{e_val:.4f}" if e_val is not None else "?"
+            print(f"  {r['formula']:12s}  E={e}"
+                  f"  ionic={r.get('converged_ionic', 0)}")
 
     elif args.cache_action == "migrate":
-        stats = cache_stats()
-        if stats["total_entries"] > 0 and not args.force:
-            print(f"JSONStore already has {stats['total_entries']} entries. "
+        stats = cache_stats(cache_root=cr)
+        if stats.get("entries", 0) > 0 and not args.force:
+            print(f"Cache already has {stats['entries']} entries. "
                   f"Use --force to overwrite.")
             return
         n = migrate_from_sqlite()
         print(f"Migrated {n} records from SQLite cache.db.")
 
     elif args.cache_action == "verify":
+        stats = cache_stats(cache_root=cr)
+        entries = list_cache(limit=10000, cache_root=cr)
         from collections import defaultdict
-        meta_store, _ = _get_stores()
-        all_entries = list(meta_store.query(
-            criteria={},
-            properties=["formula", "content_hash", "source_dir", "cached_at"],
-        ))
         by_formula: dict[str, list] = defaultdict(list)
-        for e in all_entries:
+        for e in entries:
             by_formula[e.get("formula", "UNKNOWN")].append(e)
-        stats = cache_stats()
-        print(f"Total entries: {stats['total_entries']}")
-        print(f"Converged: {stats['converged_entries']}")
+        print(f"Total entries: {stats.get('entries', 0)}")
         print(f"Unique formulas: {len(by_formula)}")
         for formula in sorted(by_formula):
-            entries = by_formula[formula]
-            ok = "OK" if any(e.get("total_energy") for e in entries) else "NO_BLOB"
-            print(f"  {formula:12s}  {ok}  ({len(entries)} entries)")
+            group = by_formula[formula]
+            has_energy = any(e.get("final_energy") for e in group)
+            ok = "OK" if has_energy else "NO_ENERGY"
+            print(f"  {formula:12s}  {ok}  ({len(group)} entries)")
 def _add_batch_parser(subparsers) -> None:
     """Add ``batch`` subcommand with actions."""
     p = subparsers.add_parser("batch", help="Multi-system batch operations")
@@ -840,6 +831,8 @@ def _add_batch_parser(subparsers) -> None:
 def _handle_batch(args: argparse.Namespace) -> None:
     if args.batch_action == "status":
         _batch_status(args.root.resolve())
+    elif args.batch_action == "submit":
+        _batch_submit(args.root.resolve(), all_phases=args.all_phases)
     elif args.batch_action == "start":
         _batch_start(args.root.resolve())
     elif args.batch_action == "stop":
@@ -848,8 +841,6 @@ def _handle_batch(args: argparse.Namespace) -> None:
         _batch_history(args.root.resolve(), system=args.system)
     elif args.batch_action == "generate-inputs":
         _batch_generate_inputs(args.root.resolve(), unitcell=args.unitcell)
-        _batch_run(args.root.resolve(), poll_interval=args.poll, dry_run=args.dry_run,
-                   exclude=args.exclude, loop=args.loop)
     elif args.batch_action == "run":
         _batch_run(args.root.resolve(), poll_interval=args.poll, dry_run=args.dry_run,
                    exclude=args.exclude, loop=args.loop)
@@ -859,17 +850,12 @@ def _handle_batch(args: argparse.Namespace) -> None:
 
 
 
-
-from vasp_sop.core.batch_lifecycle import daemonize, stop as _lifecycle_stop, is_stop_requested, cleanup
-
-
 def _batch_start(root: Path) -> None:
     if daemonize(root):
         try:
             _batch_run(root, loop=True)
         finally:
             cleanup(root)
-
 
 
 def _batch_stop(root: Path) -> None:
@@ -1106,33 +1092,72 @@ def _target_dir(s: dict) -> Path | None:
 
 
 def _competing_dirs(s: dict) -> list[Path]:
-    """Return dirs in cpd/ that need VASP submission."""
+    """Return competing phases that need VASP submission or retry."""
     from vasp_sop.vasp.io import check_converged, input_ready
+    from vasp_sop.core.jobs import crisp_terminal_status
+    from vasp_sop.core.job_store import JobStore
     import logging as _log
+
     _logr = _log.getLogger(__name__)
     td = _target_dir(s)
     cpd_dir = s["root"] / _CPD
+    store = JobStore()
     result: list[Path] = []
     for pd in cpd_dir.iterdir():
         if not pd.is_dir() or pd.name == (td.name if td else ""):
             continue
-        if pd.name in ("combos", "mp_flag"):
+        if pd.name == "combos":
+            continue
+        current = store.latest(str(pd.resolve()))
+        if current == "submitted":
+            continue
+        marker = crisp_terminal_status(pd)
+        if marker == "failed":
+            if input_ready(pd) and current != "submitted":
+                result.append(pd)
+            continue
+        if marker == "completed":
             continue
         if not input_ready(pd):
-            poscar = pd / "POSCAR"
-            if poscar.is_file():
+            if (pd / "POSCAR").is_file():
                 _logr.warning("Competing phase %s has POSCAR but no VASP inputs "
                               "(INCAR/POTCAR missing)", pd.name)
             continue
         if check_converged(pd):
             continue
-        from vasp_sop.core.job_store import JobStore
-        if JobStore().latest(str(pd.resolve())) == "submitted":
-            continue
-        if JobStore().latest(str(pd.resolve())) in ("converged", "unconverged", "failed"):
-            continue
-        result.append(pd)
+        state = store.latest(str(pd.resolve()))
+        if state not in ("converged", "submitted"):
+            result.append(pd)
     return sorted(result)
+
+
+def _competing_blockers(s: dict) -> list[Path]:
+    """Return lifecycle states that block entering CPD post-processing."""
+    from vasp_sop.vasp.io import input_ready
+    from vasp_sop.core.jobs import crisp_terminal_status
+    from vasp_sop.core.job_store import JobStore
+
+    td = _target_dir(s)
+    cpd_dir = s["root"] / _CPD
+    target_name = td.name if td else ""
+    store = JobStore()
+    blockers: list[Path] = []
+    for pd in cpd_dir.iterdir():
+        if not pd.is_dir() or pd.name in (target_name, "combos"):
+            continue
+        marker = crisp_terminal_status(pd)
+        state = store.latest(str(pd.resolve()))
+        if marker == "failed" or state in ("failed", "unconverged"):
+            blockers.append(pd)
+            continue
+        if state not in ("converged", "submitted") and (pd / "POSCAR").is_file():
+            if not input_ready(pd):
+                blockers.append(pd)
+    return sorted(blockers)
+
+
+
+
 
 
 def _phase(s: dict) -> str:
@@ -1142,7 +1167,7 @@ def _phase(s: dict) -> str:
     ``target_vertices.yaml``, the system never regresses to
     COMPETING — even when competing-phase submissions reappear.
     """
-    from vasp_sop.vasp.io import check_converged, input_ready
+    from vasp_sop.vasp.io import input_ready
     from vasp_sop.core.job_store import JobStore
     _js = JobStore()
     td = _target_dir(s)
@@ -1209,11 +1234,30 @@ def _phase(s: dict) -> str:
     # ── Normal upstream progression (CPD not yet complete) ────────
     if _js.latest(str(td.resolve())) != "converged":
         return "STRUCTURE_OPT"
-    if _competing_dirs(s):
+    if _competing_dirs(s) or _competing_blockers(s):
         return "COMPETING"
     return "CHEM_POT_DIAGRAM"
 
 
+
+
+def _unitcell_build_failure(root: Path) -> dict[str, str] | None:
+    """Read a terminal unitcell build failure without introducing a phase."""
+    import json
+
+    status_path = Path(root) / _UC / "unitcell_build_status.json"
+    if not status_path.is_file():
+        return None
+    try:
+        status = json.loads(status_path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(status, dict) or status.get("status") != "failed":
+        return None
+    return {
+        "reason": str(status.get("reason", "unitcell_build_failed")),
+        "diagnostic": str(status.get("diagnostic", "no diagnostic recorded")),
+    }
 
 
 def _crisp_active_dirs(*, skip: bool = False) -> set[str]:
@@ -1249,7 +1293,7 @@ def _advance_one_system(s: dict, *, dry_run: bool = False, log_to_logger: bool =
     from vasp_sop.defect.builder import build_all as _build_defects
     from vasp_sop.defect.analysis import analyze as _analyze_defects
     from vasp_sop.core.cache import (
-        vasp_results_get as _crg, vasp_results_put,
+        cache_lookup, vasp_results_put,
     )
     from vasp_sop.core.job_store import JobStore
     _logger = logging.getLogger(__name__)
@@ -1277,6 +1321,13 @@ def _advance_one_system(s: dict, *, dry_run: bool = False, log_to_logger: bool =
             _logger.warning("%s/%s submit failed: %s", sys_name, label, exc)
             return None
     p = _phase(s)
+    if p == "UNITCELL_DEFECT":
+        failure = _unitcell_build_failure(s["root"])
+        if failure:
+            raise RuntimeError(
+                f"unitcell blocked for {s['name']}: {failure['reason']}; "
+                f"{failure['diagnostic']}"
+            )
     if p == "COMPLETE" or p == "NO_TARGET":
         return
 
@@ -1328,32 +1379,35 @@ def _advance_one_system(s: dict, *, dry_run: bool = False, log_to_logger: bool =
             if check_converged(td):
                 JobStore().record(str(td.resolve()), "converged")
             else:
-                f, m = s["formula"], s["mpid"]
-                cached = None
-                if f and m:
-                    cached = _crg(f, m)
+                cached = cache_lookup(td)
                 if cached:
                     _logger.info("%s target restored from calc cache", s["name"])
                     from vasp_sop.core.cache import restore_from_cache
-                    restore_from_cache(td)
-                    import json as _json
-                    submit_info = {"task_name": "cached", "work_dir": str(td.resolve())}
-                    with open((s["root"] / _CPD / ".target_submit.json"), "w") as _f:
-                        _json.dump(submit_info, _f)
-                    from vasp_sop.core.job_store import record_if_done
-                    record_if_done(JobStore(), td, source="cache_restore")
+                    restored = restore_from_cache(td)
+                    if restored:
+                        import json as _json
+                        submit_info = {"task_name": "cached", "work_dir": str(td.resolve())}
+                        with open((s["root"] / _CPD / ".target_submit.json"), "w") as _f:
+                            _json.dump(submit_info, _f)
+                        from vasp_sop.core.job_store import record_if_done
+                        record_if_done(JobStore(), td, source="cache_restore")
+                elif input_ready(td):
+                    _submit_or_skip(td, "target", s["name"])
         # Re-evaluate phase — target may now be recorded as done
         p = _phase(s)
+
 
     if p == "COMPETING":
         for cd in _competing_dirs(s):
             if JobStore().latest(str(cd.resolve())) == "submitted":
                 continue
             if "_mp-" in cd.name:
-                _cf, _cm = cd.name.split("_mp-", 1)
-                _cached = _crg(_cf, _cm)
+                _cached = cache_lookup(cd)
                 if _cached:
                     _logger.info("%s restored from calc cache", cd.name)
+                    from vasp_sop.core.cache import restore_from_cache
+                    restore_from_cache(cd)
+                    continue
             _submit_or_skip(cd, f"phase:{cd.name}", s["name"])
         return
 
@@ -1368,15 +1422,24 @@ def _advance_one_system(s: dict, *, dry_run: bool = False, log_to_logger: bool =
                 _cpd.compute_chemical_potentials(cpd_root, s["config"], target_composition)
                 f, m = s["formula"], s["mpid"]
                 if f and m:
-                    try:
-                        vasp_results_put(_target_dir(s))
-                    except Exception:
-                        pass
+                    td = _target_dir(s)
+                    so = s["root"] / _UC / "structure_opt"
+                    key = vasp_results_put(td)
+                    if not key:
+                        raise RuntimeError(
+                            f"vasp_results_put failed for {s['name']} target"
+                        )
+                    from vasp_sop.core.cache import restore_from_key
+                    if not restore_from_key(key, so):
+                        raise RuntimeError(
+                            f"structure_opt cache restore failed for {s['name']}"
+                        )
+                    _logger.info("%s structure_opt restored from cache", s["name"])
             except Exception as exc:
                 _logger.error("%s CPD failed: %s", s["name"], exc)
                 if not log_to_logger:
                     print(f"  ✗ {s['name']:<18} CPD post-processing FAILED")
-        return
+                raise
     if p == "UNITCELL_DEFECT":
         # ── Dry-run artifact-based preview ────────────────────────────
         # The UNITCELL_DEFECT branch normally submits VASP and (when converged) calls
@@ -1443,6 +1506,16 @@ def _advance_one_system(s: dict, *, dry_run: bool = False, log_to_logger: bool =
                     continue
                 prepare_inputs(task_dir, s["config"], task_type=task)
                 _submit_or_skip(task_dir, f"uc-{task}", s["name"])
+            perfect_dir = df_root / "perfect"
+            if perfect_dir.is_dir() and input_ready(perfect_dir):
+                perfect_path = str(perfect_dir.resolve())
+                perfect_state = JobStore().latest(perfect_path)
+                if check_converged(perfect_dir):
+                    if perfect_state != "converged":
+                        JobStore().record(perfect_path, "converged", source="backfill")
+                elif perfect_state not in ("submitted", "failed", "unconverged"):
+                    _submit_or_skip(perfect_dir, "df-perfect", s["name"])
+
 
             if df_root.is_dir() and not (df_root / "defect_energy_summary.json").is_file():
                 from vasp_sop.vasp.io import (
@@ -1549,6 +1622,12 @@ def _advance_one_system(s: dict, *, dry_run: bool = False, log_to_logger: bool =
                 _logger.info("%s: post-processing ...", s["name"])
                 try:
                     _uc.build_unitcell_yaml(uc_root, s["config"])
+                    failure = _unitcell_build_failure(uc_root.parent)
+                    if failure:
+                        raise RuntimeError(
+                            f"unitcell blocked for {s['name']}: {failure['reason']}; "
+                            f"{failure['diagnostic']}"
+                        )
                     status = _analyze_defects(
                         df_root, s["root"], s["config"],
                         unitcell_yaml=uc_root / "unitcell.yaml",
@@ -1577,8 +1656,12 @@ def _advance_one_system(s: dict, *, dry_run: bool = False, log_to_logger: bool =
                             print(message)
                 except Exception as exc:
                     _logger.error("%s post-processing failed: %s", s["name"], exc)
+                    if _unitcell_build_failure(uc_root.parent):
+                        raise
         except Exception as exc:
             _logger.error("%s UNITCELL_DEFECT failed: %s", s["name"], exc)
+            if _unitcell_build_failure(uc_root.parent):
+                raise
             if not log_to_logger:
                 print(f"  ✗ {s['name']:<18} UNITCELL_DEFECT FAILED")
 
@@ -1803,6 +1886,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
 
     # ── Loop context ────────────────────────────────────────────
     first_pass = True
+    blocked_systems: set[str] = set()
 
     try:
         while not is_stop_requested():
@@ -1890,7 +1974,24 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
             errors: list[tuple[str, str]] = []  # (name, reason)
             for idx, s in enumerate(sys_list, 1):
                 name = s["name"]
+                if name in blocked_systems:
+                    n_skipped += 1
+                    continue
                 p = _phase(s)
+                failure = _unitcell_build_failure(s["root"])
+                if p == "UNITCELL_DEFECT" and failure:
+                    blocked_systems.add(name)
+                    reason = failure["reason"]
+                    diagnostic = failure["diagnostic"]
+                    message = (
+                        f"{name} blocked: unitcell {reason}; {diagnostic}"
+                    )
+                    if loop:
+                        logger.error(message)
+                    else:
+                        print(f"  ✗ {message}")
+                    errors.append((name, reason))
+                    continue
                 if p in ("COMPLETE", "NO_TARGET"):
                     n_skipped += 1
                     continue
@@ -1900,7 +2001,12 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                         _advance_one_system(s, dry_run=dry_run, log_to_logger=True)
                         logger.info("  [%d/%d] %-18s %s ... done", idx, len(sys_list), name, p)
                     except Exception as exc:
-                        reason = str(exc).split("(")[0].strip() or type(exc).__name__
+                        failure = _unitcell_build_failure(s["root"])
+                        if failure:
+                            blocked_systems.add(name)
+                            reason = failure["reason"]
+                        else:
+                            reason = str(exc).split("(")[0].strip() or type(exc).__name__
                         logger.error("%s advance failed: %s", name, exc)
                         errors.append((name, reason))
                 else:
@@ -1910,7 +2016,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                         print(" done")
                     except Exception as exc:
                         reason = str(exc).split("(")[0].strip() or type(exc).__name__
-                        _logger.error("%s advance failed: %s", name, exc)
+                        logger.error("%s advance failed: %s", name, exc)
                         print(f" FAILED ({reason})")
                         errors.append((name, reason))
 
@@ -1983,8 +2089,12 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                     ],
                 })
 
+            terminal_count = done_count + len(blocked_systems)
             if done_count == len(sys_list):
                 _print_info("\nAll systems complete.")
+                break
+            if loop and terminal_count == len(sys_list):
+                _print_info("\nAll systems complete or blocked.")
                 break
 
             if not loop:
@@ -2002,7 +2112,11 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
 
 
 def _batch_generate_inputs(root: Path, *, unitcell: bool = False) -> None:
-    """Generate VASP inputs for all systems in *root* that need them."""
+    """Generate VASP inputs for all systems in *root* that need them.
+
+    With ``unitcell=True``, also generates band/dos/dielectric inputs
+    for systems whose structure_opt has a CONTCAR from handoff.
+    """
     from vasp_sop.vasp.io import input_ready, prepare_inputs
     from vasp_sop.core.config import PipelineConfig
     import logging
@@ -2011,43 +2125,63 @@ def _batch_generate_inputs(root: Path, *, unitcell: bool = False) -> None:
     _CPD_DIR = "cpd"
     _UC_DIR = "unitcell"
 
-    # Collect all phase dirs that need inputs
-    tasks: list[tuple[str, str, Path, Path]] = []  # (sys_name, phase_name, phase_dir, plan_path)
+    # ── CPD phase dirs ─────────────────────────────────────────────
+    tasks: list[tuple[str, str, Path, Path]] = []
     for d in sorted(root.iterdir()):
-        if not d.is_dir():
-            continue
+        if not d.is_dir(): continue
         plan_path = d / "plan.yaml"
-        if not plan_path.is_file():
-            continue
+        if not plan_path.is_file(): continue
         cpd_dir = d / _CPD_DIR
-        if not cpd_dir.is_dir():
-            continue
+        if not cpd_dir.is_dir(): continue
         for pd in sorted(cpd_dir.iterdir()):
-            if not pd.is_dir() or pd.name == "combos":
-                continue
+            if not pd.is_dir() or pd.name == "combos": continue
             if not input_ready(pd):
                 tasks.append((d.name, pd.name, pd, plan_path))
 
-    if not tasks:
-        print("All phase directories already have VASP inputs.")
-        return
+    if tasks:
+        print(f"Generating inputs for {len(tasks)} CPD directories ...")
+        ok = 0
+        for t in tasks:
+            try:
+                sys_name, phase_name, phase_dir, plan_path = t
+                config = PipelineConfig.from_yaml(plan_path, root=phase_dir.parent.parent)
+                prepare_inputs(phase_dir, config)
+                ok += 1
+                print(f"  OK  {sys_name}/{phase_name}")
+            except Exception as exc:
+                print(f"  FAIL {t[0]}/{t[1]}: {exc}")
+        print(f"Done CPD: {ok} generated, {len(tasks)-ok} failed")
 
-    print(f"Generating inputs for {len(tasks)} phase directories across {len(set(t[0] for t in tasks))} systems ...")
-
-    ok = 0
-    fail = 0
-    for t in tasks:
-        try:
-            sys_name, phase_name, phase_dir, plan_path = t
-            config = PipelineConfig.from_yaml(plan_path, root=phase_dir.parent.parent)
-            prepare_inputs(phase_dir, config)
-            ok += 1
-            print(f"  OK  {sys_name}/{phase_name}")
-        except Exception as exc:
-            fail += 1
-            print(f"  FAIL {t[0]}/{t[1]}: {exc}")
-
-    print(f"Done: {ok} generated, {fail} failed")
+    # ── Unitcell tasks (post-handoff only) ─────────────────────────
+    if unitcell:
+        uc_ok = 0
+        uc_skip = 0
+        for d in sorted(root.iterdir()):
+            if not d.is_dir(): continue
+            plan_path = d / "plan.yaml"
+            if not plan_path.is_file(): continue
+            so = d / _UC_DIR / "structure_opt"
+            if not so.is_dir() or not (so / "CONTCAR").is_file():
+                uc_skip += 1
+                continue
+            # Identify target via _target_dir (uses plan.yaml poscar_src)
+            config = PipelineConfig.from_yaml(plan_path, root=d)
+            from vasp_sop.defect.unitcell import _prepare_all_inputs
+            mpid = config.poscar_src.split("mp-", 1)[1] if config.poscar_src.startswith("MP mp-") else None
+            td = _target_dir({"root": d, "mpid": mpid, "formula": config.formula})
+            if td is None or not td.is_dir():
+                uc_skip += 1
+                continue
+            try:
+                _prepare_all_inputs(so.parent, td, config)
+                uc_ok += 1
+                print(f"  OK  {d.name}/band,dos,dielectric")
+            except Exception as exc:
+                print(f"  FAIL {d.name}/unitcell: {exc}")
+        if uc_skip:
+            print(f"Skipped {uc_skip} systems (structure_opt not ready — run CPD first)")
+        if uc_ok:
+            print(f"Done unitcell: {uc_ok} generated")
 
 
 def _batch_submit(root: Path, *, all_phases: bool = False) -> None:
@@ -2090,7 +2224,7 @@ def _batch_submit(root: Path, *, all_phases: bool = False) -> None:
         target_name = None
         other_phases: list[Path] = []
         for pd in sorted(cpd_dir.iterdir()):
-            if not pd.is_dir() or pd.name == "combos" or pd.name == "mp_flag":
+            if not pd.is_dir() or pd.name == "combos":
                 continue
             if not input_ready(pd):
                 continue
