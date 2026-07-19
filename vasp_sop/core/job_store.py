@@ -34,58 +34,66 @@ _VALID_STATUSES = frozenset({
 
 
 class JobStore:
-    """Record and query per-calculation VASP job states."""
+    """Record and query per-calculation VASP job states.
+
+    Supports context manager for batch loops::
+
+        with JobStore() as js:
+            js.record(...)
+    """
 
     def __init__(self, db_path: Path | None = None) -> None:
         self._path = _db_path(db_path)
+        self._conn: sqlite3.Connection | None = None
         self._init_db()
 
-    def _connection(self) -> sqlite3.Connection:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        db = sqlite3.connect(str(self._path), timeout=10)
-        db.execute("PRAGMA journal_mode=WAL")
-        db.row_factory = sqlite3.Row
-        return db
+    @property
+    def _db(self) -> sqlite3.Connection:
+        """Lazily-opened persistent connection (WAL mode)."""
+        if self._conn is None:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._conn = sqlite3.connect(str(self._path), timeout=10)
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.row_factory = sqlite3.Row
+        return self._conn
+
+    def __enter__(self) -> "JobStore":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
     def _init_db(self) -> None:
-        db = self._connection()
-        try:
-            db.execute("""
-                CREATE TABLE IF NOT EXISTS job_history (
-                    dir_path    TEXT NOT NULL,
-                    status      TEXT NOT NULL,
-                    timestamp   REAL NOT NULL,
-                    source      TEXT NOT NULL DEFAULT 'batch_run',
-                    attempt     INTEGER NOT NULL DEFAULT 0,
-                    task_name   TEXT NOT NULL DEFAULT '',
-                    reason      TEXT NOT NULL DEFAULT ''
-                )
-            """)
-            db.execute("""
-                CREATE INDEX IF NOT EXISTS idx_jh_dir_time
-                ON job_history(dir_path, timestamp)
-            """)
-            db.execute("""
-                CREATE TABLE IF NOT EXISTS tracked (
-                    dir_path      TEXT PRIMARY KEY,
-                    submitted_at  REAL NOT NULL
-                )
-            """)
-            db.commit()
-        finally:
-            db.close()
-        # Migration: add lifecycle columns if missing (v0.1.0 → v0.2.0)
-        db = self._connection()
-        try:
-            for col, col_type in [("attempt", "INTEGER NOT NULL DEFAULT 0"),
-                                   ("task_name", "TEXT NOT NULL DEFAULT ''"),
-                                   ("reason", "TEXT NOT NULL DEFAULT ''")]:
-                try:
-                    db.execute(f"ALTER TABLE job_history ADD COLUMN {col} {col_type}")
-                except sqlite3.OperationalError:
-                    pass
-            db.commit()
-        finally:
-            db.close()
+        db = self._db
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS job_history (
+                dir_path    TEXT NOT NULL,
+                status      TEXT NOT NULL,
+                timestamp   REAL NOT NULL,
+                source      TEXT NOT NULL DEFAULT 'batch_run',
+                attempt     INTEGER NOT NULL DEFAULT 0,
+                task_name   TEXT NOT NULL DEFAULT '',
+                reason      TEXT NOT NULL DEFAULT ''
+            )
+        """)
+        db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_jh_dir_time
+            ON job_history(dir_path, timestamp)
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS tracked (
+                dir_path      TEXT PRIMARY KEY,
+                submitted_at  REAL NOT NULL
+            )
+        """)
+        for col, col_type in [("attempt", "INTEGER NOT NULL DEFAULT 0"),
+                               ("task_name", "TEXT NOT NULL DEFAULT ''"),
+                               ("reason", "TEXT NOT NULL DEFAULT ''")]:
+            try:
+                db.execute(f"ALTER TABLE job_history ADD COLUMN {col} {col_type}")
+            except sqlite3.OperationalError:
+                pass
+        db.commit()
 
     def record(self, dir_path: str, status: str,
                source: str = "batch_run", attempt: int = 0,
@@ -94,93 +102,71 @@ class JobStore:
         if status not in _VALID_STATUSES:
             raise ValueError(f"Invalid status {status!r}; "
                              f"must be one of {sorted(_VALID_STATUSES)}")
-        db = self._connection()
-        try:
-            db.execute(
-                "INSERT INTO job_history "
-                "(dir_path, status, timestamp, source, attempt, task_name, reason) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (dir_path, status, time.time(), source, attempt, task_name, reason),
-            )
-            db.commit()
-        finally:
-            db.close()
+        self._db.execute(
+            "INSERT INTO job_history "
+            "(dir_path, status, timestamp, source, attempt, task_name, reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (dir_path, status, time.time(), source, attempt, task_name, reason),
+        )
+        self._db.commit()
 
     def track(self, dir_path: str) -> None:
         """加入待检查列表（提交时调用）。"""
-        db = self._connection()
-        try:
-            db.execute(
-                "INSERT OR REPLACE INTO tracked (dir_path, submitted_at) VALUES (?, ?)",
-                (dir_path, time.time()),
-            )
-            db.commit()
-        finally:
-            db.close()
+        self._db.execute(
+            "INSERT OR REPLACE INTO tracked (dir_path, submitted_at) VALUES (?, ?)",
+            (dir_path, time.time()),
+        )
+        self._db.commit()
 
     def untrack(self, dir_path: str) -> None:
         """从待检查列表移除（收敛或放弃时调用）。"""
-        db = self._connection()
-        try:
-            db.execute("DELETE FROM tracked WHERE dir_path = ?", (dir_path,))
-            db.commit()
-        finally:
-            db.close()
+        self._db.execute("DELETE FROM tracked WHERE dir_path = ?", (dir_path,))
+        self._db.commit()
 
     def tracked_dirs(self) -> list[dict]:
         """返回 tracked 表中所有目录。"""
-        db = self._connection()
-        try:
-            rows = db.execute(
-                "SELECT dir_path, submitted_at FROM tracked ORDER BY submitted_at"
-            ).fetchall()
-            return [dict(r) for r in rows]
-        finally:
-            db.close()
+        rows = self._db.execute(
+            "SELECT dir_path, submitted_at FROM tracked ORDER BY submitted_at"
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def latest(self, dir_path: str) -> str | None:
         """Return most recent status for *dir_path*, or None."""
-        db = self._connection()
-        try:
-            row = db.execute(
-                "SELECT status FROM job_history "
-                "WHERE dir_path = ? ORDER BY timestamp DESC LIMIT 1",
-                (dir_path,),
-            ).fetchone()
-            return row["status"] if row else None
-        finally:
-            db.close()
+        row = self._db.execute(
+            "SELECT status FROM job_history "
+            "WHERE dir_path = ? ORDER BY timestamp DESC LIMIT 1",
+            (dir_path,),
+        ).fetchone()
+        return row["status"] if row else None
 
     def latest_all(self) -> dict[str, str]:
         """Return {dir_path: latest_status} for every dir with records."""
-        db = self._connection()
-        try:
-            rows = db.execute("""
-                SELECT dir_path, status FROM job_history
-                WHERE (dir_path, timestamp) IN (
-                    SELECT dir_path, MAX(timestamp)
-                    FROM job_history GROUP BY dir_path
-                )
-            """).fetchall()
-            return {r["dir_path"]: r["status"] for r in rows}
-        finally:
-            db.close()
+        rows = self._db.execute("""
+            SELECT dir_path, status FROM job_history
+            WHERE (dir_path, timestamp) IN (
+                SELECT dir_path, MAX(timestamp)
+                FROM job_history GROUP BY dir_path
+            )
+        """).fetchall()
+        return {r["dir_path"]: r["status"] for r in rows}
 
     def history(self, dir_path: str) -> list[dict]:
         """Return chronologically ordered state records."""
-        db = self._connection()
-        try:
-            rows = db.execute(
-                "SELECT status, timestamp, source, attempt, task_name, reason FROM job_history "
-                "WHERE dir_path = ? ORDER BY timestamp ASC",
-                (dir_path,),
-            ).fetchall()
-            return [dict(r) for r in rows]
-        finally:
-            db.close()
+        rows = self._db.execute(
+            "SELECT status, timestamp, source, attempt, task_name, reason FROM job_history "
+            "WHERE dir_path = ? ORDER BY timestamp ASC",
+            (dir_path,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def close(self) -> None:
-        pass
+        """Close the persistent connection (idempotent)."""
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
 
 
 def calc_done_on_disk(path: Path, *, task_type: str = "") -> bool:

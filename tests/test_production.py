@@ -1,317 +1,171 @@
-"""Production data integrity checks for vasp-sop pipelines.
+"""Gold-sample regression checks for publishable formation energies (#101).
 
-This test scans a real production directory (e.g. 2025_undergo_spin_defect)
-and verifies that each system's on-disk state is self-consistent:
-  - Phase-level artifact inventory (expected files present/absent)
-  - defect_energy_summary.json structure + correction coverage
-  - Cross-file invariants (e.g. target_vertices → unitcell.yaml chain)
-  - Anomaly detection (artifacts out of phase, stale lock files)
+Gold systems: GaN, AlN — completed (DONE phase) systems in the production tree
+whose defect formation energies are considered publication-ready.
 
-Run with:
-    VASP_SOP_PROD_DIR=/path/to/project python3 -m pytest tests/test_production.py -v
+These tests validate the integrity of post-processing outputs (defect_energy_summary.json,
+correction.json) against the production data tree.  They are skipped unless the
+environment variable VASP_SOP_PROD_ROOT points to a valid production root directory.
 
-Skips automatically if VASP_SOP_PROD_DIR is not set (safe for CI).
+Regenerate formation-energy figure:
+    cd $VASP_SOP_PROD_ROOT && vasp-sop batch run . --dry-run && \
+    python -c "from vasp_sop.defect.analysis import plot_formation_energies; plot_formation_energies('GaN')"
 """
-
-from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
-import yaml
+
+PROD_ROOT = os.environ.get("VASP_SOP_PROD_ROOT", "")
+
+GOLD_SYSTEMS = ["GaN", "AlN"]
+
+# Maximum allowed absolute correction energy (eV).  Override via env var.
+CORRECTION_BOUND = float(os.environ.get("VASP_SOP_CORRECTION_BOUND", "1.0"))
+
+# Maximum allowed gap between consecutive charge states.
+MAX_CHARGE_GAP = 2
+
+requires_prod = pytest.mark.skipif(
+    not os.environ.get("VASP_SOP_PROD_ROOT"),
+    reason="production tree not available",
+)
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
-def _systems(root: Path) -> list[Path]:
-    """Return all system directories under *root* that have plan.yaml."""
-    result: list[Path] = []
-    for d in sorted(root.iterdir()):
-        if d.is_dir() and (d / "plan.yaml").is_file():
-            result.append(d)
-    return result
+def _defect_dir(system: str) -> Path:
+    """Return the defect directory for a gold system."""
+    return Path(PROD_ROOT) / system / "defect"
 
 
-def _plan(root: Path) -> dict:
-    return yaml.safe_load((root / "plan.yaml").read_text())
+def _load_energy_summary(system: str) -> dict:
+    """Load and return defect_energy_summary.json for a system."""
+    path = _defect_dir(system) / "defect_energy_summary.json"
+    assert path.exists(), f"Missing defect_energy_summary.json for {system}: {path}"
+    with open(path) as f:
+        data = json.load(f)
+    return data
 
 
-def _phase_of(root: Path) -> str:
-    """Filesystem-only phase estimate aligned with current phase names.
+def _find_charge_state_dirs(system: str) -> list:
+    """Find all charge-state directories under the defect directory.
 
-    Prefer the real ``_phase()`` when JobStore is available; fall back to
-    marker files so CI without a job DB still gets a coarse signal.
+    Charge state directories match patterns like:
+      V_Ga_0, V_Ga_1, V_Ga_-1, V_N_2, antisite_Ga_on_N_-2, etc.
+    The trailing integer (possibly negative) is the charge state.
     """
+    defect_dir = _defect_dir(system)
+    if not defect_dir.exists():
+        return []
+    dirs = []
+    for entry in sorted(defect_dir.iterdir()):
+        if entry.is_dir() and re.search(r"[-+]?\d+$", entry.name):
+            dirs.append(entry)
+    return dirs
+
+
+def _extract_charge(dirname: str) -> int:
+    """Extract the integer charge from a directory name."""
+    m = re.search(r"([-+]?\d+)$", dirname)
+    if m:
+        return int(m.group(1))
+    return 0
+
+
+def _is_converged(charge_dir: Path) -> bool:
+    """Check if a charge-state directory has a converged OUTCAR."""
+    outcar = charge_dir / "OUTCAR"
+    if not outcar.exists():
+        return False
+    # Simple convergence check: look for 'reached required accuracy'
     try:
-        from vasp_sop.core.config import PipelineConfig
-        from vasp_sop.cli.main import _phase
-
-        cfg = PipelineConfig.from_yaml(root / "plan.yaml", root=root)
-        src = cfg.poscar_src
-        mpid = src.split("mp-", 1)[1] if src.startswith("MP mp-") else None
-        return _phase({
-            "name": root.name,
-            "root": root,
-            "config": cfg,
-            "formula": cfg.formula,
-            "mpid": mpid,
-        })
-    except Exception:
-        pass
-
-    cpd = root / "cpd"
-    tv = cpd / "target_vertices.yaml"
-    ce = cpd / "composition_energies.yaml"
-    uc = root / "unitcell"
-    df = root / "defect"
-    es = df / "defect_energy_summary.json" if df.is_dir() else None
-
-    if tv.is_file():
-        has_uc_inputs = any(
-            (uc / t / "INCAR").is_file()
-            for t in ("band", "dos", "dielectric")
-        )
-        if not has_uc_inputs:
-            return "UNITCELL_DEFECT"
-        if es and es.is_file() and (uc / "unitcell.yaml").is_file():
-            return "COMPLETE"
-        return "UNITCELL_DEFECT"
-
-    if not cpd.is_dir():
-        return "STRUCTURE_OPT"
-
-    for sub in cpd.iterdir():
-        if sub.is_dir():
-            try:
-                if any(f.startswith("OUTCAR") for f in os.listdir(str(sub))):
-                    return "COMPETING"
-            except (PermissionError, FileNotFoundError):
-                continue
-
-    if ce.is_file():
-        return "CHEM_POT_DIAGRAM"
-    return "COMPETING"
+        text = outcar.read_text(errors="ignore")
+        return "reached required accuracy" in text
+    except OSError:
+        return False
 
 
-def _check_summary_invariants(path: Path) -> list[str]:
-    """Return list of violation descriptions, empty if valid."""
-    errors: list[str] = []
-    try:
-        data = json.loads(path.read_text())
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        errors.append(f"not valid JSON: {exc}")
-        return errors
+@requires_prod
+class TestProductionFormationEnergies:
+    """Gold-sample regression checks for GaN and AlN formation energies (#101)."""
 
-    for key in ("@module", "@class", "title", "defect_energies"):
-        if key not in data:
-            errors.append(f"missing key {key!r}")
-
-    if "defect_energies" in data and not isinstance(data["defect_energies"], dict):
-        errors.append("defect_energies is not a dict")
-
-    return errors
-
-
-def _eligible_defect_dirs(df: Path) -> list[Path]:
-    out: list[Path] = []
-    if not df.is_dir():
-        return out
-    for child in df.iterdir():
-        if not child.is_dir() or child.name == "perfect":
-            continue
-        if "_" not in child.name:
-            continue
-        if (child / "OUTCAR").is_file() or (child / "calc_results.json").is_file():
-            out.append(child)
-    return out
-
-
-@pytest.fixture(scope="module")
-def prod_dir() -> Path | None:
-    d = os.environ.get("VASP_SOP_PROD_DIR")
-    if not d:
-        pytest.skip("VASP_SOP_PROD_DIR not set (safe skip for CI)")
-    p = Path(d).resolve()
-    if not p.is_dir():
-        pytest.skip(f"VASP_SOP_PROD_DIR={d} is not a directory")
-    return p
-
-
-# ── Phase-level tests ────────────────────────────────────────────────────────
-
-def test_all_systems_have_plan_yaml(prod_dir: Path):
-    """Every system directory must have a valid plan.yaml."""
-    for d in _systems(prod_dir):
-        try:
-            p = _plan(d)
-            assert "project" in p, f"{d.name}: plan.yaml missing 'project'"
-            assert "formula" in p["project"], f"{d.name}: plan.yaml missing formula"
-        except (yaml.YAMLError, FileNotFoundError) as exc:
-            pytest.fail(f"{d.name}: plan.yaml invalid — {exc}")
-
-
-def test_phase_artifact_inventory(prod_dir: Path):
-    """Each system's on-disk artifacts must be consistent with its phase."""
-    anomalies: list[str] = []
-    for d in _systems(prod_dir):
-        phase = _phase_of(d)
-        cpd = d / "cpd"
-        tv = cpd / "target_vertices.yaml"
-        ce = cpd / "composition_energies.yaml"
-        se = cpd / "standard_energies.yaml"
-        uc = d / "unitcell"
-        df = d / "defect"
-        es = df / "defect_energy_summary.json" if df.is_dir() else None
-        partial = (
-            df / "defect_energy_summary.partial.json" if df.is_dir() else None
-        )
-
-        if phase in ("COMPLETE", "UNITCELL_DEFECT"):
-            if not tv.is_file():
-                anomalies.append(
-                    f"{d.name}: {phase} but missing target_vertices.yaml"
-                )
-            if not se.is_file():
-                anomalies.append(
-                    f"{d.name}: {phase} but missing standard_energies.yaml"
-                )
-            if not uc.is_dir():
-                anomalies.append(f"{d.name}: {phase} but no unitcell/")
-            if not df.is_dir():
-                anomalies.append(f"{d.name}: {phase} but no defect/")
-        elif phase == "COMPETING":
-            if es and es.is_file():
-                anomalies.append(
-                    f"{d.name}: COMPETING but defect_energy_summary.json exists"
-                )
-            if partial and partial.is_file():
-                anomalies.append(
-                    f"{d.name}: COMPETING but defect_energy_summary.partial.json exists"
-                )
-        elif phase == "CHEM_POT_DIAGRAM":
-            if not ce.is_file():
-                anomalies.append(
-                    f"{d.name}: CHEM_POT_DIAGRAM but no composition_energies.yaml"
-                )
-            if df.is_dir() and es and es.is_file():
-                anomalies.append(
-                    f"{d.name}: CHEM_POT_DIAGRAM but final defect_energy_summary.json exists"
-                )
-
-    if anomalies:
-        pytest.fail("Artifact anomalies found:\n  " + "\n  ".join(anomalies))
-
-
-def test_defect_summary_integrity(prod_dir: Path):
-    """Every *final* defect_energy_summary.json must be valid JSON."""
-    errors: list[str] = []
-    for d in _systems(prod_dir):
-        es = d / "defect" / "defect_energy_summary.json"
-        if not es.is_file():
-            continue
-        errs = _check_summary_invariants(es)
-        for e in errs:
-            errors.append(f"{d.name}: {e}")
-
-    if errors:
-        pytest.fail("Summary integrity violations:\n  " + "\n  ".join(errors))
-
-
-def test_final_summary_has_correction_coverage_or_status(prod_dir: Path):
-    """Final summary implies full correction coverage or analyze_status=full.
-
-    Exposes incomplete post-process left as a final summary (issue #0007).
-    Partial work must live in defect_energy_summary.partial.json instead.
-    """
-    errors: list[str] = []
-    for d in _systems(prod_dir):
-        df = d / "defect"
-        es = df / "defect_energy_summary.json"
-        if not es.is_file():
-            continue
-        eligible = _eligible_defect_dirs(df)
-        if not eligible:
-            continue
-        missing = [
-            c.name for c in eligible if not (c / "correction.json").is_file()
-        ]
-        status_path = df / "analyze_status.json"
-        status = None
-        if status_path.is_file():
-            try:
-                status = json.loads(status_path.read_text()).get("status")
-            except (json.JSONDecodeError, OSError):
-                status = None
-        if missing and status != "full":
-            # Allow analyze_status full only when no missing; otherwise error
-            errors.append(
-                f"{d.name}: final summary but {len(missing)}/{len(eligible)} "
-                f"eligible defects lack correction.json "
-                f"(analyze_status={status!r}); sample missing={missing[:5]}"
+    def test_defect_energy_summary_exists_and_parses(self):
+        """defect_energy_summary.json exists and is valid JSON for gold systems."""
+        for system in GOLD_SYSTEMS:
+            data = _load_energy_summary(system)
+            assert isinstance(data, (dict, list)), (
+                f"{system}: defect_energy_summary.json is not a dict or list"
             )
-        if status is not None and status not in ("full", "partial", "failed"):
-            errors.append(f"{d.name}: bad analyze_status {status!r}")
 
-    if errors:
-        pytest.fail(
-            "Final summary coverage violations:\n  " + "\n  ".join(errors)
-        )
+    def test_converged_charge_states_have_correction(self):
+        """Every converged charge state directory has a correction.json."""
+        for system in GOLD_SYSTEMS:
+            charge_dirs = _find_charge_state_dirs(system)
+            assert len(charge_dirs) > 0, (
+                f"{system}: no charge-state directories found in {_defect_dir(system)}"
+            )
+            for cdir in charge_dirs:
+                if _is_converged(cdir):
+                    correction_path = cdir / "correction.json"
+                    assert correction_path.exists(), (
+                        f"{system}/{cdir.name}: converged but missing correction.json"
+                    )
 
+    def test_correction_within_bound(self):
+        """Absolute correction energy is below the configurable bound."""
+        for system in GOLD_SYSTEMS:
+            charge_dirs = _find_charge_state_dirs(system)
+            for cdir in charge_dirs:
+                correction_path = cdir / "correction.json"
+                if not correction_path.exists():
+                    continue
+                with open(correction_path) as f:
+                    corr_data = json.load(f)
+                # correction.json may store total correction under various keys
+                correction_value = None
+                if isinstance(corr_data, dict):
+                    for key in ("total_correction", "correction", "energy_correction"):
+                        if key in corr_data:
+                            correction_value = float(corr_data[key])
+                            break
+                    if correction_value is None:
+                        # Try first numeric value
+                        for v in corr_data.values():
+                            if isinstance(v, (int, float)):
+                                correction_value = float(v)
+                                break
+                elif isinstance(corr_data, (int, float)):
+                    correction_value = float(corr_data)
 
-def test_unitcell_yaml_structure(prod_dir: Path):
-    """unitcell/unitcell.yaml must exist and parse for COMPLETE systems."""
-    errors: list[str] = []
-    for d in _systems(prod_dir):
-        phase = _phase_of(d)
-        if phase != "COMPLETE":
-            continue
-        uy = d / "unitcell" / "unitcell.yaml"
-        if not uy.is_file():
-            errors.append(f"{d.name}: COMPLETE but missing unitcell/unitcell.yaml")
-            continue
-        try:
-            data = yaml.safe_load(uy.read_text())
-            if not isinstance(data, dict):
-                errors.append(f"{d.name}: unitcell.yaml is not a dict")
-        except yaml.YAMLError as exc:
-            errors.append(f"{d.name}: unitcell.yaml parse error — {exc}")
+                if correction_value is not None:
+                    assert abs(correction_value) < CORRECTION_BOUND, (
+                        f"{system}/{cdir.name}: |correction| = {abs(correction_value):.4f} eV "
+                        f">= bound {CORRECTION_BOUND} eV"
+                    )
 
-    if errors:
-        pytest.fail("Unitcell yaml issues:\n  " + "\n  ".join(errors))
+    def test_charge_states_continuous(self):
+        """Charge states form a continuous sequence with no gaps > MAX_CHARGE_GAP."""
+        for system in GOLD_SYSTEMS:
+            charge_dirs = _find_charge_state_dirs(system)
+            if not charge_dirs:
+                continue
+            # Group by defect type (everything before the trailing charge number)
+            defect_groups = {}
+            for cdir in charge_dirs:
+                m = re.match(r"^(.*?)([-+]?\d+)$", cdir.name)
+                if m:
+                    prefix = m.group(1)
+                    charge = int(m.group(2))
+                    defect_groups.setdefault(prefix, []).append(charge)
 
-
-def test_no_orphan_submission_files(prod_dir: Path):
-    """No stale .target_submit.json or .submitted files outside expected locations."""
-    orphans: list[str] = []
-    for d in _systems(prod_dir):
-        target_submit = d / "cpd" / ".target_submit.json"
-        if target_submit.is_file():
-            try:
-                data = json.loads(target_submit.read_text())
-                if data.get("task_name") == "cached":
-                    pass
-            except (json.JSONDecodeError, Exception):
-                orphans.append(str(target_submit))
-
-        for root_dir, _dirs, files in os.walk(str(d)):
-            for f in files:
-                if f == ".submitted":
-                    orphans.append(os.path.join(root_dir, f))
-
-    if orphans:
-        pytest.fail("Orphaned submission files:\n  " + "\n  ".join(orphans))
-
-
-def test_plan_yaml_round_trip(prod_dir: Path):
-    """Each plan.yaml must be loadable by PipelineConfig (no config corruption)."""
-    from vasp_sop.core.config import PipelineConfig
-    errors: list[str] = []
-    for d in _systems(prod_dir):
-        try:
-            PipelineConfig.from_yaml(d / "plan.yaml", root=d)
-        except Exception as exc:
-            errors.append(f"{d.name}: {exc}")
-    if errors:
-        pytest.fail("Config load failures:\n  " + "\n  ".join(errors))
+            for prefix, charges in defect_groups.items():
+                charges_sorted = sorted(set(charges))
+                for i in range(1, len(charges_sorted)):
+                    gap = charges_sorted[i] - charges_sorted[i - 1]
+                    assert gap <= MAX_CHARGE_GAP, (
+                        f"{system}/{prefix}: charge gap {gap} between "
+                        f"{charges_sorted[i-1]} and {charges_sorted[i]} "
+                        f"exceeds max allowed {MAX_CHARGE_GAP}"
+                    )

@@ -37,10 +37,13 @@ _SUMMARY_PARTIAL = "defect_energy_summary.partial.json"
 _STATUS_JSON = "analyze_status.json"
 
 
-def _defect_dirs(defect_root: Path) -> list[Path]:
+def _defect_dirs(defect_root: Path, *, include_defect_new: bool = False) -> list[Path]:
+    from vasp_sop.defect import is_valid_defect_dir
+
     return sorted(
         d for d in defect_root.iterdir()
-        if d.is_dir() and d.name != "perfect" and "_" in d.name
+        if d.is_dir() and d.name != "perfect"
+        and is_valid_defect_dir(d, include_defect_new=include_defect_new)
     )
 
 
@@ -319,11 +322,15 @@ def analyze(
     # ── OUTCAR recovery (do not hard-fail whole system — #0011) ─────
     from vasp_sop.core.cache import restore_from_cache
     from vasp_sop.core.jobs import move_crisp_outputs
+    from vasp_sop.defect import is_valid_defect_dir, iter_defect_dirs
+
+    include_dn = getattr(config, "include_defect_new", False)
+    valid_dirs = iter_defect_dirs(
+        defect_root, include_perfect=True, include_defect_new=include_dn,
+    )
 
     missing_outcars: list[str] = []
-    for d in list(defect_root.iterdir()) + [perfect_dir]:
-        if not d.is_dir():
-            continue
+    for d in valid_dirs:
         if _has_outcar(d):
             continue
         move_crisp_outputs(d)
@@ -359,7 +366,7 @@ def analyze(
         _write_status(defect_root, "failed", inv, skip_reason="perfect_missing")
         return "failed"
 
-    defect_dirs_all = _defect_dirs(defect_root)
+    defect_dirs_all = _defect_dirs(defect_root, include_defect_new=include_dn)
     inv0 = _inventory(defect_root)
     converged_now = inv0["converged"]
     if not converged_now and not inv0["corrected"]:

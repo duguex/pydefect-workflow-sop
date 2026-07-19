@@ -209,6 +209,43 @@ def _last_max_force(outcar: Path) -> float | None:
     return max(forces)
 
 
+def parse_max_force(path: Path) -> float:
+    """Extract the maximum ionic force component from OUTCAR.
+
+    Looks for OUTCAR in *path* or *path*/output/, finds the last
+    TOTAL-FORCE block, and returns the largest absolute force component.
+    Returns -1.0 if the OUTCAR or force block is unavailable (callers
+    should treat negative values as "no data").
+    """
+    outcar: Path | None = None
+    for cand in (path / "OUTCAR", path / "output" / "OUTCAR"):
+        if cand.is_file():
+            outcar = cand
+            break
+    if outcar is None:
+        return -1.0
+
+    try:
+        text = outcar.read_text()
+    except Exception:
+        return -1.0
+
+    idx = text.rfind(_FORCE_HDR)
+    if idx < 0:
+        return -1.0
+
+    max_f = 0.0
+    for line in text[idx:].splitlines()[2:]:
+        parts = line.strip().split()
+        if len(parts) < 6:
+            break
+        try:
+            max_f = max(max_f, abs(float(parts[3])), abs(float(parts[4])), abs(float(parts[5])))
+        except ValueError:
+            break
+    return max_f
+
+
 def check_converged(path: Path) -> bool:
     """Ionic / job-completion check for a VASP calculation directory.
 
@@ -412,4 +449,59 @@ def prepare_vasprun_recovery_run(path: Path) -> bool:
     return input_ready(path)
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# INCAR patching helpers
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def read_incar(path: Path) -> dict[str, str]:
+    """Read an INCAR file into a dict of {TAG: value_string}.
+
+    Handles ``TAG = value`` and ``TAG value`` formats.  Comments (``#``,
+    ``!``) and blank lines are skipped.  Returns an empty dict if the file
+    does not exist.
+    """
+    incar_path = Path(path) / "INCAR" if path.is_dir() else Path(path)
+    if not incar_path.is_file():
+        return {}
+    params: dict[str, str] = {}
+    for line in incar_path.read_text().splitlines():
+        line = line.split("#")[0].split("!")[0].strip()
+        if not line:
+            continue
+        if "=" in line:
+            key, _, val = line.partition("=")
+        else:
+            parts = line.split(None, 1)
+            if len(parts) == 2:
+                key, val = parts
+            else:
+                continue
+        params[key.strip().upper()] = val.strip()
+    return params
+
+
+def write_incar(path: Path, params: dict[str, str]) -> None:
+    """Write a dict of INCAR parameters to file.
+
+    Args:
+        path: Directory containing INCAR, or direct path to INCAR file.
+        params: Mapping of TAG -> value (will be formatted as ``TAG = value``).
+    """
+    incar_path = Path(path) / "INCAR" if path.is_dir() else Path(path)
+    lines = [f"{k} = {v}" for k, v in params.items()]
+    incar_path.write_text("\n".join(lines) + "\n")
+
+
+def patch_incar(path: Path, **kwargs: str | int | float) -> None:
+    """Read-modify-write INCAR: update only the specified tags.
+
+    Args:
+        path: Directory containing INCAR, or direct path to INCAR file.
+        **kwargs: Tag-value pairs to set (values converted to str).
+    """
+    params = read_incar(path)
+    for k, v in kwargs.items():
+        params[k.upper()] = str(v)
+    write_incar(path, params)
 

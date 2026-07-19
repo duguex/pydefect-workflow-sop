@@ -38,10 +38,10 @@
 | `report` | — | Generate an evidence-based Markdown calculation report from a system directory; read-only except for the report output |
 | `unitcell` | `yaml` | Generate `unitcell.yaml` from completed VASP outputs |
 | `cache` | `put` | Cache a VASP calculation directory (auto-detects formula/task) |
-| | `query` | Semantic cross-project cache search with 6 filters |
+| | `query` | Cross-project cache search (formula + limit) |
 | | `status` | Show cache statistics and list entries |
-| | `verify` | Check dual-store consistency |
-| | `migrate` | Migrate from old SQLite cache (`cache.db`) to JSONStore |
+| | `verify` | Check cache integrity |
+| | `migrate` | Migrate from old SQLite cache (`cache.db`) to vasp-cache |
 
 **Global flags:**
 
@@ -82,7 +82,7 @@ status, presence of `target_vertices.yaml`, etc. — not from a database.
 ### Key Behaviors
 
 - **Per-system isolation** — a failure in one system does not block others
-- **Parallel execution** — `ProcessPoolExecutor(max_workers=14)` across systems
+- **Serial batch loop** — systems are advanced sequentially in a polling loop
 - **Cache-aware skip** — saves `.target_submit.json` with `"cached"` when STRUCTURE_OPT or COMPETING phase results are found in the global cache
 - **Dry-run mode** — `--dry-run` processes all pipeline stages without submitting any VASP jobs
 - **Orphaned-output cleanup** — stale crisp output directories (`output/`) are detected and consolidated during system advancement
@@ -426,46 +426,47 @@ and `target_vertices.yaml`.
 ## 8. Results Cache
 
 The cache layer (`vasp_sop/core/cache.py`) stores parsed VASP results for
-cross-project reuse and querying.
+cross-project reuse and querying. Backed by **vasp-cache v0.3.0 (SQLite
+identity cache)** at `~/.vasp_sop/`.
 
 ### Architecture
 
-Maggma `JSONStore` dual-store at `~/.vasp_sop/`:
+vasp-cache v0.3.0 (SQLite identity cache) — a local SQLite database keyed by
+content hash (formula + k-points + INCAR fingerprint + POTCAR species).
 
-| Store | File | Content |
-|---|---|---|
-| **Meta** | `meta.json` | Lightweight metadata: formula, content_hash, total_energy, bandgap, converged, calc_type, n_sites, space_group, tags, source_dir |
-| **Blobs** | `blobs.json` | Large parsed VASP output: outcar_dict, vasprun_dict, structure_dict, incar_dict, kpoints_dict |
+| Record Type | Content |
+|---|---|
+| **Metadata** | formula, content_hash, total_energy, bandgap, converged, calc_type, n_sites, space_group, tags, source_dir |
+| **Blobs** | Large parsed VASP output: outcar_dict, vasprun_dict, structure_dict, incar_dict, kpoints_dict |
 
 ### Core Operations
 
 **`vasp_results_put(src_dir, formula, content_hash, task_name)`**
 - Parses VASP outputs via `TaskDoc.from_directory()` (primary) with regex
   fallback for minimal OUTCARs
-- Writes to both meta and blob stores
+- Writes metadata and blob records to the identity cache
 - Best-effort: parsing exceptions are caught and logged
 
 **`vasp_results_get(formula, key)`**
-- Returns merged meta+blob dict for exact (formula, key) match
+- Returns merged metadata+blob dict for exact (formula, key) match
 - `key` may be `content_hash`, `task_name`, or `mp_id`
 
 **`cache_lookup(src_dir)`**
 - Convenience: auto-detects formula + content_hash, delegates to `get`
 
-### Query API (6 Filters)
+### Query API (formula + limit)
 
-`query(formula, functional, calc_type, tags, bandgap_min, lattice_max,
-       converged_only)` — MongoDB-style cross-project search:
+`query(formula, limit)` — cross-project cache lookup by formula with a
+result-count limit:
 
-| Filter | Type | Description |
+| Parameter | Type | Description |
 |---|---|---|
 | `formula` | string | Chemical formula (exact match) |
-| `functional` | string | XC functional (PBE, HSE, SCAN, etc.) |
-| `calc_type` | string | Type (Static, Relax, Dielectric, etc.) |
-| `tags` | string | Comma-separated (DFT+U, spin, etc.) |
-| `bandgap_min` | float | Minimum bandgap in eV |
-| `lattice_max` | float | Max lattice constant filter (default: 25.0 Å) |
-| `converged_only` | bool | Only return converged calculations |
+| `limit` | int | Maximum number of results to return (default: 100) |
+
+Additional optional filters (`functional`, `calc_type`, `tags_contains`,
+`bandgap_min`, `lattice_max`, `converged_only`) are accepted for
+backward compatibility but the primary query path is formula + limit.
 
 ### Auto-Fingerprinting
 
@@ -540,6 +541,12 @@ Two-tier local filesystem cache at `~/.vasp_sop/mp_cache/`:
 
 Cache operations are transparent: `mp_combo_get/put/restore` and
 `mp_poscar_get/put` handle all I/O.
+
+The combo-cache manifest (`mp_state.json`, alongside the per-combo `.done`
+marker) is the **sole** source of truth for whether an MP fetch has already
+been performed. The legacy per-directory `mp_flag` marker has been retired —
+`fetch_candidate_phases()` now relies entirely on the combo cache for
+deduplication.
 
 ---
 

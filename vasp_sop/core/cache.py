@@ -68,11 +68,6 @@ def override_cache_root(p: Path | None) -> None:
     CALC_CACHE = SOP_ROOT / "calc_cache"
 
 
-def _content_hash(src_dir: Path) -> str:
-    """Return identity key for *src_dir*. Raises IdentityInputError."""
-    return identity_for_directory(Path(src_dir)).key
-
-
 def _detect_calc_info(src_dir: Path) -> tuple[str, str, str]:
     """Return (formula, identity_key, dir_name) for *src_dir*."""
     p = Path(src_dir)
@@ -124,8 +119,6 @@ def cache_lookup(
 ) -> dict[str, Any] | None:
     """Return cached result for *src_dir*, or None."""
     try:
-        if not _vc_has(src_dir, root=cache_root):
-            return None
         return _vc_get_meta(input_dir=src_dir, root=cache_root)
     except IdentityInputError:
         return None
@@ -189,12 +182,6 @@ def restore_from_key(
 
 def query(
     formula: str | None = None,
-    functional: str | None = None,
-    calc_type: str | None = None,
-    tags_contains: str | None = None,
-    bandgap_min: float | None = None,
-    lattice_max: float | None = None,
-    converged_only: bool = True,
     limit: int = 100,
     *,
     cache_root: Path | None = None,
@@ -202,24 +189,7 @@ def query(
     """Query vasp-cache by formula.
 
     vasp-cache v0.3.0 supports ``formula`` and ``limit`` only.
-    Raises ``ValueError`` for unsupported filter parameters.
     """
-    unsupported = []
-    if functional is not None:
-        unsupported.append("functional")
-    if calc_type is not None:
-        unsupported.append("calc_type")
-    if tags_contains is not None:
-        unsupported.append("tags_contains")
-    if bandgap_min is not None:
-        unsupported.append("bandgap_min")
-    if lattice_max is not None:
-        unsupported.append("lattice_max")
-    if unsupported:
-        raise ValueError(
-            "query filter(s) not supported by vasp-cache v0.3.0: "
-            + ", ".join(unsupported)
-        )
     return _vc_query(formula=formula, limit=limit, root=cache_root)
 
 

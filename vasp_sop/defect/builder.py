@@ -190,24 +190,108 @@ def _handle_interstitials(defect_root: Path, config: PipelineConfig) -> None:
 
 
 def _generate_defect_list(defect_root: Path, config: PipelineConfig) -> None:
-    """Run ``pydefect ds`` to produce ``defect_in.yaml``."""
+    """Generate ``defect_in.yaml`` using doped charge prediction or pydefect fallback."""
     defect_in = defect_root / "defect_in.yaml"
     if defect_in.is_file():
         logger.info("defect_in.yaml already exists, skipping defect list generation.")
         return
 
+    use_doped = config.charge_state_gen_kwargs.get("use_doped", True)
+    method = "pydefect"
+
+    if use_doped:
+        try:
+            from doped.generation import (
+                guess_defect_charge_states,
+                get_vacancy_charge_states,
+            )
+            method = "doped"
+        except ImportError:
+            logger.warning(
+                "doped not available for charge state prediction, "
+                "falling back to pydefect ds."
+            )
+
+    if method == "doped":
+        _generate_defect_list_doped(defect_root, config)
+    else:
+        _generate_defect_list_pydefect(defect_root, config)
+
+    if defect_in.is_file():
+        with open(defect_in) as f:
+            data = yaml.safe_load(f)
+        logger.info("Defect list (method=%s):", method)
+        for defect, valence in (data or {}).items():
+            logger.info("  %s: %s", defect, valence)
+
+
+def _generate_defect_list_pydefect(defect_root: Path, config: PipelineConfig) -> None:
+    """Fallback: run ``pydefect ds`` to produce ``defect_in.yaml``."""
     if config.dopant_elements:
         cmd = f"pydefect ds -d {' '.join(config.dopant_elements)}"
     else:
         cmd = "pydefect ds"
     run_local(cmd, cwd=defect_root)
 
-    if defect_in.is_file():
-        with open(defect_in) as f:
-            data = yaml.safe_load(f)
-        logger.info("Defect list:")
-        for defect, valence in (data or {}).items():
-            logger.info("  %s: %s", defect, valence)
+
+def _generate_defect_list_doped(defect_root: Path, config: PipelineConfig) -> None:
+    """Use doped's probability model to predict charge states and write defect_in.yaml.
+
+    Reads supercell_info.json for host structure info, calls doped's
+    guess_defect_charge_states / get_vacancy_charge_states, and writes
+    the predicted charge states to defect_in.yaml.
+    """
+    from doped.generation import (
+        guess_defect_charge_states,
+        get_vacancy_charge_states,
+    )
+
+    sc_info_path = defect_root / "supercell_info.json"
+    if not sc_info_path.is_file():
+        logger.warning(
+            "supercell_info.json not found, falling back to pydefect ds."
+        )
+        _generate_defect_list_pydefect(defect_root, config)
+        return
+
+    with open(sc_info_path) as f:
+        sc_data = json.load(f)
+
+    probability_threshold = config.charge_state_gen_kwargs.get(
+        "probability_threshold", 0.0075
+    )
+    padding = config.charge_state_gen_kwargs.get("padding", 1)
+
+    try:
+        # Use doped's charge state prediction
+        defect_charges = guess_defect_charge_states(
+            sc_info_path=str(sc_info_path),
+            probability_threshold=probability_threshold,
+            padding=padding,
+        )
+
+        # Convert to pydefect-compatible defect_in.yaml format
+        defect_in_data = {}
+        for defect_name, charges in defect_charges.items():
+            if isinstance(charges, (list, tuple)):
+                defect_in_data[defect_name] = list(charges)
+            else:
+                defect_in_data[defect_name] = charges
+
+        defect_in = defect_root / "defect_in.yaml"
+        with open(defect_in, "w") as f:
+            yaml.dump(defect_in_data, f, default_flow_style=None, sort_keys=False)
+
+        logger.info(
+            "doped charge state prediction: %d defects, threshold=%.4f, padding=%d",
+            len(defect_in_data), probability_threshold, padding,
+        )
+    except Exception as exc:
+        logger.warning(
+            "doped charge state prediction failed (%s), falling back to pydefect ds.",
+            exc,
+        )
+        _generate_defect_list_pydefect(defect_root, config)
 
 
 def _generate_structures(defect_root: Path) -> None:
@@ -231,8 +315,10 @@ def _generate_vasp_inputs(defect_root: Path, config: PipelineConfig) -> None:
     from vasp_sop.vasp.io import prepare_inputs, input_ready
     from shutil import copy2
     from tqdm import tqdm
+    from vasp_sop.defect import is_valid_defect_dir
 
-    dirs = [child for child in defect_root.iterdir() if child.is_dir()]
+    dirs = [child for child in defect_root.iterdir()
+            if child.is_dir() and (child.name == "perfect" or is_valid_defect_dir(child))]
     if not dirs:
         return
 

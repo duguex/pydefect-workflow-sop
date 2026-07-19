@@ -114,6 +114,16 @@ class PipelineConfig:
     energy_adjust_step: float = 0.01
     custom_poscar_path: Optional[Path] = None
 
+    # Charge state prediction (doped vs pydefect fallback) — #40
+    charge_state_gen_kwargs: dict = field(default_factory=lambda: {
+        "probability_threshold": 0.0075,
+        "padding": 1,
+        "use_doped": True,
+    })
+
+    # Junk dir filter opt-in for defect_new/ — #100
+    include_defect_new: bool = False
+
     # runtime
     root: Path = Path(".")
 
@@ -188,6 +198,12 @@ class PipelineConfig:
             interstitial_indices=list(d.get("interstitial_indices", [])),
             complex_defect_order=d.get("complex_n", 1),
             remote_cutoff=d.get("max_distance", 5.0),
+            charge_state_gen_kwargs={
+                "probability_threshold": d.get("probability_threshold", 0.0075),
+                "padding": d.get("padding", 1),
+                "use_doped": d.get("use_doped", True),
+            },
+            include_defect_new=d.get("include_defect_new", False),
             molecule_corrections={
                 "H2": corr.get("H2", 0.358),
                 "N2": corr.get("N2", 0.722),
@@ -230,6 +246,10 @@ class PipelineConfig:
                 "interstitial_indices": list(self.interstitial_indices),
                 "complex_n": self.complex_defect_order,
                 "max_distance": self.remote_cutoff,
+                "probability_threshold": self.charge_state_gen_kwargs.get("probability_threshold", 0.0075),
+                "padding": self.charge_state_gen_kwargs.get("padding", 1),
+                "use_doped": self.charge_state_gen_kwargs.get("use_doped", True),
+                "include_defect_new": self.include_defect_new,
             },
             "corrections": dict(self.molecule_corrections),
             "correction_policy": self.correction_policy,

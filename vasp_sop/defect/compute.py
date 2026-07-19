@@ -6,9 +6,10 @@ import logging
 import time
 from pathlib import Path
 
-from vasp_sop.vasp.io import check_converged, input_ready, restart_from_contcar
+from vasp_sop.vasp.io import check_converged, input_ready, parse_max_force, restart_from_contcar
 from vasp_sop.core.jobs import move_crisp_outputs, submit_vasp
 from vasp_sop.vasp.errors import diagnose_failure, recommended_fix
+from vasp_sop.vasp.auto_heal import apply_correction
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +26,14 @@ def run_vasp(defect_root: Path) -> None:
         )
 
     def _collect_jobs() -> list[Path]:
+        from vasp_sop.defect import is_valid_defect_dir
         result = []
         if not check_converged(perfect_dir):
             result.append(perfect_dir)
         for child in sorted(defect_root.iterdir()):
             if not child.is_dir() or child.name == "perfect":
+                continue
+            if not is_valid_defect_dir(child):
                 continue
             if not input_ready(child):
                 continue
@@ -38,24 +42,12 @@ def run_vasp(defect_root: Path) -> None:
         return result
 
     def _max_f(path: Path) -> float:
-        """Extract max force from OUTCAR (0 if unavailable)."""
-        for cand in (path / "OUTCAR", path / "output" / "OUTCAR"):
-            if cand.is_file():
-                text = cand.read_text()
-                idx = text.rfind("TOTAL-FORCE (eV/Angst)")
-                if idx < 0:
-                    return 0.0
-                mf = 0.0
-                for line in text[idx:].splitlines()[2:]:
-                    p = line.strip().split()
-                    if len(p) < 6:
-                        break
-                    try:
-                        mf = max(mf, abs(float(p[3])), abs(float(p[4])), abs(float(p[5])))
-                    except ValueError:
-                        break
-                return mf
-        return 0.0
+        """Extract max force from OUTCAR (0 if unavailable).
+
+        Delegates to the canonical ``parse_max_force`` in vasp_sop.vasp.io.
+        """
+        mf = parse_max_force(path)
+        return mf if mf >= 0 else 0.0
 
     prev_forces: dict[str, float] = {}
     stalled: set[str] = set()
@@ -93,19 +85,10 @@ def run_vasp(defect_root: Path) -> None:
                     )
                     restart_from_contcar(d)
                 else:
-                    # Stalled: auto-recover with POTIM increase, but keep
-                    # in stalled set so this iteration skips submission.
+                    # Stalled: use auto-heal staged corrections
                     logger.warning("Recovering stalled %s (max_f=%.4f)", dirname, cur_f)
-                    incar_path = d / "INCAR"
-                    if incar_path.is_file():
-                        from pymatgen.io.vasp.inputs import Incar
-                        incar = Incar.from_file(str(incar_path))
-                        current_potim = incar.get("POTIM", 0.5)
-                        new_potim = min(current_potim * 1.5, 5.0)
-                        incar["POTIM"] = new_potim
-                        incar.write_file(str(incar_path))
-                        logger.info("  POTIM %.2f -> %.2f for %s", current_potim, new_potim, dirname)
-                    restart_from_contcar(d)
+                    failure = diagnose_failure(d / "OUTCAR")
+                    apply_correction(d, failure, attempt + 1)
 
         # Only submit non-stalled jobs
         active = [d for d in dirs if d.name not in stalled]

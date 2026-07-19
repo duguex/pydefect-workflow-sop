@@ -552,7 +552,12 @@ def _run_pipeline(config: PipelineConfig) -> None:
                 move_crisp_outputs(wd)
                 try:
                     from vasp_sop.core.cache import vasp_results_put
-                    vasp_results_put(wd)
+                    key = vasp_results_put(wd)
+                    if key is None:
+                        logger.warning(
+                            "%s: cache put returned None (missing output files?)",
+                            wd.name,
+                        )
                 except Exception as exc:
                     logger.warning("Failed to cache %s: %s", wd.name, exc)
                 _js.untrack(wd_str)
@@ -698,6 +703,10 @@ def _handle_cache(args: argparse.Namespace) -> None:
                         if key:
                             total_cached += 1
                         else:
+                            logger.warning(
+                                "%s: cache put returned None (missing output files?)",
+                                d.name,
+                            )
                             print(f"\n  ! {d} (identity failed)")
                     except Exception as exc:
                         print(f"\n  ! {d} (put failed: {exc})")
@@ -715,6 +724,11 @@ def _handle_cache(args: argparse.Namespace) -> None:
         text = outcar.read_text()
         converged = "General timing and accounting" in text[-4096:]
         key = vasp_results_put(path, cache_root=cr)
+        if key is None:
+            logger.warning(
+                "%s: cache put returned None (missing output files?)",
+                path.name,
+            )
         status = "converged" if converged else "not converged"
         print(f"Cached {path} ({status})" + (f"  key={key}" if key else ""))
         return
@@ -1543,7 +1557,12 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
 
     def _cache_phase_results(wd: Path) -> None:
         try:
-            _cache_put(wd)
+            key = _cache_put(wd)
+            if key is None:
+                logger.warning(
+                    "%s: cache put returned None (missing output files?)",
+                    wd.name,
+                )
         except Exception as exc:
             logger.warning("Failed to cache %s: %s", wd.name, exc)
 
@@ -1620,7 +1639,12 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                             continue
                         move_crisp_outputs(pd)
                         formula, mpid = pd.name.split("_mp-", 1)
-                        _cache_put(pd, formula=formula, task_name=f"{formula}_mp-{mpid}")
+                        key = _cache_put(pd, formula=formula, task_name=f"{formula}_mp-{mpid}")
+                        if key is None:
+                            logger.warning(
+                                "%s: cache put returned None (missing output files?)",
+                                pd.name,
+                            )
                         backfilled += 1
                         JobStore().record(str(pd.resolve()), "converged", source="backfill")
                 if backfilled:

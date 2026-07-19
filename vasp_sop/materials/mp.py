@@ -22,7 +22,6 @@ from vasp_sop.core.jobs import run_local
 
 logger = logging.getLogger(__name__)
 
-_MP_FLAG = "mp_flag"  # legacy compatibility marker; mp_state.json is authoritative
 _MP_COMBO_SCHEMA = ".schema-v3"
 _MP_STATE_SCHEMA = 2
 _MOLECULE_RESOURCE_VERSION = "diatomic-reference-v2"
@@ -288,9 +287,6 @@ def fetch_candidate_phases(
     if state is not None:
         logger.info("MP fetch already done (valid %s).", _MP_STATE)
         return target_dir
-
-    if (target_dir / _MP_FLAG).is_file():
-        logger.warning("Ignoring legacy %s without valid %s.", _MP_FLAG, _MP_STATE)
 
     if use_cache:
         cached = mp_combo_get(elements)
