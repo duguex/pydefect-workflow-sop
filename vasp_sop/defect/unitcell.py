@@ -6,6 +6,7 @@ band-structure, DOS, and dielectric-response calculations.
 
 from __future__ import annotations
 
+import json
 import logging
 import shlex
 import shutil
@@ -90,14 +91,45 @@ def _get_task_dirs(uc_root: Path, config: PipelineConfig) -> list[Path]:
 
 
 def _copy_input_from_opt(src: Path, dst: Path) -> None:
-    """Copy POSCAR and prior_info.yaml from structure_opt to a sub-task dir."""
-    poscar_src = src / "POSCAR"
+    """Copy optimized structure from *src* to sub-task dir.
+
+    Prefers CONTCAR (optimized) over POSCAR (initial) so that
+    band/dos/dielectric tasks use the relaxed structure.
+    """
+    contcar = src / "CONTCAR"
+    poscar_src = contcar if contcar.is_file() else (src / "POSCAR")
     if poscar_src.is_file():
         shutil.copy(str(poscar_src), str(dst / "POSCAR"))
 
     prior_src = src / "prior_info.yaml"
     if prior_src.is_file():
         shutil.copy(str(prior_src), str(dst / "prior_info.yaml"))
+
+
+def _unitcell_failure_reason(diagnostic: str) -> str:
+    """Classify terminal unitcell failures into stable reason codes."""
+    normalized = diagnostic.lower().replace("_", " ")
+    missing_vasprun_markers = (
+        "missing vasprun",
+        "vasprun.xml missing",
+        "vasprun.xml not found",
+        "no vasprun",
+    )
+    if any(marker in normalized for marker in missing_vasprun_markers):
+        return "missing_vasprun"
+
+    zero_gap_markers = (
+        "zero band gap",
+        "zero-gap",
+        "zero gap",
+        "near-zero band gap",
+        "near-zero gap",
+        "near zero band gap",
+        "near zero gap",
+    )
+    if any(marker in normalized for marker in zero_gap_markers):
+        return "zero_gap"
+    return "pydefect_vasp_u_failed"
 
 
 def build_unitcell_yaml(uc_root: Path, config: PipelineConfig) -> None:
@@ -162,8 +194,15 @@ def build_unitcell_yaml(uc_root: Path, config: PipelineConfig) -> None:
             exc,
         )
         try:
+            diagnostic = str(exc)
+            status = {
+                "status": "failed",
+                "reason": _unitcell_failure_reason(diagnostic),
+                "diagnostic": diagnostic,
+                "command": cmd,
+            }
             (uc_root / "unitcell_build_status.json").write_text(
-                '{"status": "failed", "reason": "pydefect_vasp_u_failed"}\n'
+                json.dumps(status, ensure_ascii=False) + "\n"
             )
         except OSError:
             pass

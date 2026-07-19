@@ -1,7 +1,7 @@
-"""Adapter from vasp-sop to vasp-cache (signac results cache).
+"""Adapter from vasp-sop to vasp-cache (SQLite identity cache v0.3.0).
 
 MP download paths remain under ``~/.vasp_sop`` (or test override root).
-VASP **results** live in vasp-cache (default ``~/.vasp_cache``).
+VASP **results** live in vasp-cache (default ``~/.cache/vasp_cache``).
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 
 from vasp_cache import (
-    content_hash as _vc_content_hash,
     fetch as _vc_fetch,
     get_meta as _vc_get_meta,
     has as _vc_has,
@@ -19,23 +18,23 @@ from vasp_cache import (
     put as _vc_put,
     query as _vc_query,
     stats as _vc_stats,
+    override_cache_root as _vc_override_cache_root,
+    IdentityInputError,
 )
-from vasp_cache.fingerprint import _incar_fingerprint  # noqa: F401
-from vasp_cache.parse import MAX_LATTICE  # re-export for jobs.py
-from vasp_cache.parse import _extract_tags  # noqa: F401
-from vasp_cache.paths import cache_root as _vc_cache_root
-from vasp_cache.paths import override_cache_root as _vc_override_cache_root
+from vasp_cache.index import identity_for_directory
 
 logger = logging.getLogger(__name__)
 
-# ── SOP-local paths (NOT the results cache) ─────────────────────────────
+# ── Configurable thresholds ───────────────────────────────────────────
+# Calculations with max lattice vector > MAX_LATTICE are skipped
+# (not cached, not submitted).  Set to None to disable.
+MAX_LATTICE: float | None = 25.0
+
+# ── SOP-local paths (NOT the results cache) ────────────────────────────
 SOP_ROOT: Path = Path.home() / ".vasp_sop"
 MP_CACHE: Path = SOP_ROOT / "mp_cache"
 POSCAR_CACHE: Path = MP_CACHE / "poscars"
 CALC_CACHE: Path = SOP_ROOT / "calc_cache"
-
-# Results cache root (vasp-cache)
-CACHE_ROOT: Path = _vc_cache_root()
 
 
 def lattice_too_large(src_dir: Path) -> bool:
@@ -56,7 +55,7 @@ def lattice_too_large(src_dir: Path) -> bool:
 
 def override_cache_root(p: Path | None) -> None:
     """Swap results cache root and SOP path constants (for tests)."""
-    global CACHE_ROOT, SOP_ROOT, MP_CACHE, POSCAR_CACHE, CALC_CACHE
+    global SOP_ROOT, MP_CACHE, POSCAR_CACHE, CALC_CACHE
     if p is None:
         SOP_ROOT = Path.home() / ".vasp_sop"
         _vc_override_cache_root(None)
@@ -67,33 +66,31 @@ def override_cache_root(p: Path | None) -> None:
     MP_CACHE = SOP_ROOT / "mp_cache"
     POSCAR_CACHE = MP_CACHE / "poscars"
     CALC_CACHE = SOP_ROOT / "calc_cache"
-    CACHE_ROOT = _vc_cache_root()
 
 
 def _content_hash(src_dir: Path) -> str:
-    return _vc_content_hash(Path(src_dir))
+    """Return identity key for *src_dir*. Raises IdentityInputError."""
+    return identity_for_directory(Path(src_dir)).key
 
 
 def _detect_calc_info(src_dir: Path) -> tuple[str, str, str]:
-    """Return (formula, content_hash, task_name) for *src_dir*."""
+    """Return (formula, identity_key, dir_name) for *src_dir*."""
     p = Path(src_dir)
-    name = p.name
-    if "_mp-" in name:
-        formula = name.split("_mp-", 1)[0]
-        task_name = name
-    else:
-        task_name = name
-        formula = "unknown"
-        for cand in (p / "CONTCAR", p / "POSCAR"):
-            if cand.is_file():
-                try:
-                    from pymatgen.core.structure import Structure
-
-                    formula = Structure.from_file(str(cand)).composition.reduced_formula
-                    break
-                except Exception:
-                    continue
-    return formula, _content_hash(p), task_name
+    try:
+        ident = identity_for_directory(p)
+        return ident.formula, ident.key, p.name
+    except IdentityInputError:
+        pass
+    formula = "unknown"
+    for cand in (p / "CONTCAR", p / "POSCAR"):
+        if cand.is_file():
+            try:
+                from pymatgen.core.structure import Structure
+                formula = Structure.from_file(str(cand)).composition.reduced_formula
+                break
+            except Exception:
+                continue
+    return formula, "", p.name
 
 
 def vasp_results_put(
@@ -101,40 +98,94 @@ def vasp_results_put(
     formula: str | None = None,
     content_hash: str | None = None,
     task_name: str | None = None,
-) -> None:
+    *,
+    cache_root: Path | None = None,
+) -> str | None:
     """Store VASP results from *src_dir* in vasp-cache.
 
-    Legacy callers pass ``(dir, formula, key)`` where *key* was content_hash
-    or mpid-like token; we treat a lone third arg as *task_name* for lookup.
+    Legacy *formula*, *content_hash*, and *task_name* are ignored;
+    vasp-cache v0.3.0 auto-detects identity from directory content.
+
+    Returns identity key on success, None if identity could not be
+    computed (missing required input files).
     """
-    if task_name is None and content_hash is not None:
-        task_name = content_hash
-    _vc_put(src_dir, formula=formula, task_name=task_name)
-
-def vasp_results_get(formula: str, key: str) -> dict[str, Any] | None:
-    """Return cached result for (formula, key)."""
-    row = _vc_get_meta(formula=formula, key=key)
-    if row is None:
-        return None
-    # Legacy JSONStore fields expected by older tests/callers
-    if "converged" in row:
-        row["converged"] = int(bool(row["converged"]))
-    for k in ("incar_json", "structure_json", "outcar_json", "vasprun_json", "kpoints_json"):
-        row.setdefault(k, None)
-    return row
+    return _vc_put(src_dir, root=cache_root)
 
 
-def cache_lookup(src_dir: Path) -> dict[str, Any] | None:
+def vasp_results_get(
+    formula: str, key: str, *, cache_root: Path | None = None
+) -> dict[str, Any] | None:
+    """Return cached metadata for (formula, identity_key)."""
+    return _vc_get_meta(formula=formula, key=key, root=cache_root)
+
+
+def cache_lookup(
+    src_dir: Path, *, cache_root: Path | None = None
+) -> dict[str, Any] | None:
     """Return cached result for *src_dir*, or None."""
-    if not _vc_has(src_dir):
+    try:
+        if not _vc_has(src_dir, root=cache_root):
+            return None
+        return _vc_get_meta(input_dir=src_dir, root=cache_root)
+    except IdentityInputError:
         return None
-    return _vc_get_meta(src_dir)
 
 
-def restore_from_cache(src_dir: Path) -> bool:
+def restore_from_cache(
+    src_dir: Path, *, cache_root: Path | None = None
+) -> bool:
     """Restore OUTCAR/CONTCAR/vasprun.xml from cache to *src_dir*."""
-    return _vc_fetch(src_dir)
+    try:
+        ident = identity_for_directory(Path(src_dir))
+    except IdentityInputError:
+        return False
+    if not _vc_has(src_dir, root=cache_root):
+        return False
+    # fetch() requires a non-existing target dir: restore via uncreated staging
+    tgt = Path(src_dir)
+    import uuid, shutil
+    staging = tgt.parent / f".vc-restore-{uuid.uuid4().hex[:12]}"
+    try:
+        if not _vc_fetch(ident.key, staging, root=cache_root):
+            return False
+        for name in ("OUTCAR", "CONTCAR", "vasprun.xml"):
+            src = staging / name
+            if src.is_file():
+                shutil.copy2(src, tgt / name)
+        return True
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
+
+def restore_from_key(
+    key: str, target_dir: Path, *, cache_root: Path | None = None
+) -> bool:
+    """Restore calculation to *target_dir* using explicit *key*.
+
+    Fetches to a staging directory, then atomically replaces *target_dir*
+    via rename. Safe against fetch failure — leaves original intact.
+    """
+    tgt = Path(target_dir)
+    import uuid, shutil
+    staging = tgt.parent / f".vc-restore-{uuid.uuid4().hex[:12]}"
+    backup = tgt.parent / f".vc-backup-{uuid.uuid4().hex[:12]}"
+    try:
+        if not _vc_fetch(key, staging, root=cache_root):
+            return False
+        if tgt.exists():
+            tgt.rename(backup)
+        staging.rename(tgt)
+        return True
+    except Exception:
+        # Rollback: restore backup if staging was renamed
+        if staging.exists() and tgt.exists():
+            pass  # rename succeeded, no rollback needed
+        if backup.exists() and not tgt.exists():
+            backup.rename(tgt)
+        return False
+    finally:
+        shutil.rmtree(backup, ignore_errors=True)
+        shutil.rmtree(staging, ignore_errors=True)
 
 def query(
     formula: str | None = None,
@@ -145,28 +196,46 @@ def query(
     lattice_max: float | None = None,
     converged_only: bool = True,
     limit: int = 100,
+    *,
+    cache_root: Path | None = None,
 ) -> list[dict[str, Any]]:
-    return _vc_query(
-        formula=formula,
-        functional=functional,
-        calc_type=calc_type,
-        tags_contains=tags_contains,
-        bandgap_min=bandgap_min,
-        lattice_max=lattice_max,
-        converged_only=converged_only,
-        limit=limit,
-    )
+    """Query vasp-cache by formula.
+
+    vasp-cache v0.3.0 supports ``formula`` and ``limit`` only.
+    Raises ``ValueError`` for unsupported filter parameters.
+    """
+    unsupported = []
+    if functional is not None:
+        unsupported.append("functional")
+    if calc_type is not None:
+        unsupported.append("calc_type")
+    if tags_contains is not None:
+        unsupported.append("tags_contains")
+    if bandgap_min is not None:
+        unsupported.append("bandgap_min")
+    if lattice_max is not None:
+        unsupported.append("lattice_max")
+    if unsupported:
+        raise ValueError(
+            "query filter(s) not supported by vasp-cache v0.3.0: "
+            + ", ".join(unsupported)
+        )
+    return _vc_query(formula=formula, limit=limit, root=cache_root)
 
 
-def list_cache(limit: int = 50) -> list[dict[str, Any]]:
-    return _vc_list_entries(limit=limit)
+def list_cache(
+    limit: int = 50, *, cache_root: Path | None = None
+) -> list[dict[str, Any]]:
+    return _vc_list_entries(limit=limit, root=cache_root)
 
 
-def cache_stats() -> dict[str, Any]:
-    return _vc_stats()
+def cache_stats(*, cache_root: Path | None = None) -> dict[str, Any]:
+    return _vc_stats(root=cache_root)
 
 
 def migrate_from_sqlite() -> int:
-    """Legacy no-op: JSONStore/SQLite results cache abandoned."""
-    logger.warning("migrate_from_sqlite is a no-op; results cache is vasp-cache/signac")
+    """Legacy no-op: SQLite results cache replaced by vasp-cache v0.3.0."""
+    logger.warning(
+        "migrate_from_sqlite is a no-op; results cache is vasp-cache v0.3.0"
+    )
     return 0

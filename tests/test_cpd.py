@@ -10,12 +10,16 @@ code; these tests guard against regressions.
 from pathlib import Path
 
 import pytest
+from pymatgen.core import Composition
 import yaml
 
 from vasp_sop.core.config import PipelineConfig
 from vasp_sop.defect.cpd import (
     adjust_unstable_phase,
     compute_chemical_potentials,
+    ensure_target_results,
+    handoff_target_results,
+    preflight_cpd_inputs,
 )
 
 
@@ -55,6 +59,131 @@ class TestAdjustUnstablePhase:
             # indicates we got past the lookup.
             pass
 
+class TestTargetResultHandoff:
+    def _write_poscar(self, path: Path, formula: str = "NaCl") -> None:
+        species = "Li F" if formula == "LiF" else "Na Cl"
+        path.write_text(
+            f"{formula}\n1\n5 0 0\n0 5 0\n0 0 5\n{species}\n1 1\n"
+            "Direct\n0 0 0\n0.5 0.5 0.5\n"
+        )
+
+    def _write_all_inputs(self, d: Path, formula: str = "NaCl") -> None:
+        self._write_poscar(d / "POSCAR", formula)
+        self._write_poscar(d / "CONTCAR", formula)
+        (d / "INCAR").write_text("ENCUT = 400\n")
+        (d / "KPOINTS").write_text("Auto\n0\nGamma\n4 4 4\n")
+        (d / "POTCAR").write_text("PAW_PBE\n")
+        (d / "OUTCAR").write_text("energy\n")
+        (d / "vasprun.xml").write_text("<vasprun/>\n")
+    def test_handoff_copies_all_7_files_from_target(self, tmp_path):
+        cpd_target = tmp_path / "cpd" / "NaCl_mp-1"
+        source = tmp_path / "unitcell" / "structure_opt"
+        cpd_target.mkdir(parents=True)
+        self._write_all_inputs(cpd_target)
+
+        handoff_target_results(cpd_target, source, Composition("NaCl"))
+        for f in ("POSCAR", "CONTCAR", "OUTCAR", "vasprun.xml", "INCAR", "KPOINTS", "POTCAR"):
+            assert (source / f).is_file(), f"{f} missing in source"
+    def test_handoff_rejects_missing_input_files(self, tmp_path):
+        cpd_target = tmp_path / "cpd" / "NaCl_mp-1"
+        source = tmp_path / "unitcell" / "structure_opt"
+        cpd_target.mkdir(parents=True)
+        self._write_poscar(cpd_target / "POSCAR")
+        self._write_poscar(cpd_target / "CONTCAR")
+        (cpd_target / "OUTCAR").write_text("x\n")
+        (cpd_target / "vasprun.xml").write_text("x\n")
+        with pytest.raises(FileNotFoundError, match="INCAR"):
+            handoff_target_results(cpd_target, source, Composition("NaCl"))
+    def test_handoff_rejects_composition_mismatch(self, tmp_path):
+        cpd_target = tmp_path / "cpd" / "NaCl_mp-1"
+        source = tmp_path / "unitcell" / "structure_opt"
+        cpd_target.mkdir(parents=True)
+        self._write_all_inputs(cpd_target)
+        self._write_poscar(cpd_target / "CONTCAR", "LiF")
+        with pytest.raises(ValueError, match="composition"):
+            handoff_target_results(cpd_target, source, Composition("NaCl"))
+    def test_self_handoff_skips_same_path(self, tmp_path):
+        cpd_target = tmp_path / "cpd" / "NaCl_mp-1"
+        cpd_target.mkdir(parents=True)
+        self._write_all_inputs(cpd_target)
+        handoff_target_results(cpd_target, cpd_target, Composition("NaCl"))
+    def test_handoff_overwrites_stale_source_files(self, tmp_path):
+        cpd_target = tmp_path / "cpd" / "NaCl_mp-1"
+        source = tmp_path / "unitcell" / "structure_opt"
+        cpd_target.mkdir(parents=True)
+        source.mkdir(parents=True)
+        self._write_all_inputs(cpd_target)
+        (source / "OUTCAR").write_text("old stale data\n")
+        handoff_target_results(cpd_target, source, Composition("NaCl"))
+        assert (source / "OUTCAR").read_text() == "energy\n"
+    def test_cpd_only_accepts_complete_target(self, tmp_path):
+        cpd_target = tmp_path / "cpd" / "NaCl_mp-1"
+        cpd_target.mkdir(parents=True)
+        self._write_all_inputs(cpd_target)
+        source = tmp_path / "unitcell" / "structure_opt"
+        ensure_target_results(cpd_target, source, Composition("NaCl"))
+        assert (source / "OUTCAR").is_file()
+    def test_cpd_preflight_rejects_missing_target_results(self, tmp_path):
+        cpd_target = tmp_path / "cpd" / "NaCl_mp-1"
+        cpd_target.mkdir(parents=True)
+        self._write_poscar(cpd_target / "POSCAR")
+        with pytest.raises(FileNotFoundError, match="missing required results"):
+            ensure_target_results(cpd_target, tmp_path / "dummy", Composition("NaCl"))
+
+
+class TestCpdMcePreflight:
+    def test_reports_exact_mce_files_per_phase(self, tmp_path: Path):
+        complete = tmp_path / "NaCl_mp-1"
+        incomplete = tmp_path / "Cl2_mp-2"
+        complete.mkdir()
+        incomplete.mkdir()
+        (complete / "OUTCAR").write_text("energy\n")
+        (complete / "CONTCAR").write_text("structure\n")
+        (incomplete / "OUTCAR").write_text("energy\n")
+        (tmp_path / "combos").mkdir()
+
+        result = preflight_cpd_inputs(tmp_path)
+
+        assert result.phase_dirs == ("Cl2_mp-2", "NaCl_mp-1")
+        assert result.missing == {"Cl2_mp-2": ("CONTCAR",)}
+        assert result.ready is False
+
+    def test_ready_when_every_mce_phase_has_outcar_and_contcar(self, tmp_path: Path):
+        for name in ("NaCl_mp-1", "Cl2_mp-2"):
+            phase = tmp_path / name
+            phase.mkdir()
+            (phase / "OUTCAR").write_text("energy\n")
+            (phase / "CONTCAR").write_text("structure\n")
+
+        result = preflight_cpd_inputs(tmp_path)
+
+        assert result.ready is True
+        assert result.missing == {}
+
+
+    def test_compute_writes_blocked_preflight_before_mce(self, tmp_path, monkeypatch):
+        phase = tmp_path / "NaCl_mp-1"
+        phase.mkdir()
+        phase.joinpath("POSCAR").write_text(
+            "NaCl\n1\n5 0 0\n0 5 0\n0 0 5\nNa Cl\n1 1\n"
+            "Direct\n0 0 0\n0.5 0.5 0.5\n"
+        )
+        phase.joinpath("OUTCAR").write_text("energy\n")
+        run_calls = []
+        monkeypatch.setattr(
+            "vasp_sop.defect.cpd.run_local",
+            lambda *args, **kwargs: run_calls.append(args),
+        )
+
+        with pytest.raises(RuntimeError, match="CPD mce preflight failed"):
+            compute_chemical_potentials(
+                tmp_path, PipelineConfig(formula="NaCl"), Composition("NaCl")
+            )
+
+        status = yaml.safe_load((tmp_path / "cpd_preflight.yaml").read_text())
+        assert status["ready"] is False
+        assert status["missing"] == {"NaCl_mp-1": ["CONTCAR"]}
+        assert run_calls == []
 
 class TestComputeChemicalPotentials:
     """Issue 0002: pydefect pc only supports 2D/3D chem-pot diagrams."""

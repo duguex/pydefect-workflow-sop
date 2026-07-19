@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from vasp_sop.core.jobs import move_crisp_outputs
+from vasp_sop.core.jobs import crisp_terminal_status, move_crisp_outputs
 
 
 def test_output_newer_replaces_root(tmp_path: Path):
@@ -53,3 +53,16 @@ def test_no_output_dir_is_noop(tmp_path: Path):
     assert (tmp_path / "OUTCAR").read_text() == "direct\\n"
     assert not (tmp_path / "output").exists()
 
+
+
+def test_crisp_terminal_status_failure_wins(tmp_path: Path):
+    (tmp_path / ".completed").write_text("old\n")
+    (tmp_path / ".failed").write_text("new\n")
+
+    assert crisp_terminal_status(tmp_path) == "failed"
+
+
+def test_crisp_terminal_status_completed(tmp_path: Path):
+    (tmp_path / ".completed").write_text("done\n")
+
+    assert crisp_terminal_status(tmp_path) == "completed"

@@ -7,6 +7,7 @@ import pytest
 from vasp_sop.core import cache as _cache
 from vasp_sop import materials as _mp
 
+
 # Access cache-path constants through the module so monkeypatch takes effect.
 def _mp_cache() -> Path:
     """Access cache.MP_CACHE (evaluated at call time for monkeypatch)."""
@@ -30,13 +31,17 @@ def _calc_cache() -> Path:
 def _isolate_cache(tmp_path: Path) -> None:
     """Redirect all cache paths into tmp_path."""
     from vasp_sop.core.cache import override_cache_root
+
     override_cache_root(tmp_path / ".vasp_sop")
     # override_cache_root sets cache.MP_CACHE, but mp.py imported the old
     # value at module load time via ``from cache import MP_CACHE``.
     # Directly patch both modules so all code paths see the new path.
     import vasp_sop.materials.mp as _mp_mod
+
     _mp_mod.MP_CACHE = tmp_path / ".vasp_sop" / "mp_cache"
     _mp_mod.POSCAR_CACHE = _mp_mod.MP_CACHE / "poscars"
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  Combined MP download cache  (mp_combo_*)
 # ══════════════════════════════════════════════════════════════════════════
@@ -71,6 +76,7 @@ class TestMpComboCache:
             p.mkdir()
             (p / "POSCAR").write_text("dummy poscar\n")
         (d / ".done").touch()
+        (d / ".schema-v3").touch()
         return d
 
     # -- tests -------------------------------------------------------------
@@ -80,9 +86,36 @@ class TestMpComboCache:
         d = _mp_cache() / "Ga-N"
         d.mkdir(parents=True)
         (d / ".done").touch()
+        (d / ".schema-v3").touch()
+        (d / "mol_N2").mkdir()
+        (d / "mol_N2" / "POSCAR").write_text("N2\n")
 
         result = _mp.mp_combo_get(["Ga", "N"])
         assert result == d
+
+    def test_combo_get_miss_without_schema_marker(self):
+        """Legacy .done-only caches are invalidated after layout changes."""
+        d = _mp_cache() / "Ga-N"
+        d.mkdir(parents=True)
+        (d / ".done").touch()
+
+        assert _mp.mp_combo_get(["Ga", "N"]) is None
+
+    def test_combo_get_miss_missing_f2_resource(self, tmp_path: Path):
+        """Schema-v3 caches lacking mol_F2 are not reusable."""
+        self._populate_combo_cache(tmp_path, ["Cs", "F"], ["Cs_mp-1"])
+
+        assert _mp.mp_combo_get(["Cs", "F"]) is None
+
+    def test_combo_get_miss_when_molecule_resource_is_file(self, tmp_path: Path):
+        """A file named mol_F2 does not satisfy the resource requirement."""
+        self._populate_combo_cache(tmp_path, ["Cs", "F"], ["Cs_mp-1", "mol_F2"])
+        cache = _mp_cache() / _mp.mp._combo_key(["Cs", "F"])
+        (cache / "mol_F2" / "POSCAR").unlink()
+        (cache / "mol_F2").rmdir()
+        (cache / "mol_F2").write_text("not a phase directory\n")
+
+        assert _mp.mp_combo_get(["Cs", "F"]) is None
 
     def test_combo_get_miss_no_dir(self):
         """Returns None when directory does not exist."""
@@ -97,32 +130,49 @@ class TestMpComboCache:
 
     def test_combo_put_copies_phase_dirs(self, tmp_path: Path):
         """mp_combo_put copies all phase subdirs from src_root."""
-        src_root = self._make_src_root(tmp_path, ["Ga_mp-123", "Ga₂O₃_mp-456", "mol_O₂"])
+        src_root = self._make_src_root(
+            tmp_path, ["Ga_mp-123", "Ga₂O₃_mp-456", "mol_O₂"]
+        )
 
         result = _mp.mp_combo_put(["Ga", "O"], src_root)
 
         assert result.is_dir()
         assert (result / ".done").is_file()
+        assert (result / ".schema-v3").is_file()
         for name in ("Ga_mp-123", "Ga₂O₃_mp-456", "mol_O₂"):
             assert (result / name).is_dir()
             assert (result / name / "POSCAR").read_text() == "dummy poscar\n"
+
+    def test_combo_put_replaces_legacy_phase_dirs(self, tmp_path: Path):
+        """Writing a new schema removes phase dirs from a legacy cache."""
+        legacy = _mp_cache() / _mp.mp._combo_key(["Ga", "Cl"])
+        legacy.mkdir(parents=True)
+        (legacy / "Cl2_mp-22848").mkdir()
+        (legacy / ".done").touch()
+
+        src_root = self._make_src_root(tmp_path, ["mol_Cl2"])
+        result = _mp.mp_combo_put(["Ga", "Cl"], src_root)
+
+        assert (result / "mol_Cl2").is_dir()
+        assert not (result / "Cl2_mp-22848").exists()
+        assert (result / ".done").is_file()
+        assert (result / ".schema-v3").is_file()
 
     def test_combo_put_empty_src(self, tmp_path: Path):
         """mp_combo_put succeeds even when src_root has no subdirs."""
         src_root = tmp_path / "empty_src"
         src_root.mkdir()
 
-        result = _mp.mp_combo_put(["Ga", "N"], src_root)
+        result = _mp.mp_combo_put(["Ga", "X"], src_root)
 
         assert result.is_dir()
         assert (result / ".done").is_file()
         # No phase dirs were copied
-        assert list(result.iterdir()) == [result / ".done"]
+        assert {p.name for p in result.iterdir()} == {".done", ".schema-v3"}
 
     def test_combo_restore_when_cache_exists(self, tmp_path: Path):
-        """mp_combo_restore copies phase dirs to dst_root, omitting .done."""
-        self._populate_combo_cache(tmp_path, ["N", "Ga"],
-                                   ["GaN", "mol_N₂"])
+        """mp_combo_restore copies phase dirs and omits cache markers."""
+        self._populate_combo_cache(tmp_path, ["N", "Ga"], ["GaN", "mol_N₂"])
 
         dst_root = tmp_path / "restored"
         dst_root.mkdir()
@@ -131,6 +181,7 @@ class TestMpComboCache:
         assert (dst_root / "GaN").is_dir()
         assert (dst_root / "mol_N₂").is_dir()
         assert not (dst_root / ".done").exists()
+        assert not (dst_root / ".schema-v3").exists()
 
     def test_combo_restore_when_cache_missing(self, tmp_path: Path):
         """mp_combo_restore does nothing when cache has no entry."""
@@ -155,10 +206,26 @@ class TestMpComboCache:
         # New dir was restored
         assert (dst_root / "mol_N₂").is_dir()
 
+    def test_combo_restore_removes_stale_managed_phases(self, tmp_path: Path):
+        """Restore removes old MP/molecule phases absent from the cache."""
+        self._populate_combo_cache(tmp_path, ["N", "Ga"], ["Ga_mp-1", "mol_N2"])
+        dst_root = tmp_path / "restored"
+        dst_root.mkdir()
+        (dst_root / "Old_mp-9").mkdir()
+        (dst_root / "mol_legacy").mkdir()
+        (dst_root / "keep.txt").write_text("preserve\n")
+
+        _mp.mp_combo_restore(["N", "Ga"], dst_root)
+
+        assert not (dst_root / "Old_mp-9").exists()
+        assert not (dst_root / "mol_legacy").exists()
+        assert (dst_root / "Ga_mp-1").is_dir()
+        assert (dst_root / "mol_N2").is_dir()
+        assert (dst_root / "keep.txt").is_file()
+
     def test_combo_key_dedup_and_sort(self, tmp_path: Path):
         """Duplicate / differently ordered elements → same cache dir."""
-        _mp.mp_combo_put(["Ga", "N"],
-                            self._make_src_root(tmp_path, ["GaN"]))
+        _mp.mp_combo_put(["Ga", "N"], self._make_src_root(tmp_path, ["GaN", "mol_N2"]))
 
         # Get with reversed dedup order
         result = _mp.mp_combo_get(["N", "Ga", "Ga", "N"])
@@ -172,83 +239,110 @@ class TestMpComboCache:
 
 
 class TestVaspResultsCache:
-    """Tests for vasp_results_get / vasp_results_put (DB-only storage)."""
+    """Tests for vasp_results_put / cache_lookup / vasp_results_get (v0.3.0)."""
 
-    def _write_minimal_outcar(self, d: Path, energy: str = "-9.18") -> None:
-        """Write OUTCAR that our regex parser can handle."""
+    @staticmethod
+    def _minimal_inputs(d: Path, *, formula: str = "Si", energy: float = -9.18) -> None:
+        """Write all 7 files required by vasp-cache v0.3.0 identity."""
+        # Use Si cubic as simplest valid structure
+        poscar = f"""{formula}
+1.0
+5.43 0 0
+0 5.43 0
+0 0 5.43
+{formula}
+2
+Direct
+0 0 0
+0.25 0.25 0.25
+"""
+        (d / "POSCAR").write_text(poscar)
+        (d / "CONTCAR").write_text(poscar)
+        (d / "INCAR").write_text("ENCUT = 520\nGGA = PE\n")
+        (d / "KPOINTS").write_text("A\n0\nGamma\n4 4 4\n0 0 0\n")
+        (d / "POTCAR").write_text(
+            f"  PAW_PBE {formula} 05Jan2001\n"
+            f"  TITEL  = PAW_PBE {formula} 05Jan2001\n"
+            "   4.00000000000000\n"
+        )
+        (d / "vasprun.xml").write_text(
+            "<modeling><calculation><scstep><energy>"
+            f'<i name="e_fr_energy">{energy}</i>'
+            "</energy></scstep></calculation></modeling>\n"
+        )
         (d / "OUTCAR").write_text(
             f" free  energy    TOTEN  =    {energy} eV\n"
             "    reached required accuracy - convergence\n"
             " General timing and accounting\n"
         )
 
-    def test_vasp_results_get_hit(self, tmp_path: Path):
-        """Returns dict with total_energy when OUTCAR is cached."""
+    def test_put_and_cache_lookup(self, tmp_path: Path):
+        """put returns identity key; cache_lookup finds the entry."""
         src = tmp_path / "src"
         src.mkdir()
-        self._write_minimal_outcar(src)
-        (src / "CONTCAR").write_text(
-            "H\n1.0\n10 0 0\n0 10 0\n0 0 10\nH\n1\nDirect\n0 0 0\n"
-        )
-        _cache.vasp_results_put(src, "GaN", "804")
-        result = _cache.vasp_results_get("GaN", "804")
+        self._minimal_inputs(src, energy=-9.18)
+        key = _cache.vasp_results_put(src)
+        assert key is not None
+        result = _cache.cache_lookup(src)
         assert result is not None
-        assert result["total_energy"] == -9.18
-        assert result["converged"] == 1
-        assert result["nsites"] == 1
+        assert result["formula"] == "Si"
 
-    def test_vasp_results_get_miss_no_dir(self):
-        """Returns None when not cached."""
-        assert _cache.vasp_results_get("GaN", "804") is None
+    def test_put_identity_key_fetchable(self, tmp_path: Path):
+        """Stored key can be used with vasp_results_get."""
+        src = tmp_path / "src"
+        src.mkdir()
+        self._minimal_inputs(src, energy=-9.18)
+        key = _cache.vasp_results_put(src)
+        assert key is not None
+        result = _cache.vasp_results_get("Si", key)
+        assert result is not None
+        assert result["formula"] == "Si"
 
-    def test_vasp_results_get_miss_no_outcar(self, tmp_path: Path):
-        """Returns None when no OUTCAR in src_dir (nothing cached)."""
+    def test_put_missing_inputs_returns_none(self, tmp_path: Path):
+        """put returns None when identity can't be computed (missing files)."""
         src = tmp_path / "empty"
         src.mkdir()
-        _cache.vasp_results_put(src, "GaN", "804")
-        assert _cache.vasp_results_get("GaN", "804") is None
+        (src / "OUTCAR").write_text("free energy TOTEN = -5.0 eV\n")
+        key = _cache.vasp_results_put(src)
+        assert key is None
 
-    def test_vasp_results_put_stores_parsed_data(self, tmp_path: Path):
-        """vasp_results_put stores parsed data in JSONStore via TaskDoc or regex."""
+    def test_cache_lookup_miss(self, tmp_path: Path):
+        """Directory with full inputs but never cached → None."""
+        src = tmp_path / "uncached"
+        src.mkdir()
+        self._minimal_inputs(src, energy=-5.0)
+        assert _cache.cache_lookup(src) is None
+
+    def test_cache_lookup_empty_dir(self, tmp_path: Path):
+        """Empty directory → None."""
+        d = tmp_path / "empty"
+        d.mkdir()
+        assert _cache.cache_lookup(d) is None
+
+    def test_restore_from_cache(self, tmp_path: Path):
+        """restore_from_cache fetches output files back to the dir."""
         src = tmp_path / "src"
         src.mkdir()
-        self._write_minimal_outcar(src)
-        (src / "INCAR").write_text("SYSTEM = test\nENCUT = 520\n")
-        (src / "CONTCAR").write_text(
-            "H\n1.0\n10 0 0\n0 10 0\n0 0 10\nH\n1\nDirect\n0 0 0\n"
-        )
-        _cache.vasp_results_put(src, "GaN", "804")
+        self._minimal_inputs(src, energy=-9.18)
+        _cache.vasp_results_put(src)
 
-        result = _cache.vasp_results_get("GaN", "804")
-        assert result is not None
-        assert result["total_energy"] == -9.18
-        assert result["converged"] == 1
-        assert result["nsites"] == 1
-        # blob JSON fields abandoned with JSONStore; file payload is in vasp-cache
-        assert result.get("total_energy") == -9.18
-    def test_vasp_results_put_missing_src_files(self, tmp_path: Path):
-        """Partial files still produce an entry (energy only)."""
-        src = tmp_path / "src"
-        src.mkdir()
-        self._write_minimal_outcar(src)
-        _cache.vasp_results_put(src, "GaN", "804")
+        work = tmp_path / "work"
+        work.mkdir()
+        self._minimal_inputs(work, energy=-9.18)
+        (work / "OUTCAR").unlink()
+        (work / "vasprun.xml").unlink()
+        assert _cache.restore_from_cache(work) is True
+        assert (work / "OUTCAR").is_file()
 
-        result = _cache.vasp_results_get("GaN", "804")
-        assert result is not None
-        assert result["total_energy"] == -9.18
-        assert result.get("total_energy") == -9.18
-        assert result.get("converged") == 1
-
-    def test_vasp_results_put_skips_no_outcar(self, tmp_path: Path):
-        """No OUTCAR produces no cache entry."""
-        src = tmp_path / "empty"
-        src.mkdir()
-        _cache.vasp_results_put(src, "GaN", "804")
-        assert _cache.vasp_results_get("GaN", "804") is None
+    def test_restore_from_cache_missing_inputs(self, tmp_path: Path):
+        """restore_from_cache returns False when dir has no identity inputs."""
+        d = tmp_path / "bare"
+        d.mkdir()
+        assert _cache.restore_from_cache(d) is False
 
 
 class TestCacheAutoDetect:
-    """Tests for auto-detection and tag extraction."""
+    """Tests for _detect_calc_info and auto-detect put."""
 
     @pytest.fixture(autouse=True)
     def _isolate(self, tmp_path):
@@ -257,353 +351,128 @@ class TestCacheAutoDetect:
     # ── _detect_calc_info ─────────────────────────────────────────────
 
     def test_detect_mp_naming(self, tmp_path: Path):
-        """_mp- in dir name → (formula, mpid)."""
+        """_mp- in dir name + full inputs → (formula, key, dir_name)."""
         d = tmp_path / "GaN_mp-804"
         d.mkdir()
+        _write_si_inputs(d)  # formula from POSCAR beats dir name
         f, ch, tn = _cache._detect_calc_info(d)
-        assert f == "GaN"
-        assert ch != ""
+        assert f == "Si"
+        assert len(ch) == 64  # SHA-256 hex
         assert tn == "GaN_mp-804"
 
-    def test_detect_no_mp_with_poscar(self, tmp_path: Path):
-        """No _mp- but POSCAR present → formula from structure."""
-        d = tmp_path / "Va_Na_0"
-        d.mkdir()
-        (d / "POSCAR").write_text(
-            "NaCl\n1.0\n5.64 0 0\n0 5.64 0\n0 0 5.64\nNa Cl\n1 1\nDirect\n"
-            "0 0 0\n0.5 0.5 0.5\n"
-        )
-        f, ch, tn = _cache._detect_calc_info(d)
-        assert f == "NaCl"
-        assert ch != ""
-        assert tn == "Va_Na_0"
-
     def test_detect_no_mp_no_poscar(self, tmp_path: Path):
-        """No _mp- and no POSCAR → formula unknown."""
+        """No inputs → formula unknown, empty key."""
         d = tmp_path / "some_dir"
         d.mkdir()
         f, ch, tn = _cache._detect_calc_info(d)
         assert f == "unknown"
-        assert ch != ""
+        assert ch == ""
         assert tn == "some_dir"
 
-    # ── _incar_fingerprint ───────────────────────────────────────────
+    # ── put auto-detect ──────────────────────────────────────────────
 
-    def test_incar_fingerprint_no_incar(self, tmp_path: Path):
-        """No INCAR file → 'default'."""
-        assert _cache._incar_fingerprint(tmp_path) == "default"
-
-    def test_incar_fingerprint_matches_keys(self, tmp_path: Path):
-        """INCAR with known tags → compact string."""
-        (tmp_path / "INCAR").write_text("ENCUT = 520\nISIF = 3\nISPIN = 2\n")
-        fp = _cache._incar_fingerprint(tmp_path)
-        assert "ENCUT=520.0" in fp
-        assert "ISIF=3" in fp
-        assert "|" in fp
-
-    def test_incar_fingerprint_irrelevant_tags_ignored(self, tmp_path: Path):
-        """Tags not in fingerprint keys are excluded."""
-        (tmp_path / "INCAR").write_text("ENCUT = 400\nSYSTEM = test\n")
-        fp = _cache._incar_fingerprint(tmp_path)
-        assert "ENCUT=400.0" in fp
-        assert "SYSTEM" not in fp
-
-    # ── _extract_tags ────────────────────────────────────────────────
-
-    def test_extract_tags_no_input(self):
-        """No inputs → empty string."""
-        assert _cache._extract_tags() == ""
-
-    def test_extract_tags_structure_only(self):
-        """Only structure → composition tag."""
-        from pymatgen.core import Lattice, Structure
-        s = Structure(Lattice.cubic(5.64), ["Na", "Cl"], [[0, 0, 0], [0.5, 0.5, 0.5]])
-        tags = _cache._extract_tags(structure=s)
-        assert "Na1Cl1" in tags
-
-    def test_extract_tags_gamma_kpoints(self):
-        """Gamma-only KPOINTS → 'gamma' tag."""
-        from pymatgen.io.vasp import Kpoints
-        k = Kpoints(kpts=[[1, 1, 1]], style=Kpoints.supported_modes.Gamma)
-        tags = _cache._extract_tags(kpoints=k)
-        assert "gamma" in tags
-
-    def test_extract_tags_grid_kpoints(self):
-        """Regular mesh KPOINTS → grid string tag."""
-        from pymatgen.io.vasp import Kpoints
-        k = Kpoints(kpts=[[4, 4, 4]], style=Kpoints.supported_modes.Monkhorst)
-        tags = _cache._extract_tags(kpoints=k)
-        assert "444" in tags
-
-    def test_extract_tags_line_mode_kpoints(self):
-        """Line_mode KPOINTS → 'band-structure' tag."""
-        from pymatgen.io.vasp import Kpoints
-        k = Kpoints(kpts=[[0, 0, 0], [0.5, 0.5, 0.5]],
-                     style=Kpoints.supported_modes.Line_mode)
-        tags = _cache._extract_tags(kpoints=k)
-        assert "band-structure" in tags
-
-    def test_extract_tags_space_group(self):
-        """Space group from sga NOT included in simplified tags."""
-        from pymatgen.core import Lattice, Structure
-        from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
-        s = Structure(Lattice.cubic(5.43), ["Si"]*2, [[0, 0, 0], [0.25, 0.25, 0.25]])
-        sga = SpacegroupAnalyzer(s)
-        sg = sga.get_space_group_symbol()
-        tags = _cache._extract_tags(structure=s, sga=sga)
-        # Simplified tags use composition string, not space group
-        assert sg not in tags
-        assert "Si2" in tags
-
-    def test_extract_tags_incar_gga_and_spin(self):
-        """PBE + spin → tags contain PBE and spin."""
-        from pymatgen.io.vasp import Incar
-        tags = _cache._extract_tags(incar=Incar({"GGA": "PE", "ISPIN": 2}))
-        assert "PBE" in tags
-        assert "spin" in tags
-
-    def test_extract_tags_incar_hybrid_hse(self):
-        """HSE → hybrid and specific type."""
-        from pymatgen.io.vasp import Incar
-        tags = _cache._extract_tags(incar=Incar({"LHFCALC": True, "HFSCREEN": 0.2}))
-        assert "hybrid" in tags
-        assert "HSE" in tags
-
-    def test_extract_tags_incar_ldau(self):
-        """LDAU → DFT+U tag."""
-        from pymatgen.io.vasp import Incar
-        tags = _cache._extract_tags(incar=Incar({"LDAU": True}))
-        assert "DFT+U" in tags
-
-    # ── vasp_results_put auto-detect ─────────────────────────────────
-
-    def test_put_auto_detect_mp_dir(self, tmp_path: Path):
-        """vasp_results_put with auto-detect from _mp- naming."""
+    def test_put_auto_detect_sets_source_path(self, tmp_path: Path):
+        """put records source_path in cached entry."""
         d = tmp_path / "GaN_mp-804"
         d.mkdir()
-        (d / "OUTCAR").write_text(
-            " free  energy    TOTEN  =    -12.0 eV\n"
-            " General timing and accounting\n"
-        )
-        (d / "CONTCAR").write_text(
-            "GaN\n1.0\n3.19 0 0\n0 3.19 0\n0 0 5.19\nGa N\n1 1\nDirect\n"
-            "0 0 0\n0.333 0.667 0.5\n"
-        )
+        _write_si_inputs(d, energy=-12.0)
         _cache.vasp_results_put(d)
-        f, ch, _ = _cache._detect_calc_info(d)
-        r = _cache.vasp_results_get(f, ch)
-        assert r is not None
-        assert r["total_energy"] == -12.0
-        assert r["converged"] == 1
-
-    def test_put_auto_detect_defect_dir(self, tmp_path: Path):
-        """vasp_results_put with auto-detect from POSCAR."""
-        d = tmp_path / "Va_Na_0"
-        d.mkdir()
-        (d / "OUTCAR").write_text(
-            " free  energy    TOTEN  =    -5.0 eV\n"
-            " General timing and accounting\n"
-        )
-        (d / "POSCAR").write_text(
-            "NaCl\n1.0\n5.64 0 0\n0 5.64 0\n0 0 5.64\nNa Cl\n1 1\nDirect\n"
-            "0 0 0\n0.5 0.5 0.5\n"
-        )
-        (d / "INCAR").write_text("ENCUT = 400\n")
-        _cache.vasp_results_put(d)
-        f, ch, _ = _cache._detect_calc_info(d)
-        r = _cache.vasp_results_get(f, ch)
-        assert r is not None
-        assert r["total_energy"] == -5.0
-
-    def test_put_sets_source_dir(self, tmp_path: Path):
-        """Cached entry contains source_dir pointing to src dir."""
-        d = tmp_path / "GaN_mp-804"
-        d.mkdir()
-        (d / "OUTCAR").write_text(
-            " free  energy    TOTEN  =    -12.0 eV\n"
-            " General timing and accounting\n"
-        )
-        (d / "CONTCAR").write_text(
-            "GaN\n1.0\n3.19 0 0\n0 3.19 0\n0 0 5.19\nGa N\n1 1\nDirect\n"
-            "0 0 0\n0.333 0.667 0.5\n"
-        )
-        _cache.vasp_results_put(d)
-        f, ch, _ = _cache._detect_calc_info(d)
-        r = _cache.vasp_results_get(f, ch)
-        assert r is not None
-        assert r["source_dir"] == str(d.resolve())
-
-    # ── _extract_tags — more INCAR variants ─────────────────────────
-
-    def test_extract_tags_pbesol(self):
-        """PBEsol functional tag."""
-        from pymatgen.io.vasp import Incar
-        tags = _cache._extract_tags(incar=Incar({"GGA": "PS"}))
-        assert "PBEsol" in tags
-
-    def test_extract_tags_scan(self):
-        """SCAN metaGGA tag."""
-        from pymatgen.io.vasp import Incar
-        tags = _cache._extract_tags(incar=Incar({"METAGGA": "SCAN"}))
-        assert "SCAN" in tags
-
-    def test_extract_tags_phonon(self):
-        """Phonon calculation tag."""
-        from pymatgen.io.vasp import Incar
-        tags = _cache._extract_tags(incar=Incar({"IBRION": 6, "NFREE": 2}))
-        assert "phonon" in tags
-
-    def test_extract_tags_dielectric(self):
-        """Dielectric property tag."""
-        from pymatgen.io.vasp import Incar
-        tags = _cache._extract_tags(incar=Incar({"LEPSILON": True, "LOPTICS": True}))
-        assert "dielectric" in tags
-        assert "optics" in tags
-
-    def test_extract_tags_encut_tiers(self):
-        """High and low ENCUT tier tags."""
-        from pymatgen.io.vasp import Incar
-        low = _cache._extract_tags(incar=Incar({"ENCUT": 250}))
-        high = _cache._extract_tags(incar=Incar({"ENCUT": 700}))
-        assert "low-encut" in low
-        assert "high-encut" in high
-
-    def test_extract_tags_combined(self):
-        """Full realistic scenario: structure + KPOINTS + INCAR."""
-        from pymatgen.io.vasp import Incar, Kpoints
-        from pymatgen.core import Lattice, Structure
-        s = Structure(Lattice.cubic(5.64), ["Na", "Cl"], [[0, 0, 0], [0.5, 0.5, 0.5]])
-        k = Kpoints(kpts=[[4, 4, 4]], style=Kpoints.supported_modes.Monkhorst)
-        i = Incar({"GGA": "PE", "ISPIN": 2, "LDAU": True, "ENCUT": 400})
-        tags = _cache._extract_tags(incar=i, kpoints=k, structure=s)
-        assert "Na1Cl1" in tags
-        assert "444" in tags
-        assert "PBE" in tags
-        assert "spin" in tags
-        assert "DFT+U" in tags
-
-    # ── partial auto-detect ──────────────────────────────────────────
-
-    def test_put_explicit_formula_auto_task_id(self, tmp_path: Path):
-        """Only formula given, task_id auto-detected."""
-        d = tmp_path / "GaN_mp-804"
-        d.mkdir()
-        (d / "OUTCAR").write_text(
-            " free  energy    TOTEN  =    -12.0 eV\n"
-            " General timing and accounting\n"
-        )
-        (d / "CONTCAR").write_text(
-            "GaN\n1.0\n3.19 0 0\n0 3.19 0\n0 0 5.19\nGa N\n1 1\nDirect\n"
-            "0 0 0\n0.333 0.667 0.5\n"
-        )
-        _cache.vasp_results_put(d, formula="AlN")
-        _, ch, _ = _cache._detect_calc_info(d)
-        r = _cache.vasp_results_get("AlN", ch)
-        assert r is not None
-        assert r["total_energy"] == -12.0
-
-    def test_put_explicit_task_id_auto_formula(self, tmp_path: Path):
-        """Only task_id given, formula auto-detected from POSCAR."""
-        d = tmp_path / "GaN_mp-804"
-        d.mkdir()
-        (d / "OUTCAR").write_text(
-            " free  energy    TOTEN  =    -12.0 eV\n"
-            " General timing and accounting\n"
-        )
-        (d / "CONTCAR").write_text(
-            "GaN\n1.0\n3.19 0 0\n0 3.19 0\n0 0 5.19\nGa N\n1 1\nDirect\n"
-            "0 0 0\n0.333 0.667 0.5\n"
-        )
-        _cache.vasp_results_put(d, task_name="custom_id")
-        f, ch, tn = _cache._detect_calc_info(d)
-        r = _cache.vasp_results_get("GaN", ch)
-        assert r is not None
+        result = _cache.cache_lookup(d)
+        assert result is not None
+        assert result["source_path"] == str(d.resolve())
 
 
 class TestCacheLookup:
     """Tests for cache_lookup — the unified completion check."""
 
     def test_cache_lookup_hit(self, tmp_path: Path):
-        """POSCAR+OUTCAR cached → returns result dict with total_energy."""
+        """Full inputs cached → returns result dict."""
         d = tmp_path / "test_system"
         d.mkdir()
-        (d / "OUTCAR").write_text(
-            " free  energy    TOTEN  =    -12.34 eV\n"
-            " General timing and accounting\n"
-        )
-        (d / "CONTCAR").write_text(
-            "GaN\n1.0\n3.19 0 0\n0 3.19 0\n0 0 5.19\nGa N\n1 1\nDirect\n"
-            "0 0 0\n0.333 0.667 0.5\n"
-        )
-        (d / "INCAR").write_text("ENCUT = 520\nISIF = 3\n")
-        (d / "KPOINTS").write_text("K-Points\n0\nGamma\n4 4 4\n")
+        _write_si_inputs(d)
         _cache.vasp_results_put(d)
         result = _cache.cache_lookup(d)
         assert result is not None
-        assert result["total_energy"] == -12.34
-        assert result["converged"] == 1
+        assert result["formula"] == "Si"
 
     def test_cache_lookup_miss(self, tmp_path: Path):
-        """Directory with VASP files but never cached → None."""
+        """Full inputs but never cached → None."""
         d = tmp_path / "uncached"
         d.mkdir()
-        (d / "OUTCAR").write_text(
-            " free  energy    TOTEN  =    -5.0 eV\n"
-            " General timing and accounting\n"
-        )
-        (d / "CONTCAR").write_text(
-            "GaN\n1.0\n3.19 0 0\n0 3.19 0\n0 0 5.19\nGa N\n1 1\nDirect\n"
-            "0 0 0\n0.333 0.667 0.5\n"
-        )
-        # No vasp_results_put called — cache is empty
+        _write_si_inputs(d)
         assert _cache.cache_lookup(d) is None
 
     def test_cache_lookup_empty_dir(self, tmp_path: Path):
-        """Empty directory with no VASP files and no cache → None."""
+        """Empty dir → None."""
         d = tmp_path / "empty"
         d.mkdir()
         assert _cache.cache_lookup(d) is None
 
-    def test_cache_lookup_mp_naming(self, tmp_path: Path):
-        """_mp- directory correctly resolves via content_hash."""
-        d = tmp_path / "GaN_mp-804"
-        d.mkdir()
-        (d / "OUTCAR").write_text(
-            " free  energy    TOTEN  =    -15.0 eV\n"
-            " General timing and accounting\n"
-        )
-        (d / "CONTCAR").write_text(
-            "GaN\n1.0\n3.19 0 0\n0 3.19 0\n0 0 5.19\nGa N\n1 1\nDirect\n"
-            "0 0 0\n0.333 0.667 0.5\n"
-        )
-        _cache.vasp_results_put(d)
-        result = _cache.cache_lookup(d)
-        assert result is not None
-        assert result["total_energy"] == -15.0
 
-    @pytest.mark.skip(reason="JSONStore _get_stores removed; results live in signac")
-    def test_cache_lookup_after_delete(self, tmp_path: Path):
-        """Lookup returns None after entry is deleted via store directly."""
-        from vasp_sop.core.cache import _get_stores
-        d = tmp_path / "deleteme"
-        d.mkdir()
-        (d / "OUTCAR").write_text(
-            " free  energy    TOTEN  =    -8.0 eV\n"
-            " General timing and accounting\n"
-        )
-        (d / "CONTCAR").write_text(
-            "GaN\n1.0\n3.19 0 0\n0 3.19 0\n0 0 5.19\nGa N\n1 1\nDirect\n"
-            "0 0 0\n0.333 0.667 0.5\n"
-        )
-        _cache.vasp_results_put(d)
-        assert _cache.cache_lookup(d) is not None
-        f, ch, _ = _cache._detect_calc_info(d)
-        meta_store, blob_store = _get_stores()
-        meta_store.remove_docs({"formula": f, "content_hash": ch})
-        blob_store.remove_docs({"content_hash": ch})
-        assert _cache.cache_lookup(d) is None
+def _write_si_inputs(d: Path, *, energy: float = -9.18) -> None:
+    """Shared helper: write all 7 files for a Si calculation."""
+    poscar = """Si
+1.0
+5.43 0 0
+0 5.43 0
+0 0 5.43
+Si
+2
+Direct
+0 0 0
+0.25 0.25 0.25
+"""
+    (d / "POSCAR").write_text(poscar)
+    (d / "CONTCAR").write_text(poscar)
+    (d / "INCAR").write_text("ENCUT = 520\nGGA = PE\n")
+    (d / "KPOINTS").write_text("A\n0\nGamma\n4 4 4\n0 0 0\n")
+    (d / "POTCAR").write_text(
+        "  PAW_PBE Si 05Jan2001\n  TITEL  = PAW_PBE Si 05Jan2001\n   4.00000000000000\n"
+    )
+    (d / "vasprun.xml").write_text(
+        "<modeling><calculation><scstep><energy>"
+        f'<i name="e_fr_energy">{energy}</i>'
+        "</energy></scstep></calculation></modeling>\n"
+    )
+    (d / "OUTCAR").write_text(
+        f" free  energy    TOTEN  =    {energy} eV\n"
+        " General timing and accounting\n"
+    )
 
 
+
+
+class TestRestoreFromKey:
+    """restore_from_key: atomic replace via explicit key."""
+
+    def test_restore_to_new_dir(self, tmp_path: Path):
+        (tmp_path / "src").mkdir()
+        _write_si_inputs(tmp_path / "src")
+        key = _cache.vasp_results_put(tmp_path / "src")
+        assert key
+        tgt = tmp_path / "tgt"
+        assert _cache.restore_from_key(key, tgt)
+        assert (tgt / "OUTCAR").is_file()
+
+    def test_restore_replaces_existing(self, tmp_path: Path):
+        (tmp_path / "src").mkdir()
+        _write_si_inputs(tmp_path / "src")
+        key = _cache.vasp_results_put(tmp_path / "src")
+        tgt = tmp_path / "tgt"
+        tgt.mkdir()
+        (tgt / "OUTCAR").write_text("old\n")
+        assert _cache.restore_from_key(key, tgt)
+        assert (tgt / "OUTCAR").read_text() != "old\n"
+
+    def test_bad_key_returns_false(self, tmp_path: Path):
+        assert not _cache.restore_from_key("no-such-key", tmp_path / "tgt")
+
+    def test_existing_dir_preserved_on_failure(self, tmp_path: Path):
+        tgt = tmp_path / "tgt"
+        tgt.mkdir()
+        (tgt / "OUTCAR").write_text("keep\n")
+        assert not _cache.restore_from_key("bad-key", tgt)
+        assert (tgt / "OUTCAR").read_text() == "keep\n"
 #  MP phase list cache  (dead code but test for completeness)
 # ══════════════════════════════════════════════════════════════════════════
 

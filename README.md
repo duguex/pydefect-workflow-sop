@@ -22,6 +22,9 @@ vasp-sop batch run /path/to/project
 
 # cache / jobs
 vasp-sop cache status --verbose
+
+# generate a read-only evidence report from current files
+vasp-sop report /path/to/project
 ```
 
 Tests:

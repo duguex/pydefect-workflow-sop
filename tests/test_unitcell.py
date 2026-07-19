@@ -78,6 +78,35 @@ class TestBuildUnitcellYaml:
         build_unitcell_yaml(tmp_path, PipelineConfig(formula="GaN"))
 
 
+
+    def test_zero_gap_failure_records_terminal_diagnostic(self, tmp_path: Path, monkeypatch):
+        for name in ("band", "dos", "dielectric"):
+            (tmp_path / name).mkdir()
+            (tmp_path / name / "OUTCAR").write_text("converged\n")
+        (tmp_path / "band" / "vasprun.xml").write_text("<xml/>\n")
+
+        def fail_zero_gap(cmd, cwd, **kwargs):
+            if "pydefect_vasp u" in cmd:
+                raise RuntimeError("pydefect_vasp u failed: zero band gap")
+
+        monkeypatch.setattr("vasp_sop.defect.unitcell.run_local", fail_zero_gap)
+
+        from vasp_sop.defect.unitcell import build_unitcell_yaml
+        build_unitcell_yaml(tmp_path, PipelineConfig(formula="SeO2"))
+
+        import json
+        status = json.loads((tmp_path / "unitcell_build_status.json").read_text())
+        assert status["status"] == "failed"
+        assert status["reason"] == "zero_gap"
+        assert "zero band gap" in status["diagnostic"]
+
+    def test_failure_reason_classification_is_conservative(self):
+        from vasp_sop.defect.unitcell import _unitcell_failure_reason
+
+        assert _unitcell_failure_reason("ZERO BAND GAP") == "zero_gap"
+        assert _unitcell_failure_reason("near-zero gap detected") == "zero_gap"
+        assert _unitcell_failure_reason("near zero band gap") == "zero_gap"
+        assert _unitcell_failure_reason("missing vasprun.xml") == "missing_vasprun"
 class TestCopyInputFromOpt:
     """_copy_input_from_opt — copies files from structure_opt to task dir."""
 
@@ -90,6 +119,18 @@ class TestCopyInputFromOpt:
         dst.mkdir()
         _copy_input_from_opt(src, dst)
         assert (dst / "POSCAR").is_file()
+
+    def test_uses_contcar_when_both_exist(self, tmp_path: Path):
+        """CONTCAR takes priority over POSCAR for band/dos/dielectric tasks."""
+        from vasp_sop.defect.unitcell import _copy_input_from_opt
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "POSCAR").write_text("initial structure\n")
+        (src / "CONTCAR").write_text("optimized structure\n")
+        dst = tmp_path / "dst"
+        dst.mkdir()
+        _copy_input_from_opt(src, dst)
+        assert (dst / "POSCAR").read_text() == "optimized structure\n"
 
     def test_copies_prior_info(self, tmp_path: Path):
         from vasp_sop.defect.unitcell import _copy_input_from_opt

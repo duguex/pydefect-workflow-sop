@@ -77,3 +77,4 @@ class TestCheckTaskComplete:
         _write_converged_outcar(self.dir)
         from vasp_sop.vasp.io import check_task_complete
         assert check_task_complete(self.dir, "phonon")
+

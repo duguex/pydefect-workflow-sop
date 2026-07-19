@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 from vasp_sop.core.config import PipelineConfig
 
@@ -22,7 +23,9 @@ class TestPipelineConfig:
 
     def test_invalid_supercell_range(self):
         with pytest.raises(ValueError, match="supercell_max_atoms"):
-            PipelineConfig(formula="GaN", supercell_min_atoms=500, supercell_max_atoms=200)
+            PipelineConfig(
+                formula="GaN", supercell_min_atoms=500, supercell_max_atoms=200
+            )
 
     def test_negative_complex_order(self):
         with pytest.raises(ValueError, match="complex_defect_order"):
@@ -47,6 +50,34 @@ class TestPipelineConfig:
             assert c2.dopant_elements == ["Mg"]
         finally:
             tmp.unlink(missing_ok=True)
+
+    def test_correction_policy_round_trip(self):
+        c1 = PipelineConfig(
+            formula="GaN", correction_policy="custom_molecular_reference"
+        )
+        with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+            tmp = Path(f.name)
+        try:
+            c1.to_yaml(tmp)
+            c2 = PipelineConfig.from_yaml(tmp)
+            assert c2.correction_policy == "custom_molecular_reference"
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def test_invalid_correction_policy(self):
+        with pytest.raises(ValueError, match="correction_policy"):
+            PipelineConfig(formula="GaN", correction_policy="mp2020")
+
+    def test_diatomic_correction_defaults(self):
+        config = PipelineConfig(formula="GaN")
+        assert config.molecule_corrections == {
+            "H2": 0.358,
+            "N2": 0.722,
+            "O2": 1.374,
+            "F2": 0.924,
+            "Cl2": 1.228,
+        }
+
 
     def test_yaml_roundtrip_minmax_pydefect(self):
         """Issue #13: pydefect supercell min/max_atoms must survive round-trip,
@@ -101,6 +132,33 @@ class TestPipelineConfig:
         finally:
             tmp.unlink(missing_ok=True)
 
+    def test_yaml_flat_corrections_preserve_all_diatomics(self, tmp_path):
+        path = tmp_path / "flat.yaml"
+        path.write_text(
+            yaml.safe_dump(
+                {
+                    "formula": "ClF",
+                    "molecule_corrections": {
+                        "H2": 0.111,
+                        "N2": 0.222,
+                        "O2": 1.374,
+                        "F2": 0.924,
+                        "Cl2": 1.228,
+                    },
+                    "correction_policy": "custom_molecular_reference",
+                }
+            )
+        )
+        config = PipelineConfig.from_yaml(path)
+        assert config.molecule_corrections == {
+            "H2": 0.111,
+            "N2": 0.222,
+            "O2": 1.374,
+            "F2": 0.924,
+            "Cl2": 1.228,
+        }
+        assert config.correction_policy == "custom_molecular_reference"
+
     def test_from_legacy_json(self):
         """Migrate from legacy info.json format."""
         data = {
@@ -129,8 +187,9 @@ class TestPipelineConfig:
 
     def test_interstitial_indices_roundtrip(self):
         """interstitial_indices survives a YAML round-trip."""
-        c1 = PipelineConfig(formula="GaN", interstitial=True,
-                            interstitial_indices=[0, 2, 5])
+        c1 = PipelineConfig(
+            formula="GaN", interstitial=True, interstitial_indices=[0, 2, 5]
+        )
         with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
             tmp = Path(f.name)
         try:
@@ -144,6 +203,7 @@ class TestPipelineConfig:
     def test_generate_config(self):
         """generate_config() produces valid plan.yaml."""
         from vasp_sop.core.config import generate_config
+
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = generate_config(root, formula="GaN", dopant_elements=["Mg"])

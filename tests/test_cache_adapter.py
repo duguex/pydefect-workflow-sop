@@ -39,7 +39,14 @@ Direct
     (d / "CONTCAR").write_text(poscar)
     (d / "INCAR").write_text("ENCUT = 520\nGGA = PE\n")
     (d / "KPOINTS").write_text("A\n0\nGamma\n4 4 4\n0 0 0\n")
-    (d / "POTCAR").write_text("  PAW_PBE Si 05Jan2001\n   4.00000000000000\n")
+    (d / "POTCAR").write_text(
+        "  PAW_PBE Si 05Jan2001\n  TITEL  = PAW_PBE Si 05Jan2001\n   4.00000000000000\n"
+    )
+    (d / "vasprun.xml").write_text(
+        '<modeling><calculation><scstep><energy>'
+        '<i name="e_fr_energy">-5.0</i>'
+        '</energy></scstep></calculation></modeling>\n'
+    )
     (d / "OUTCAR").write_text(
         " free  energy    TOTEN  =    -5.0 eV\n General timing and accounting\n"
     )
@@ -48,7 +55,7 @@ Direct
 
 def test_put_lookup_restore(tmp_path: Path):
     calc = _complete(tmp_path / "calc")
-    vasp_results_put(calc, formula="Si", task_name="t1")
+    vasp_results_put(calc)
     hit = cache_lookup(calc)
     assert hit is not None
     assert hit.get("formula") == "Si"

@@ -233,6 +233,20 @@ def wait_all(jobs: list[VaspJob], poll_interval: int = 60) -> None:
             time.sleep(poll_interval)
 
 
+def crisp_terminal_status(work_dir: Path) -> str | None:
+    """Return the latest local CRISP terminal marker, if present.
+
+    A failure marker wins when both markers exist; the submit adapter is
+    responsible for clearing the opposite marker on a normal retry.
+    """
+    work_dir = Path(work_dir)
+    if (work_dir / ".failed").is_file():
+        return "failed"
+    if (work_dir / ".completed").is_file():
+        return "completed"
+    return None
+
+
 def move_crisp_outputs(work_dir: Path) -> None:
     """Promote legacy crisp ``output/`` into *work_dir* (mtime-preferring).
 

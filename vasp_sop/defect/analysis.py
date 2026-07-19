@@ -329,7 +329,17 @@ def analyze(
         move_crisp_outputs(d)
         if _has_outcar(d):
             continue
-        if restore_from_cache(d):
+        if not (d / "POSCAR").is_file():
+            logger.debug("Skipping cache restore for %s: POSCAR missing", d)
+            if d.name != "perfect" and "_" in d.name:
+                missing_outcars.append(d.name)
+            continue
+        try:
+            restored = restore_from_cache(d)
+        except Exception as exc:
+            logger.debug("Cache restore skipped for %s: %s", d.name, exc)
+            restored = False
+        if restored:
             logger.info("Restored outputs for %s from cache", d.name)
         elif d.name != "perfect" and "_" in d.name:
             missing_outcars.append(d.name)
@@ -375,9 +385,11 @@ def analyze(
                 "Restore vasprun or re-fetch crisp outputs."
             )
     if need_cr:
-        targets = _quote_names(need_cr)
         try:
-            run_local(f"pydefect_vasp cr -d {targets}", cwd=defect_root)
+            _run_dir_batches(
+                "pydefect_vasp cr -d", need_cr,
+                cwd=defect_root, batch_size=20, timeout=600,
+            )
         except Exception as exc:
             logger.warning("pydefect_vasp cr (subset) failed: %s", exc)
     else:
@@ -413,11 +425,15 @@ def analyze(
         )
     if perfect_cr.is_file() and unitcell_yaml.is_file() and efnv_targets:
         try:
-            run_local(
-                f"pydefect efnv -d {_quote_names(efnv_targets)} "
-                f"-pcr {shlex.quote(str(perfect_cr))} "
-                f"-u {shlex.quote(str(unitcell_yaml))}",
+            _run_dir_batches(
+                "pydefect efnv -d", efnv_targets,
                 cwd=defect_root,
+                command_suffix=(
+                    f" -pcr {shlex.quote(str(perfect_cr))}"
+                    f" -u {shlex.quote(str(unitcell_yaml))}"
+                ),
+                batch_size=20,
+                timeout=600,
             )
         except Exception as exc:
             logger.warning("pydefect efnv failed (partial corrections): %s", exc)
@@ -493,12 +509,16 @@ def analyze(
                 ", ".join(d.name for d in not_corrected[:20]),
             )
         if corrected:
-            run_local(
-                f"pydefect dei -d {_quote_names(corrected)} "
-                f"-pcr {shlex.quote(str(perfect_cr))} "
-                f"-u {shlex.quote(str(unitcell_yaml))} "
-                f"-s {shlex.quote(str(standard_energies))}",
+            _run_dir_batches(
+                "pydefect dei -d", corrected,
                 cwd=defect_root,
+                command_suffix=(
+                    f" -pcr {shlex.quote(str(perfect_cr))}"
+                    f" -u {shlex.quote(str(unitcell_yaml))}"
+                    f" -s {shlex.quote(str(standard_energies))}"
+                ),
+                batch_size=20,
+                timeout=600,
             )
 
     # ── des / cs

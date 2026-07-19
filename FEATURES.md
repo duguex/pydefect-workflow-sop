@@ -10,7 +10,7 @@
 
 ## 1. CLI Commands
 
-`vasp-sop` exposes 8 top-level subcommands with 24 total sub-actions:
+`vasp-sop` exposes 9 top-level subcommands with 25 total sub-actions:
 
 | Subcommand | Actions | Description |
 |---|---|---|
@@ -35,6 +35,7 @@
 | | `check` | Check VASP completion (OUTCAR existence + convergence) |
 | `cpd` | `energies` | Compute composition energies from VASP outputs |
 | | `diagram` | Solve and plot the chemical-potential phase diagram |
+| `report` | — | Generate an evidence-based Markdown calculation report from a system directory; read-only except for the report output |
 | `unitcell` | `yaml` | Generate `unitcell.yaml` from completed VASP outputs |
 | `cache` | `put` | Cache a VASP calculation directory (auto-detects formula/task) |
 | | `query` | Semantic cross-project cache search with 6 filters |
@@ -95,7 +96,7 @@ status, presence of `target_vertices.yaml`, etc. — not from a database.
 Configuration lives in a `plan.yaml` file per system, managed by the
 `PipelineConfig` dataclass.
 
-### `plan.yaml` Schema (19 configurable keys)
+### `plan.yaml` Schema (20 configurable keys)
 
 ```yaml
 project:
@@ -118,9 +119,13 @@ defects:
   complex_n: 1              # Complex n-body defect order (≥2 enables)
   max_distance: 5.0         # Maximum distance for remote defects in Å
 corrections:
-  O2: 1.374                 # O₂ molecule energy correction (eV)
-  Cl2: 1.228                # Cl₂ molecule energy correction (eV)
-  F2: 0.924                 # F₂ molecule energy correction (eV)
+  H2: 0.358                 # Custom molecular-reference shift (eV)
+  N2: 0.722                 # Custom molecular-reference shift (eV)
+  O2: 1.374                 # Custom molecular-reference shift (eV)
+  F2: 0.924                 # Custom molecular-reference shift (eV)
+  Cl2: 1.228                # Custom molecular-reference shift (eV)
+correction_policy: custom_molecular_reference
+                             # Only supported policy; explicit and round-tripped
 energy_adjust_step: 0.01    # Energy adjustment increment for unstable phases
 ```
 
@@ -155,11 +160,48 @@ formation energy calculations.
 2. **VASP submission** — all competing phases submitted as a parallel batch
 3. **Composition energy computation** — `pydefect` processes OUTCARs to extract
    raw energies per phase
-4. **Molecule corrections** — empirical corrections applied to diatomic gas
-   molecules (O₂: +1.374 eV, Cl₂: +1.228 eV, F₂: +0.924 eV)
+4. **Custom molecular-reference correction** — applies configured shifts to
+   matching diatomic reference entries (`H2`, `N2`, `O2`, `F2`, `Cl2`); this
+   is not the Materials Project 2020 anion-correction scheme
 5. **Phase diagram solving** — pydefect solves the convex hull to determine
    chemical potential ranges where the target is stable
 6. **Plotting** — energy convex hull and target vertex diagrams (optional)
+
+### Correction policy and Materials Project methodology
+
+`correction_policy: custom_molecular_reference` is the only executable policy
+in this pipeline. It records the existing project convention: configured
+values are added to matching molecular reference entries such as `mol_Cl2`.
+
+The default shifts are twice the magnitude of the corresponding MP2020
+per-element coefficients (`H: -0.179`, `N: -0.361`, `F: -0.462`,
+`Cl: -0.614`, and oxide `O: -0.687` eV/atom). This documents the custom
+reference convention; it does not make the PBEsol/Eu+U calculation an MP2020
+compatibility calculation. Molecular constants for the added `Cl2` and `F2`
+resources are sourced from NIST Chemistry WebBook SRD 69.
+
+This must not be described as Materials Project 2020 compatibility. MP2020
+applies composition corrections to elements when they occur as anions in
+compounds; elemental references such as `Cl2` receive no anion correction.
+MP2020 also requires compatible Materials Project VASP inputs and metadata.
+The implementation does not currently provide entry-level MP2020 correction
+or oxidation-state auditing during CPD execution. See the methodology page:
+<https://docs.materialsproject.org/methodology/materials-methodology/thermodynamic-stability/thermodynamic-stability/anion-and-gga-gga+u-mixing>.
+
+### Custom/MP2020 equivalence audit (CsEuCl3)
+
+For the 2026-07-17 `CsEuCl3` audit, equivalence was tested rather than assumed:
+
+- Both counterfactuals used the same `mol_Cl2` raw energy (`-3.82848244 eV`) and the same other phase energies.
+- Custom case: `Cl2` reference `+1.228 eV`.
+- MP-style counterfactual: each compound received `-0.614 eV × NCl`; `Cl2` itself received no anion correction.
+- Both ran the same `pydefect sre` and `pydefect cv -t CsEuCl3` commands.
+- `relative_energies.yaml` maximum absolute difference: `4.44e-16 eV/atom`.
+- All target-vertex component differences (`Cl`, `Cs`, `Eu`) were `0.0 eV` at reported precision.
+
+This equivalence is valid only for this fixed reference, linear Cl-only correction,
+and the audited phase set. It must be rechecked if the reference phase, correction
+coefficient, oxidation-state applicability, or non-linear/GGA+U correction policy changes.
 
 ### Special Cases
 

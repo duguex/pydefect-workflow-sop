@@ -16,7 +16,7 @@
 - **State machine** (batch): `STRUCTURE_OPT → COMPETING → CHEM_POT_DIAGRAM → UNITCELL_DEFECT → COMPLETE` via `_advance_one_system`.
 - **Three-wave VASP schedule**: Wave1 structure_opt → Wave2 competing+UC+defects parallel → Wave3 pydefect post.  
 - **CLI**: `vasp-sop batch run .` (`--dry-run`), `defect build`, `cache status|query|…`, `materials fetch`.  
-- **Config**: `plan.yaml` per project; JobStore/Maggma JSONStore for job/cache state.  
+- **Config**: `plan.yaml` per project; JobStore (SQLite) for job state; vasp-cache for results cache.  
 - **Tests**: `python3 -m pytest tests/` — isolate cache paths; heavy patching of VASP/crisp in unit tests.  
 - **Do not invent** new phase names or store layouts — match code + FEATURES.md.  
 - **Secrets / MP API**: use env; do not commit keys. Production trees (e.g. `2025_undergo_spin_defect`) stay outside this package tree.  
@@ -38,11 +38,12 @@ vasp-sop cache status --verbose
 
 | When | Read first |
 |------|------------|
+| **Starting implementation work** | [`docs/next-actions.md`](docs/next-actions.md) — execution order + fix recipes |
 | Full architecture, conventions, known issues | [`docs/agent-conventions.md`](docs/agent-conventions.md) |
 | Feature inventory / JobStore | [`FEATURES.md`](FEATURES.md) |
 | Project narrative | [`PROJECT.md`](PROJECT.md) |
 | Human one-pager | [`README.md`](README.md) |
-| Open issues | `issues/` |
+| Open issues | `gh issue list` (GitHub Issues is the single source of truth) |
 | Planned | `next.md` |
 
 ## Keep in sync

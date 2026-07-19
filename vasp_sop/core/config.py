@@ -18,9 +18,12 @@
      max_distance: 5.0
      interstitial_indices: []  # 0-based indices into the dos_extrema candidate list
    corrections:
+     H2: 0.358
+     N2: 0.722
      O2: 1.374
-     Cl2: 1.228
      F2: 0.924
+     Cl2: 1.228
+   correction_policy: custom_molecular_reference
    energy_adjust_step: 0.01
 """
 
@@ -58,11 +61,15 @@ DEFAULT_PLAN: dict = {
         "complex_n": 1,
         "max_distance": 5.0,
     },
+    # Custom molecular-reference shifts: 2 × |MP2020 element coefficient|.
     "corrections": {
+        "H2": 0.358,
+        "N2": 0.722,
         "O2": 1.374,
-        "Cl2": 1.228,
         "F2": 0.924,
+        "Cl2": 1.228,
     },
+    "correction_policy": "custom_molecular_reference",
     "energy_adjust_step": 0.01,
 }
 
@@ -93,9 +100,16 @@ class PipelineConfig:
     supercell_min_atoms: int = 200
     supercell_max_atoms: int = 600
 
-    molecule_corrections: dict[str, float] = field(default_factory=lambda: {
-        "Cl2": 1.228, "O2": 1.374, "F2": 0.924,
-    })
+    molecule_corrections: dict[str, float] = field(
+        default_factory=lambda: {
+            "H2": 0.358,
+            "N2": 0.722,
+            "O2": 1.374,
+            "F2": 0.924,
+            "Cl2": 1.228,
+        }
+    )
+    correction_policy: str = "custom_molecular_reference"
 
     energy_adjust_step: float = 0.01
     custom_poscar_path: Optional[Path] = None
@@ -107,6 +121,11 @@ class PipelineConfig:
         self.formula = self.formula.strip()
         if not self.formula:
             raise ValueError("formula must be non-empty, e.g. 'GaN'.")
+        if self.correction_policy != "custom_molecular_reference":
+            raise ValueError(
+                "correction_policy must be 'custom_molecular_reference'; "
+                "MP2020 anion corrections are not implemented by this pipeline."
+            )
         if self.supercell_min_atoms < 1:
             raise ValueError("supercell_min_atoms must be >= 1.")
         if self.supercell_tool not in ("pydefect", "doped"):
@@ -170,10 +189,15 @@ class PipelineConfig:
             complex_defect_order=d.get("complex_n", 1),
             remote_cutoff=d.get("max_distance", 5.0),
             molecule_corrections={
+                "H2": corr.get("H2", 0.358),
+                "N2": corr.get("N2", 0.722),
                 "O2": corr.get("O2", 1.374),
-                "Cl2": corr.get("Cl2", 1.228),
                 "F2": corr.get("F2", 0.924),
+                "Cl2": corr.get("Cl2", 1.228),
             },
+            correction_policy=plan.get(
+                "correction_policy", "custom_molecular_reference"
+            ),
             energy_adjust_step=plan.get("energy_adjust_step", 0.01),
         )
 
@@ -208,14 +232,20 @@ class PipelineConfig:
                 "max_distance": self.remote_cutoff,
             },
             "corrections": dict(self.molecule_corrections),
+            "correction_policy": self.correction_policy,
             "energy_adjust_step": self.energy_adjust_step,
         }
 
     def to_yaml(self, path: Path) -> None:
         """Dump clean plan (no comments) to *path*."""
         with open(path, "w") as f:
-            yaml.dump(self.to_plan(), f, default_flow_style=None,
-                      sort_keys=False, allow_unicode=True)
+            yaml.dump(
+                self.to_plan(),
+                f,
+                default_flow_style=None,
+                sort_keys=False,
+                allow_unicode=True,
+            )
 
     @classmethod
     def from_legacy_json(cls, path: Path, root: Path = Path(".")) -> PipelineConfig:
@@ -262,7 +292,7 @@ def generate_config(
         ① Run ``pydefect_vasp mp`` (same command the CPD stage uses)
            — single MP query, downloads all competing phases.
         ② Parse downloaded directory names and POSCARs for YAML annotations.
-        ③ Touch ``mp_flag`` so the CPD stage skips re-running the query.
+        ③ Record the validated ``mp_state.json`` MP manifest.
         ④ Detect ENCUT from POTCAR, DFT+U from element set, POTCAR variants.
         ⑤ Apply kwargs overrides, write plan.yaml.
     """
@@ -294,6 +324,7 @@ def generate_config(
     target_dir: Path | None = None
 
     from pymatgen.core import Structure, Composition as PmgComp
+
     target_comp = PmgComp(formula)
 
     for child in sorted(cpd_root.iterdir()):
@@ -315,15 +346,17 @@ def generate_config(
             comp = s.composition.reduced_formula
             is_target = PmgComp(comp) == target_comp
 
-            phases.append({
-                "mpid": mpid or "?",
-                "spg": spg,
-                "formula": comp,
-                "a": round(s.lattice.a, 3),
-                "b": round(s.lattice.b, 3),
-                "c": round(s.lattice.c, 3),
-                "is_target": is_target,
-            })
+            phases.append(
+                {
+                    "mpid": mpid or "?",
+                    "spg": spg,
+                    "formula": comp,
+                    "a": round(s.lattice.a, 3),
+                    "b": round(s.lattice.b, 3),
+                    "c": round(s.lattice.c, 3),
+                    "is_target": is_target,
+                }
+            )
 
             if is_target and not target_found:
                 target_found = True
@@ -344,12 +377,17 @@ def generate_config(
         try:
             from mp_api.client import MPRester as _MPRester
             import os as _os
+
             _key = _os.environ.get("MP_API_KEY") or _os.environ.get("PMG_MAPI_KEY")
             if _key:
-                logger.info("Target phase %s not in MP element query, querying exact formula ...", formula)
+                logger.info(
+                    "Target phase %s not in MP element query, querying exact formula ...",
+                    formula,
+                )
                 with _MPRester(_key) as _mpr:
                     _docs = _mpr.materials.summary.search(
-                        formula=formula, fields=["material_id", "formula_pretty"],
+                        formula=formula,
+                        fields=["material_id", "formula_pretty"],
                     )
                     if _docs:
                         _mpid = _docs[0].material_id
@@ -357,7 +395,9 @@ def generate_config(
                         if not _target_dir.is_dir():
                             _target_dir.mkdir(parents=True)
                             _struct = _mpr.get_structure_by_material_id(_mpid)
-                            _struct.to(fmt="poscar", filename=str(_target_dir / "POSCAR"))
+                            _struct.to(
+                                fmt="poscar", filename=str(_target_dir / "POSCAR")
+                            )
                         target_found = True
                         target_dir = _target_dir.resolve()
                         unitcell_poscar.parent.mkdir(parents=True, exist_ok=True)
@@ -366,7 +406,6 @@ def generate_config(
                         logger.info("Downloaded target phase %s (%s)", formula, _mpid)
         except Exception as _exc:
             logger.warning("Failed to download target phase %s: %s", formula, _exc)
-
 
     # ③ ENCUT (from POTCAR in target dir if available)
     if target_dir:
@@ -389,8 +428,6 @@ def generate_config(
             for el in sorted(variants)
         ]
 
-
-
     # ⑥ kwargs overrides
     for k, v in kwargs.items():
         _set_nested(plan, k, v)
@@ -411,8 +448,9 @@ def _write_plan_yaml(root: Path, plan: dict, phases: list[dict]) -> Path:
 
     potcar_variants = plan.pop("_potcar_variants", {})
 
-    yaml_str = yaml.dump(plan, default_flow_style=None,
-                         sort_keys=False, allow_unicode=True)
+    yaml_str = yaml.dump(
+        plan, default_flow_style=None, sort_keys=False, allow_unicode=True
+    )
     lines = list(yaml_str.splitlines(keepends=True))
 
     # Find insertion points
@@ -422,7 +460,7 @@ def _write_plan_yaml(root: Path, plan: dict, phases: list[dict]) -> Path:
     for i, line in enumerate(lines):
         if line.strip().startswith("poscar_src:"):
             poscar_line = i
-            indent = line[:len(line) - len(line.lstrip())]
+            indent = line[: len(line) - len(line.lstrip())]
         if line.strip().startswith("pp:"):
             pp_line = i
     if phases and poscar_line is not None:
@@ -437,12 +475,8 @@ def _write_plan_yaml(root: Path, plan: dict, phases: list[dict]) -> Path:
         phase_comment.append(
             f"{indent}# To use a different phase, change poscar_src:\n"
         )
-        phase_comment.append(
-            f'{indent}#   poscar_src: "MP mp-xxx"\n'
-        )
-        phase_comment.append(
-            f'{indent}#   poscar_src: "./path/to/POSCAR"\n'
-        )
+        phase_comment.append(f'{indent}#   poscar_src: "MP mp-xxx"\n')
+        phase_comment.append(f'{indent}#   poscar_src: "./path/to/POSCAR"\n')
         for c in reversed(phase_comment):
             lines.insert(poscar_line + 1, c)
         if pp_line is not None:
@@ -450,12 +484,10 @@ def _write_plan_yaml(root: Path, plan: dict, phases: list[dict]) -> Path:
 
     # Insert POTCAR variant comments after pp
     if potcar_variants and pp_line is not None:
-        pp_indent = lines[pp_line][:len(lines[pp_line]) - len(lines[pp_line].lstrip())]
+        pp_indent = lines[pp_line][: len(lines[pp_line]) - len(lines[pp_line].lstrip())]
         potcar_comment = [f"{pp_indent}# Available POTCAR variants:\n"]
         for el, variants in potcar_variants.items():
-            potcar_comment.append(
-                f"{pp_indent}#   {el}: {', '.join(variants)}\n"
-            )
+            potcar_comment.append(f"{pp_indent}#   {el}: {', '.join(variants)}\n")
         for c in reversed(potcar_comment):
             lines.insert(pp_line + 1, c)
 
@@ -469,10 +501,6 @@ def _write_plan_yaml(root: Path, plan: dict, phases: list[dict]) -> Path:
 # ══════════════════════════════════════════════════════════════════════════
 
 
-
-
-
-
 # ══════════════════════════════════════════════════════════════════════════
 # Helpers
 # ══════════════════════════════════════════════════════════════════════════
@@ -480,6 +508,7 @@ def _write_plan_yaml(root: Path, plan: dict, phases: list[dict]) -> Path:
 
 def _deep_copy(d: dict) -> dict:
     import copy
+
     return copy.deepcopy(d)
 
 
@@ -492,6 +521,9 @@ def _set_nested(d: dict, key: str, value) -> None:
 
 def _flat_to_nested(flat: dict) -> dict:
     """Convert a legacy flat config to the nested plan format."""
+    corrections = flat.get("molecule_corrections", {})
+    if not isinstance(corrections, dict):
+        corrections = {}
     return {
         "project": {
             "formula": flat.get("formula", ""),
@@ -515,10 +547,15 @@ def _flat_to_nested(flat: dict) -> dict:
             "max_distance": flat.get("remote_cutoff", 5.0),
         },
         "corrections": {
-            "O2": flat.get("molecule_corrections", {}).get("O2", 1.374) if isinstance(flat.get("molecule_corrections"), dict) else 1.374,
-            "Cl2": flat.get("molecule_corrections", {}).get("Cl2", 1.228) if isinstance(flat.get("molecule_corrections"), dict) else 1.228,
-            "F2": flat.get("molecule_corrections", {}).get("F2", 0.924) if isinstance(flat.get("molecule_corrections"), dict) else 0.924,
+            "H2": corrections.get("H2", 0.358),
+            "N2": corrections.get("N2", 0.722),
+            "O2": corrections.get("O2", 1.374),
+            "F2": corrections.get("F2", 0.924),
+            "Cl2": corrections.get("Cl2", 1.228),
         },
+        "correction_policy": flat.get(
+            "correction_policy", "custom_molecular_reference"
+        ),
         "energy_adjust_step": flat.get("energy_adjust_step", 0.01),
     }
 
@@ -530,5 +567,3 @@ def read_plan(project_dir: str | Path) -> dict:
         raise FileNotFoundError(f"{PLAN_FILENAME} not found in {project_dir}")
     with open(path) as f:
         return yaml.safe_load(f)
-
-
