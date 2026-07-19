@@ -1282,47 +1282,32 @@ def _crisp_active_dirs(*, skip: bool = False) -> set[str]:
 
 
 def _advance_one_system(s: dict, *, dry_run: bool = False, log_to_logger: bool = False) -> None:
-    """Advance one system by one cycle (runs serially in batch mode)."""
-    # Re-imports needed for module-level dispatch
-    import logging
-    from pathlib import Path
-    from vasp_sop.vasp.io import check_converged, input_ready, prepare_inputs
-    from vasp_sop.core.jobs import submit_vasp, move_crisp_outputs
-    from vasp_sop.defect import unitcell as _uc
-    from vasp_sop.defect import cpd as _cpd
-    from vasp_sop.defect.builder import build_all as _build_defects
-    from vasp_sop.defect.analysis import analyze as _analyze_defects
-    from vasp_sop.core.cache import (
-        cache_lookup, vasp_results_put,
-    )
+    """Advance one system by one cycle (runs serially in batch mode).
+
+    Thin dispatcher — creates a :class:`~vasp_sop.core.system.System`,
+    determines the current phase, and delegates to the appropriate wave
+    function(s) in :mod:`vasp_sop.core.orchestrator` (issue #95).
+    """
+    from vasp_sop.core.system import System
     from vasp_sop.core.job_store import JobStore
+    from vasp_sop.core.orchestrator import (
+        wave1_optimize,
+        wave2_submit,
+        wave3_postprocess,
+        _unitcell_build_failure as _uc_build_failure,
+    )
+
     _logger = logging.getLogger(__name__)
 
-    def _info(message: str) -> None:
-        if log_to_logger:
-            _logger.info("%s", message)
-        else:
-            print(message)
+    # Build System model from the legacy dict
+    sys_obj = System(s["root"], s["config"])
+    js = JobStore()
 
-    def _submit_or_skip(path: Path, label: str, sys_name: str) -> object:
-        if dry_run:
-            if not label.startswith("df-"):
-                _info(f"  [dry-run] {sys_name:<18} would submit: {label}")
-            return None
-        try:
-            job = submit_vasp(path.resolve())
-            js = JobStore()
-            js.track(str(path.resolve()))
-            js.record(str(path.resolve()), "submitted", source=job.task_name)
-            js.close()
-            _info(f"  → {sys_name:<18} {label}: {job.task_name}")
-            return job
-        except Exception as exc:
-            _logger.warning("%s/%s submit failed: %s", sys_name, label, exc)
-            return None
     p = _phase(s)
+
+    # ── Failure gate ─────────────────────────────────────────────────
     if p == "UNITCELL_DEFECT":
-        failure = _unitcell_build_failure(s["root"])
+        failure = _uc_build_failure(s["root"])
         if failure:
             raise RuntimeError(
                 f"unitcell blocked for {s['name']}: {failure['reason']}; "
@@ -1331,336 +1316,34 @@ def _advance_one_system(s: dict, *, dry_run: bool = False, log_to_logger: bool =
     if p == "COMPLETE" or p == "NO_TARGET":
         return
 
-    root_dir = s["root"]
-    cpd_root = root_dir / _CPD
-    uc_root = root_dir / _UC
-    df_root = root_dir / _DF
-
-    # Build defect structures as soon as target POSCAR exists (regardless of phase)
-    td = _target_dir(s)
-    if td and (td / "POSCAR").is_file():
-        if not (df_root / "defect_in.yaml").is_file():
-            _logger.info("%s: building defect structures (early, phase=%s) ...", s["name"], p)
-            try:
-                _build_defects(df_root, td, s["config"])
-            except Exception as exc:
-                _logger.error("%s defect build failed: %s", s["name"], exc)
-        # Fill in any missing VASP inputs (parallel now, cheap)
-        if (df_root / "defect_in.yaml").is_file():
-            potcar_count = len(list(df_root.rglob("POTCAR")))
-            dir_count = len([c for c in df_root.iterdir() if c.is_dir()])
-            if potcar_count < dir_count:
-                _logger.info("%s: completing missing VASP inputs (%d/%d POTCARs) ...",
-                             s["name"], potcar_count, dir_count)
-                try:
-                    from vasp_sop.defect.builder import _generate_vasp_inputs
-                    _generate_vasp_inputs(df_root, s["config"])
-                except Exception as exc:
-                    _logger.error("%s VASP inputs completion failed: %s", s["name"], exc)
-        # Dry-run summary: count defect dirs that would be submitted
-        if dry_run and (df_root / "defect_in.yaml").is_file():
-            n_df = len([c for c in df_root.iterdir()
-                        if c.is_dir() and c.name != "perfect" and (c / "INCAR").is_file()])
-            n_perfect = 1 if (df_root / "perfect" / "INCAR").is_file() else 0
-            uc_tasks = [t for t in ("band", "dos", "dielectric") if (uc_root / t / "INCAR").is_file()]
-            parts = []
-            if uc_tasks:
-                parts.append("uc-" + "+".join(uc_tasks))
-            if n_df:
-                parts.append(f"df-{n_df} defects")
-            if p == "STRUCTURE_OPT":
-                parts.append("perfect")
-            if parts:
-                _info(f"  [dry-run] {s['name']:<18} would submit: {' '.join(parts)}")
+    # ── Wave 1: STRUCTURE_OPT ────────────────────────────────────────
     if p == "STRUCTURE_OPT":
-        td = _target_dir(s)
-        if td and JobStore().latest(str(td.resolve())) != "submitted":
-            from vasp_sop.core.job_store import JobStore
-            if check_converged(td):
-                JobStore().record(str(td.resolve()), "converged")
-            else:
-                cached = cache_lookup(td)
-                if cached:
-                    _logger.info("%s target restored from calc cache", s["name"])
-                    from vasp_sop.core.cache import restore_from_cache
-                    restored = restore_from_cache(td)
-                    if restored:
-                        import json as _json
-                        submit_info = {"task_name": "cached", "work_dir": str(td.resolve())}
-                        with open((s["root"] / _CPD / ".target_submit.json"), "w") as _f:
-                            _json.dump(submit_info, _f)
-                        from vasp_sop.core.job_store import record_if_done
-                        record_if_done(JobStore(), td, source="cache_restore")
-                elif input_ready(td):
-                    _submit_or_skip(td, "target", s["name"])
+        wave1_optimize(sys_obj, js, dry_run, log_to_logger=log_to_logger)
         # Re-evaluate phase — target may now be recorded as done
         p = _phase(s)
 
-
+    # ── Wave 2: COMPETING (early return) ─────────────────────────────
     if p == "COMPETING":
-        for cd in _competing_dirs(s):
-            if JobStore().latest(str(cd.resolve())) == "submitted":
-                continue
-            if "_mp-" in cd.name:
-                _cached = cache_lookup(cd)
-                if _cached:
-                    _logger.info("%s restored from calc cache", cd.name)
-                    from vasp_sop.core.cache import restore_from_cache
-                    restore_from_cache(cd)
-                    continue
-            _submit_or_skip(cd, f"phase:{cd.name}", s["name"])
+        wave2_submit(sys_obj, js, dry_run, log_to_logger=log_to_logger)
         return
 
+    # ── Wave 3: CHEM_POT_DIAGRAM ─────────────────────────────────────
     if p == "CHEM_POT_DIAGRAM":
-        if not dry_run:
-            for pd in cpd_root.iterdir():
-                if pd.is_dir() and check_converged(pd):
-                    move_crisp_outputs(pd)
-            _logger.info("%s: CPD post-processing ...", s["name"])
-            try:
-                target_composition = _cpd._get_target_composition(s["formula"])
-                _cpd.compute_chemical_potentials(cpd_root, s["config"], target_composition)
-                f, m = s["formula"], s["mpid"]
-                if f and m:
-                    td = _target_dir(s)
-                    so = s["root"] / _UC / "structure_opt"
-                    key = vasp_results_put(td)
-                    if not key:
-                        raise RuntimeError(
-                            f"vasp_results_put failed for {s['name']} target"
-                        )
-                    from vasp_sop.core.cache import restore_from_key
-                    if not restore_from_key(key, so):
-                        raise RuntimeError(
-                            f"structure_opt cache restore failed for {s['name']}"
-                        )
-                    _logger.info("%s structure_opt restored from cache", s["name"])
-            except Exception as exc:
-                _logger.error("%s CPD failed: %s", s["name"], exc)
-                if not log_to_logger:
-                    print(f"  ✗ {s['name']:<18} CPD post-processing FAILED")
-                raise
+        wave3_postprocess(sys_obj, dry_run, log_to_logger=log_to_logger)
+
+    # ── Wave 2 + 3: UNITCELL_DEFECT ─────────────────────────────────
     if p == "UNITCELL_DEFECT":
-        # ── Dry-run artifact-based preview ────────────────────────────
-        # The UNITCELL_DEFECT branch normally submits VASP and (when converged) calls
-        # _analyze_defects for post-processing. In dry-run, no VASP will ever
-        # run, so the convergence gate never opens. We instead check whether
-        # the artifacts post-processing would consume are all present and
-        # log what *would* happen — without mutating anything. See issue #20.
-        if dry_run:
-            artifacts = {
-                "unitcell.yaml": uc_root / "unitcell.yaml",
-                "target_vertices.yaml": cpd_root / "target_vertices.yaml",
-                "standard_energies.yaml": cpd_root / "standard_energies.yaml",
-            }
-            missing = [name for name, p in artifacts.items() if not p.is_file()]
-            has_defect_contcar = False
-            if df_root.is_dir():
-                has_defect_contcar = any(
-                    child.is_dir() and (child / "CONTCAR").is_file()
-                    for child in df_root.iterdir()
-                )
-            if not has_defect_contcar:
-                missing.append("defect/CONTCAR")
-            done_summary = df_root / "defect_energy_summary.json"
-            if not missing and not done_summary.is_file():
-                _info(
-                    f"  [dry-run] {s['name']:<18} would post-process "
-                    f"(artifacts present, no analysis run)"
-                )
-            elif not missing and done_summary.is_file():
-                _info(
-                    f"  [dry-run] {s['name']:<18} already complete "
-                    f"(summary exists)"
-                )
-            else:
-                _info(
-                    f"  [dry-run] {s['name']:<18} post-process blocked "
-                    f"(missing: {', '.join(missing)})"
-                )
-
         try:
-            from vasp_sop.core.job_store import JobStore
-            td = _target_dir(s)
-            if td and not (uc_root / "band" / "INCAR").is_file():
-                _uc._prepare_all_inputs(uc_root, td, s["config"])
-            if td and not (df_root / "perfect" / "INCAR").is_file():
-                if not (df_root / "defect_in.yaml").is_file():
-                    _build_defects(df_root, td, s["config"])
-                else:
-                    from vasp_sop.defect.builder import _generate_vasp_inputs
-                    _generate_vasp_inputs(df_root, s["config"])
-
-            for task in ("band", "dos", "dielectric"):
-                task_dir = uc_root / task
-                if not task_dir.is_dir():
-                    continue
-                from vasp_sop.vasp.io import check_task_complete
-                if check_task_complete(task_dir, task):
-                    if JobStore().latest(str(task_dir.resolve())) != "converged":
-                        JobStore().record(str(task_dir.resolve()), "converged", source="backfill")
-                    continue
-                # Stale JobStore "converged" without required outputs (e.g.
-                # missing vasprun.xml) must fall through and resubmit.
-                if JobStore().latest(str(task_dir.resolve())) == "submitted":
-                    continue
-                prepare_inputs(task_dir, s["config"], task_type=task)
-                _submit_or_skip(task_dir, f"uc-{task}", s["name"])
-            perfect_dir = df_root / "perfect"
-            if perfect_dir.is_dir() and input_ready(perfect_dir):
-                perfect_path = str(perfect_dir.resolve())
-                perfect_state = JobStore().latest(perfect_path)
-                if check_converged(perfect_dir):
-                    if perfect_state != "converged":
-                        JobStore().record(perfect_path, "converged", source="backfill")
-                elif perfect_state not in ("submitted", "failed", "unconverged"):
-                    _submit_or_skip(perfect_dir, "df-perfect", s["name"])
-
-
-            if df_root.is_dir() and not (df_root / "defect_energy_summary.json").is_file():
-                from vasp_sop.vasp.io import (
-                    has_vasprun,
-                    recover_vasprun_artifacts,
-                    prepare_vasprun_recovery_run,
-                )
-                for child in sorted(df_root.iterdir()):
-                    if not child.is_dir() or child.name == "perfect":
-                        continue
-                    if not input_ready(child):
-                        continue
-                    latest = JobStore().latest(str(child.resolve()))
-                    if latest == "submitted":
-                        continue
-
-                    # Ion-converged but missing vasprun/calc_results → recovery (#0016)
-                    if check_converged(child):
-                        has_cr = (child / "calc_results.json").is_file()
-                        if has_cr or has_vasprun(child) or recover_vasprun_artifacts(child):
-                            if JobStore().latest(str(child.resolve())) != "converged":
-                                JobStore().record(
-                                    str(child.resolve()), "converged", source="backfill",
-                                )
-                            continue
-                        # Still no vasprun: single-point from CONTCAR
-                        if latest in ("failed",) and "vasprun_recovery" not in (
-                            (JobStore().history(str(child.resolve())) or [{}])[-1].get(
-                                "reason", ""
-                            )
-                        ):
-                            # allow one recovery after failed recovery
-                            pass
-                        if not prepare_vasprun_recovery_run(child):
-                            logger.warning(
-                                "%s: cannot prep vasprun recovery (inputs)", child.name,
-                            )
-                            continue
-                        logger.info(
-                            "%s: resubmit for missing vasprun (CONTCAR/static)",
-                            child.name,
-                        )
-                        job = _submit_or_skip(
-                            child, f"df-vr-{child.name}", s["name"],
-                        )
-                        # _submit_or_skip records submitted; add reason via history
-                        if JobStore().latest(str(child.resolve())) == "submitted":
-                            JobStore().record(
-                                str(child.resolve()),
-                                "submitted",
-                                source="vasprun_recovery",
-                                reason="vasprun_recovery",
-                            )
-                        continue
-
-                    if latest in ("failed", "converged", "unconverged"):
-                        continue
-                    _submit_or_skip(child, f"df-{child.name}", s["name"])
-
-
-            # UC done only when disk outputs are complete (not JobStore alone).
-            from vasp_sop.vasp.io import check_task_complete as _ctc
-            uc_all_done = all(
-                (not (uc_root / t / "INCAR").is_file()) or _ctc(uc_root / t, t)
-                for t in ("band", "dos", "dielectric")
-            )
-
-            # Defect VASP finished: converged, failed, or not a calc dir.
-            def _df_job_finished(child: Path) -> bool:
-                if not input_ready(child):
-                    return True
-                st = JobStore().latest(str(child.resolve()))
-                return st in ("converged", "failed", "unconverged")
-
-            df_vasp_done = all(
-                _df_job_finished(child)
-                for child in df_root.iterdir() if child.is_dir()
-            ) if df_root.is_dir() else True
-
-            # On-disk readiness for pydefect: need OUTCAR (or failed/non-calc).
-            # Do NOT require ionic convergence here — efnv will skip
-            # unconverged dirs; a stale JobStore "converged" must not block
-            # post-process when OUTCAR already exists.
-            def _df_ondisk_ok(child: Path) -> bool:
-                if not input_ready(child):
-                    return True
-                if JobStore().latest(str(child.resolve())) in ("failed", "unconverged"):
-                    return True
-                return (
-                    (child / "OUTCAR").is_file()
-                    or (child / "output" / "OUTCAR").is_file()
-                    or check_converged(child)
-                )
-
-            df_vasp_ondisk = all(
-                _df_ondisk_ok(child)
-                for child in df_root.iterdir() if child.is_dir()
-            ) if df_root.is_dir() else True
-
-            if uc_all_done and df_vasp_done and df_vasp_ondisk \
-                    and (df_root / "defect_energy_summary.json").is_file():
-                pass  # already done
-            elif uc_all_done and df_vasp_done and df_vasp_ondisk:
-                _logger.info("%s: post-processing ...", s["name"])
-                try:
-                    _uc.build_unitcell_yaml(uc_root, s["config"])
-                    failure = _unitcell_build_failure(uc_root.parent)
-                    if failure:
-                        raise RuntimeError(
-                            f"unitcell blocked for {s['name']}: {failure['reason']}; "
-                            f"{failure['diagnostic']}"
-                        )
-                    status = _analyze_defects(
-                        df_root, s["root"], s["config"],
-                        unitcell_yaml=uc_root / "unitcell.yaml",
-                        standard_energies=cpd_root / "standard_energies.yaml",
-                        target_vertices=cpd_root / "target_vertices.yaml",
-                    )
-                    if status == "full":
-                        _info(f"  ✓ {s['name']:<18} pipeline complete")
-                    elif status == "partial":
-                        message = (
-                            f"  ~ {s['name']:<18} post-process partial "
-                            f"(see defect/analyze_status.json)"
-                        )
-                        if log_to_logger:
-                            _logger.warning("%s", message)
-                        else:
-                            print(message)
-                    else:
-                        message = (
-                            f"  ✗ {s['name']:<18} post-process failed "
-                            f"(see defect/analyze_status.json)"
-                        )
-                        if log_to_logger:
-                            _logger.error("%s", message)
-                        else:
-                            print(message)
-                except Exception as exc:
-                    _logger.error("%s post-processing failed: %s", s["name"], exc)
-                    if _unitcell_build_failure(uc_root.parent):
-                        raise
+            # In dry-run, print the artifact preview first (matches
+            # original behaviour where the preview preceded submission).
+            if dry_run:
+                wave3_postprocess(sys_obj, dry_run, log_to_logger=log_to_logger)
+            wave2_submit(sys_obj, js, dry_run, log_to_logger=log_to_logger)
+            if not dry_run:
+                wave3_postprocess(sys_obj, dry_run, log_to_logger=log_to_logger)
         except Exception as exc:
             _logger.error("%s UNITCELL_DEFECT failed: %s", s["name"], exc)
-            if _unitcell_build_failure(uc_root.parent):
+            if _uc_build_failure(sys_obj.root):
                 raise
             if not log_to_logger:
                 print(f"  ✗ {s['name']:<18} UNITCELL_DEFECT FAILED")
