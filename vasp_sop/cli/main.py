@@ -79,6 +79,12 @@ def _add_cpd_parser(subparsers) -> None:
     p = subparsers.add_parser("cpd", help="Chemical-potential diagram tools")
     sub = p.add_subparsers(dest="action", required=True)
 
+    # run — CPD-only entrypoint (issue #93)
+    run_p = sub.add_parser("run", help="Run ONLY the CPD phase (competing + CPD solve, no UC/defect)")
+    run_p.add_argument("system_dir", type=Path, help="System root directory (contains cpd/, plan.yaml)")
+    run_p.add_argument("-f", "--formula", type=str, required=True, help="Target formula (e.g. GaN)")
+    run_p.add_argument("--dry-run", action="store_true", help="Do not submit VASP jobs")
+
     energies_p = sub.add_parser("energies", help="Compute composition energies")
     energies_p.add_argument("cpd_dir", type=Path, help="CPD root directory")
     energies_p.add_argument("-f", "--formula", type=str, required=True, help="Target formula")
@@ -184,6 +190,26 @@ def _handle_cpd(args: argparse.Namespace) -> None:
     from vasp_sop.defect.cpd import compute_chemical_potentials, adjust_unstable_phase
     from vasp_sop.core.config import PipelineConfig
     from pymatgen.core import Composition
+
+    if args.action == "run":
+        from vasp_sop.core.orchestrator import cpd_only
+
+        system_dir = args.system_dir.resolve()
+        if not system_dir.is_dir():
+            raise SystemExit(f"System directory not found: {system_dir}")
+        plan_path = system_dir / "plan.yaml"
+        if plan_path.is_file():
+            config = PipelineConfig.from_yaml(plan_path, root=system_dir)
+        else:
+            config = PipelineConfig(formula=args.formula, root=system_dir)
+        result = cpd_only(
+            system_dir, args.formula, config, dry_run=args.dry_run
+        )
+        status = result.get("status", "unknown")
+        print(f"CPD-only result: phase={result.get('phase')}, status={status}")
+        if status == "not_ready":
+            raise SystemExit(1)
+        return
 
     cpd_dir = args.cpd_dir.resolve()
     formula = getattr(args, "formula", "GaN")

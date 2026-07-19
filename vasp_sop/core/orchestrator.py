@@ -544,3 +544,72 @@ def wave3_postprocess(
         result["status"] = "vasp_pending"
 
     return result
+
+
+# ── CPD-only entrypoint (issue #93) ────────────────────────────────────────
+
+
+def cpd_only(
+    root: Path,
+    formula: str,
+    config: Any,
+    *,
+    dry_run: bool = False,
+    log_to_logger: bool = False,
+) -> dict[str, Any]:
+    """Run ONLY the CPD phase for a single system (issue #93).
+
+    Creates a :class:`~vasp_sop.core.system.System`, submits competing
+    phases (wave2), then runs CPD post-processing (wave3).  Stops before
+    UNITCELL_DEFECT — no UC or defect work is performed.
+
+    Parameters
+    ----------
+    root:
+        System root directory (contains ``cpd/``, ``plan.yaml``).
+    formula:
+        Target chemical formula (e.g. ``"GaN"``).
+    config:
+        A :class:`~vasp_sop.core.config.PipelineConfig` or compatible object.
+    dry_run:
+        If True, do not submit VASP jobs.
+    log_to_logger:
+        If True, use logger instead of print for progress messages.
+
+    Returns
+    -------
+    dict
+        Status dict with ``"phase"`` and ``"status"`` keys.
+    """
+    from vasp_sop.core.job_store import JobStore
+
+    root = Path(root)
+    sys_obj = System(root, config)
+    js = JobStore()
+    info = _make_info_fn(log_to_logger)
+
+    info(f"CPD-only mode for {sys_obj.name} (formula={formula})")
+
+    # ── Wave 2: submit competing phases ──────────────────────────────
+    phase = sys_obj.phase()
+    if phase == "COMPETING":
+        info(f"  Submitting competing phases ...")
+        wave2_submit(sys_obj, js, dry_run, log_to_logger=log_to_logger)
+        # Re-check phase after submission
+        phase = sys_obj.phase()
+
+    # ── Wave 3: CPD post-processing ──────────────────────────────────
+    if phase == "CHEM_POT_DIAGRAM":
+        info(f"  Running CPD post-processing ...")
+        result = wave3_postprocess(sys_obj, dry_run, log_to_logger=log_to_logger)
+        info(f"  CPD complete: {result.get('status', 'unknown')}")
+        return result
+
+    # If already past CPD or not yet ready
+    if phase in ("UNITCELL_DEFECT", "COMPLETE"):
+        info(f"  CPD already complete (phase={phase}), nothing to do.")
+        return {"phase": phase, "status": "already_complete"}
+
+    info(f"  System not ready for CPD (phase={phase}). "
+         f"Run structure_opt and competing phases first.")
+    return {"phase": phase, "status": "not_ready"}

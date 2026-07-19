@@ -232,6 +232,7 @@ class TestPhaseInference:
         td = s.cpd_dir / "GaN_mp-830"
         td.mkdir(parents=True)
         (s.cpd_dir / "target_vertices.yaml").write_text("target: {}")
+        (s.cpd_dir / "standard_energies.yaml").write_text("GaN: {}")
         # No unitcell INCAR files → UNITCELL_DEFECT
         self._patch(monkeypatch, {})
         assert s.phase() == UNITCELL_DEFECT

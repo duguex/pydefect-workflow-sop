@@ -190,6 +190,25 @@ class System:
         # COMPETING.  Downstream UC/DF can still cycle but we never return
         # COMPETING again for this system.
         if target_vertices.is_file():
+            # ── Phase gate audit (issue #93) ────────────────────────────
+            # Verify CPD artifacts are valid before allowing UNITCELL_DEFECT.
+            tv_size = target_vertices.stat().st_size
+            if tv_size == 0:
+                logger.error(
+                    "%s: PHASE GATE FAILED — target_vertices.yaml exists but is "
+                    "empty (0 bytes). Cannot advance to UNITCELL_DEFECT.",
+                    self.name,
+                )
+                return CHEM_POT_DIAGRAM
+            se_path = cpd_root / "standard_energies.yaml"
+            if not se_path.is_file():
+                logger.error(
+                    "%s: PHASE GATE FAILED — standard_energies.yaml missing. "
+                    "Cannot advance to UNITCELL_DEFECT.",
+                    self.name,
+                )
+                return CHEM_POT_DIAGRAM
+
             uc_root = self.uc_dir
             uc_tasks = ("band", "dos", "dielectric")
             uc_has_inputs = any((uc_root / t / "INCAR").is_file() for t in uc_tasks)
@@ -243,6 +262,37 @@ class System:
             return COMPETING
         return CHEM_POT_DIAGRAM
 
+    def _excluded_phases(self) -> set[str]:
+        """Read ``cpd_excluded_phases.yaml`` from the system root (issue #93).
+
+        Returns a set of phase directory names to skip during competing
+        phase submission.  The file format is a YAML list of directory
+        names (or substrings to match against directory names).
+        """
+        import yaml as _yaml
+
+        excl_path = self.root / "cpd_excluded_phases.yaml"
+        if not excl_path.is_file():
+            return set()
+        try:
+            data = _yaml.safe_load(excl_path.read_text())
+        except (OSError, _yaml.YAMLError):
+            return set()
+        if not isinstance(data, list):
+            return set()
+        return {str(entry) for entry in data}
+
+    def _is_excluded_phase(self, phase_dir: Path) -> bool:
+        """Check if *phase_dir* should be skipped per cpd_excluded_phases.yaml."""
+        excluded = self._excluded_phases()
+        if not excluded:
+            return False
+        name = phase_dir.name
+        for pattern in excluded:
+            if pattern == name or pattern in name:
+                return True
+        return False
+
     def _competing_dirs(self, store: Any) -> list[Path]:
         """Competing phases that still need VASP submission or retry."""
         from vasp_sop.vasp.io import check_converged, input_ready
@@ -256,6 +306,9 @@ class System:
         result: list[Path] = []
         for pd in sorted(cpd_dir.iterdir()):
             if not pd.is_dir() or pd.name in (target_name, "combos"):
+                continue
+            if self._is_excluded_phase(pd):
+                logger.info("%s: skipping excluded phase %s", self.name, pd.name)
                 continue
             current = store.latest(str(pd.resolve()))
             if current == "submitted":
@@ -288,6 +341,8 @@ class System:
         blockers: list[Path] = []
         for pd in sorted(cpd_dir.iterdir()):
             if not pd.is_dir() or pd.name in (target_name, "combos"):
+                continue
+            if self._is_excluded_phase(pd):
                 continue
             marker = crisp_terminal_status(pd)
             state = store.latest(str(pd.resolve()))
