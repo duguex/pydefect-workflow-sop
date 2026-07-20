@@ -43,6 +43,8 @@ def _submit_or_skip(
     sys_name: str,
     dry_run: bool,
     info_fn: Callable[[str], None],
+    *,
+    js: Any = None,
 ) -> Any:
     """Submit a VASP job via crisp, or skip in dry-run mode."""
     from vasp_sop.core.jobs import submit_vasp
@@ -54,10 +56,14 @@ def _submit_or_skip(
         return None
     try:
         job = submit_vasp(path.resolve())
-        js = JobStore()
-        js.track(str(path.resolve()))
-        js.record(str(path.resolve()), "submitted", source=job.task_name)
-        js.close()
+        owned = js is None
+        store = js if not owned else JobStore()
+        try:
+            store.track(str(path.resolve()))
+            store.record(str(path.resolve()), "submitted", source=job.task_name)
+        finally:
+            if owned:
+                store.close()
         info_fn(f"  → {sys_name:<18} {label}: {job.task_name}")
         return job
     except Exception as exc:
@@ -97,7 +103,7 @@ def wave1_optimize(
     """
     from vasp_sop.vasp.io import check_converged, input_ready
     from vasp_sop.core.cache import cache_lookup
-    from vasp_sop.core.job_store import JobStore, record_if_done
+    from vasp_sop.core.job_store import record_if_done
 
     info = _make_info_fn(log_to_logger)
     td = sys.target_dir
@@ -121,9 +127,9 @@ def wave1_optimize(
                     }
                     with open(sys.cpd_dir / ".target_submit.json", "w") as _f:
                         json.dump(submit_info, _f)
-                    record_if_done(JobStore(), td, source="cache_restore")
+                    record_if_done(js, td, source="cache_restore")
             elif input_ready(td):
-                _submit_or_skip(td, "target", sys.name, dry_run, info)
+                _submit_or_skip(td, "target", sys.name, dry_run, info, js=js)
 
 
 # ── Wave 2 ─────────────────────────────────────────────────────────────────
@@ -229,7 +235,7 @@ def wave2_submit(
 
                     restore_from_cache(cd)
                     continue
-            _submit_or_skip(cd, f"phase:{cd.name}", sys.name, dry_run, info)
+            _submit_or_skip(cd, f"phase:{cd.name}", sys.name, dry_run, info, js=js)
         return
 
     # ── UNITCELL_DEFECT: submit UC tasks + defect dirs ───────────────
@@ -262,7 +268,7 @@ def wave2_submit(
         if js.latest(str(task_dir.resolve())) == "submitted":
             continue
         prepare_inputs(task_dir, sys.config, task_type=task)
-        _submit_or_skip(task_dir, f"uc-{task}", sys.name, dry_run, info)
+        _submit_or_skip(task_dir, f"uc-{task}", sys.name, dry_run, info, js=js)
 
     # Submit perfect supercell
     perfect_dir = df_root / "perfect"
@@ -273,7 +279,7 @@ def wave2_submit(
             if perfect_state != "converged":
                 js.record(perfect_path, "converged", source="backfill")
         elif perfect_state not in ("submitted", "failed", "unconverged"):
-            _submit_or_skip(perfect_dir, "df-perfect", sys.name, dry_run, info)
+            _submit_or_skip(perfect_dir, "df-perfect", sys.name, dry_run, info, js=js)
 
     # Submit defect directories
     if df_root.is_dir() and not (df_root / "defect_energy_summary.json").is_file():
@@ -316,8 +322,7 @@ def wave2_submit(
                     "%s: resubmit for missing vasprun (CONTCAR/static)", child.name
                 )
                 _submit_or_skip(
-                    child, f"df-vr-{child.name}", sys.name, dry_run, info
-                )
+                    child, f"df-vr-{child.name}", sys.name, dry_run, info, js=js)
                 if js.latest(str(child.resolve())) == "submitted":
                     js.record(
                         str(child.resolve()),
@@ -329,14 +334,14 @@ def wave2_submit(
 
             if latest in ("failed", "converged", "unconverged"):
                 continue
-            _submit_or_skip(child, f"df-{child.name}", sys.name, dry_run, info)
+            _submit_or_skip(child, f"df-{child.name}", sys.name, dry_run, info, js=js)
 
 
 # ── Wave 3 ─────────────────────────────────────────────────────────────────
 
 
 def wave3_postprocess(
-    sys: System, dry_run: bool, *, log_to_logger: bool = False
+    sys: System, js: Any, dry_run: bool, *, log_to_logger: bool = False
 ) -> dict:
     """Wave 3: CHEM_POT_DIAGRAM + post-processing.
 
@@ -354,7 +359,6 @@ def wave3_postprocess(
     from vasp_sop.vasp.io import check_converged, input_ready
     from vasp_sop.core.jobs import move_crisp_outputs
     from vasp_sop.core.cache import vasp_results_put
-    from vasp_sop.core.job_store import JobStore
     from vasp_sop.defect import cpd as _cpd
     from vasp_sop.defect import unitcell as _uc
     from vasp_sop.defect.analysis import analyze as _analyze_defects
@@ -447,7 +451,6 @@ def wave3_postprocess(
         return result
 
     # ── Real post-processing ─────────────────────────────────────────
-    js = JobStore()
     from vasp_sop.vasp.io import check_task_complete as _ctc
 
     # UC done only when disk outputs are complete (not JobStore alone).

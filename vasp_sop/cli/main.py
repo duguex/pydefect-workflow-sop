@@ -1415,7 +1415,7 @@ def _advance_one_system(s: dict, *, dry_run: bool = False, log_to_logger: bool =
 
     # ── Wave 3: CHEM_POT_DIAGRAM ─────────────────────────────────────
     if p == "CHEM_POT_DIAGRAM":
-        wave3_postprocess(sys_obj, dry_run, log_to_logger=log_to_logger)
+        wave3_postprocess(sys_obj, js, dry_run, log_to_logger=log_to_logger)
 
     # ── Wave 2 + 3: UNITCELL_DEFECT ─────────────────────────────────
     if p == "UNITCELL_DEFECT":
@@ -1423,10 +1423,10 @@ def _advance_one_system(s: dict, *, dry_run: bool = False, log_to_logger: bool =
             # In dry-run, print the artifact preview first (matches
             # original behaviour where the preview preceded submission).
             if dry_run:
-                wave3_postprocess(sys_obj, dry_run, log_to_logger=log_to_logger)
+                wave3_postprocess(sys_obj, js, dry_run, log_to_logger=log_to_logger)
             wave2_submit(sys_obj, js, dry_run, log_to_logger=log_to_logger)
             if not dry_run:
-                wave3_postprocess(sys_obj, dry_run, log_to_logger=log_to_logger)
+                wave3_postprocess(sys_obj, js, dry_run, log_to_logger=log_to_logger)
         except Exception as exc:
             _logger.error("%s UNITCELL_DEFECT failed: %s", s["name"], exc)
             if _uc_build_failure(sys_obj.root):
