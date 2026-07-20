@@ -227,11 +227,18 @@ def reconcile_false_converged(
             continue
         if path_prefix and not dir_path.startswith(path_prefix):
             continue
-        stats["checked"] += 1
         p = Path(dir_path)
         if not p.is_dir():
             stats["missing"] += 1
             continue
+        parent = p.parent.name
+        if parent == "defect":
+            from vasp_sop.defect import is_valid_defect_dir
+            if not is_valid_defect_dir(p):
+                continue
+        elif parent not in ("cpd", "unitcell"):
+            continue
+        stats["checked"] += 1
         if calc_done_on_disk(p):
             stats["kept"] += 1
             continue

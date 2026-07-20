@@ -41,13 +41,6 @@ def run_vasp(defect_root: Path) -> None:
                 result.append(child)
         return result
 
-    def _max_f(path: Path) -> float:
-        """Extract max force from OUTCAR (0 if unavailable).
-
-        Delegates to the canonical ``parse_max_force`` in vasp_sop.vasp.io.
-        """
-        mf = parse_max_force(path)
-        return mf if mf >= 0 else 0.0
 
     prev_forces: dict[str, float] = {}
     stalled: set[str] = set()
@@ -56,12 +49,13 @@ def run_vasp(defect_root: Path) -> None:
         dirs = _collect_jobs()
         if not dirs:
             break
+        corrected: set[str] = set()
 
         for d in dirs:
             if (d / "CONTCAR").is_file() and not check_converged(d):
                 dirname = d.name
                 old_f = prev_forces.get(dirname, 999.0)
-                cur_f = _max_f(d)
+                cur_f = max(parse_max_force(d), 0.0)
                 if cur_f > 0 and cur_f >= old_f * 0.99:
                     stalled.add(dirname)
                     failure = diagnose_failure(d / "OUTCAR")
@@ -84,14 +78,12 @@ def run_vasp(defect_root: Path) -> None:
                         dirname, attempt + 1, cur_f,
                     )
                     restart_from_contcar(d)
-                else:
-                    # Stalled: use auto-heal staged corrections
-                    logger.warning("Recovering stalled %s (max_f=%.4f)", dirname, cur_f)
-                    failure = diagnose_failure(d / "OUTCAR")
-                    apply_correction(d, failure, attempt + 1)
+                elif apply_correction(d, diagnose_failure(d / "OUTCAR"), attempt + 1):
+                    logger.warning("Recovered stalled %s via auto-heal", dirname)
+                    corrected.add(dirname)
 
         # Only submit non-stalled jobs
-        active = [d for d in dirs if d.name not in stalled]
+        active = [d for d in dirs if d.name not in stalled or d.name in corrected]
         if not active:
             logger.info("All remaining jobs stalled. Giving up.")
             break

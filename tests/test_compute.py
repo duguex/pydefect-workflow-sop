@@ -120,53 +120,60 @@ class TestRunVasp:
         assert len(submitted) >= 1
         assert any("Va_X_0" in str(s) for s in submitted)
 
-    def test_stalled_detection_skips_submission(self, tmp_path: Path, monkeypatch):
-        """A stalled job (max_f not decreasing) is not submitted in the
-        current iteration."""
+    def test_stalled_with_correction_resubmits(self, tmp_path: Path, monkeypatch):
+        """A stalled job with successful correction is resubmitted."""
         perfect = tmp_path / "perfect"
         perfect.mkdir()
-        _make_minimal_outcar(perfect, max_force=0.01)
+        _make_minimal_outcar(perfect)
 
-        defect_dir = _make_defect_dir(tmp_path, "Va_X_0")
-        _make_stalled_outcar(defect_dir, max_force=0.5)
-        (defect_dir / "INCAR").write_text("POTIM = 0.5\nSYSTEM = test\n")
+        defect = _make_defect_dir(tmp_path, "Va_X_0")
+        _make_stalled_outcar(defect, max_force=0.5)
 
         submitted = []
-        monkeypatch.setattr(
-            "vasp_sop.defect.compute.check_converged",
-            lambda p: "perfect" in str(p),
-        )
-        monkeypatch.setattr(
-            "vasp_sop.defect.compute.input_ready",
-            lambda p: p.is_dir() and p.name != "perfect",
-        )
-        monkeypatch.setattr(
-            "vasp_sop.defect.compute.submit_vasp",
-            lambda p: submitted.append(p) or _mock_job(p),
-        )
-        monkeypatch.setattr(
-            "vasp_sop.defect.compute.move_crisp_outputs", lambda p: None,
-        )
-        monkeypatch.setattr(
-            "vasp_sop.defect.compute.restart_from_contcar", lambda p: None,
-        )
-        monkeypatch.setattr(
-            "vasp_sop.defect.compute.diagnose_failure", lambda p: None,
-        )
-        monkeypatch.setattr(
-            "vasp_sop.defect.compute.recommended_fix", lambda p: None,
-        )
-        monkeypatch.setattr(
-            "vasp_sop.defect.compute.time.sleep", lambda s: None,
-        )
+        corrected = []
+        converge_count = [0]
+        monkeypatch.setattr("vasp_sop.defect.compute.input_ready", lambda p: True)
+        monkeypatch.setattr("vasp_sop.defect.compute.check_converged",
+                           lambda p: "perfect" in str(p) or converge_count[0] > 1)
+        monkeypatch.setattr("vasp_sop.defect.compute.submit_vasp",
+                           lambda p: (submitted.append(p), converge_count.__setitem__(0, converge_count[0] + 1), _mock_job(p))[-1])
+        monkeypatch.setattr("vasp_sop.defect.compute.move_crisp_outputs", lambda p: None)
+        monkeypatch.setattr("vasp_sop.defect.compute.restart_from_contcar", lambda p: None)
+        monkeypatch.setattr("vasp_sop.defect.compute.diagnose_failure", lambda p: None)
+        monkeypatch.setattr("vasp_sop.defect.compute.recommended_fix", lambda p: None)
+        monkeypatch.setattr("vasp_sop.defect.compute.time.sleep", lambda s: None)
+        monkeypatch.setattr("vasp_sop.defect.compute.apply_correction",
+                           lambda d, f, a: (corrected.append(d.name) or True))
 
         from vasp_sop.defect.compute import run_vasp
         run_vasp(tmp_path)
-        # The only defect dir is stalled — POTIM is increased but it
-        # stays in the stalled set and is excluded from submission.
-        # First attempt sees prev_forces={} → old_f=999, cur_f=0.5
-        # → NOT stalled → submits once.
-        # Second attempt sees prev_forces={"Va_X_0": 0.5} → stalled → skipped.
-        assert len(submitted) == 1, (
-            f"expected 1 submission (first cycle not stalled), got {len(submitted)}"
-        )
+        assert len(corrected) >= 1, "apply_correction should be called"
+        assert 2 <= len(submitted) <= 3, (
+            f"should resubmit once after correction then converge, got {len(submitted)}")
+
+    def test_stalled_never_converges_exits_after_max_attempts(self, tmp_path: Path, monkeypatch):
+        """Stalled job that never converges stops after max attempts."""
+        perfect = tmp_path / "perfect"
+        perfect.mkdir()
+        _make_minimal_outcar(perfect)
+
+        defect = _make_defect_dir(tmp_path, "Va_X_0")
+        _make_stalled_outcar(defect, max_force=0.5)
+
+        monkeypatch.setattr("vasp_sop.defect.compute.check_converged",
+                           lambda p: "perfect" in str(p))
+        submitted = []
+        monkeypatch.setattr("vasp_sop.defect.compute.input_ready", lambda p: True)
+        monkeypatch.setattr("vasp_sop.defect.compute.submit_vasp",
+                           lambda p: submitted.append(p) or _mock_job(p))
+        monkeypatch.setattr("vasp_sop.defect.compute.move_crisp_outputs", lambda p: None)
+        monkeypatch.setattr("vasp_sop.defect.compute.restart_from_contcar", lambda p: None)
+        monkeypatch.setattr("vasp_sop.defect.compute.diagnose_failure", lambda p: None)
+        monkeypatch.setattr("vasp_sop.defect.compute.recommended_fix", lambda p: None)
+        monkeypatch.setattr("vasp_sop.defect.compute.time.sleep", lambda s: None)
+        monkeypatch.setattr("vasp_sop.defect.compute.apply_correction",
+                           lambda d, f, a: True)
+
+        from vasp_sop.defect.compute import run_vasp
+        run_vasp(tmp_path)
+        assert len(submitted) <= 20, "should stop at max attempts"

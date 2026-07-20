@@ -46,7 +46,7 @@ vasp-sop 依赖 [vasp-cache](https://github.com/duguex/vasp-cache) 存储计算�
 vasp-sop cache status
 ```
 
-首次使用时缓存为空，这是正常的。缓存数据存储在 `~/.vasp_sop/`（meta.json + blobs.json）。
+首次使用时缓存为空，这是正常的。缓存数据存储在 `$VASP_CACHE_ROOT` 指定的目录（默认 `~/.cache/vasp_cache`）。
 
 ### HPC 环境（可选）
 
@@ -103,7 +103,7 @@ vasp-sop batch run .
 流水线自动推进每个系统经过以下阶段：
 
 ```
-TARGET → COMPETING → CPD_POST → UC_DF → DONE
+STRUCTURE_OPT → COMPETING → CHEM_POT_DIAGRAM → UNITCELL_DEFECT → COMPLETE
 ```
 
 - 默认轮询间隔 60 秒，可用 `--poll 120` 调整
@@ -143,7 +143,6 @@ vasp-sop cache status --verbose
 | `vasp-sop cache put <path> -r` | 递归扫描目录树缓存 |
 | `vasp-sop cache query --formula <f>` | 语义化跨项目缓存查询 |
 | `vasp-sop cache verify` | 检查缓存一致性 |
-| `vasp-sop cache migrate` | 从旧 SQLite 迁移到 JSONStore |
 | `vasp-sop vasp inputs <dir>` | 通过 vise 生成 VASP 输入 |
 | `vasp-sop vasp check <dir>` | 检查 VASP 是否收敛 |
 | `vasp-sop cpd energies <dir> -f <formula>` | 计算组分能量 |

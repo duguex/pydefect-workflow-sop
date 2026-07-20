@@ -1,7 +1,7 @@
 """Adapter from vasp-sop to vasp-cache (SQLite identity cache v0.3.0).
 
 MP download paths remain under ``~/.vasp_sop`` (or test override root).
-VASP **results** live in vasp-cache (default ``~/.cache/vasp_cache``).
+VASP **results** live in vasp-cache (default: ``$VASP_CACHE_ROOT`` or ``~/.cache/vasp_cache``).
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from vasp_cache import (
     fetch as _vc_fetch,
     get_meta as _vc_get_meta,
     has as _vc_has,
+    identity_for_directory as _vc_identity,
     list_entries as _vc_list_entries,
     put as _vc_put,
     query as _vc_query,
@@ -21,7 +22,6 @@ from vasp_cache import (
     override_cache_root as _vc_override_cache_root,
     IdentityInputError,
 )
-from vasp_cache.index import identity_for_directory
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ def _detect_calc_info(src_dir: Path) -> tuple[str, str, str]:
     """Return (formula, identity_key, dir_name) for *src_dir*."""
     p = Path(src_dir)
     try:
-        ident = identity_for_directory(p)
+        ident = _vc_identity(p)
         return ident.formula, ident.key, p.name
     except IdentityInputError:
         pass
@@ -95,16 +95,18 @@ def vasp_results_put(
     task_name: str | None = None,
     *,
     cache_root: Path | None = None,
+    overwrite: bool = False,
 ) -> str | None:
     """Store VASP results from *src_dir* in vasp-cache.
 
     Legacy *formula*, *content_hash*, and *task_name* are ignored;
     vasp-cache v0.3.0 auto-detects identity from directory content.
+    Set *overwrite* to True to replace an existing entry of equal quality.
 
     Returns identity key on success, None if identity could not be
     computed (missing required input files).
     """
-    return _vc_put(src_dir, root=cache_root)
+    return _vc_put(src_dir, root=cache_root, overwrite=overwrite)
 
 
 def vasp_results_get(
@@ -129,7 +131,7 @@ def restore_from_cache(
 ) -> bool:
     """Restore OUTCAR/CONTCAR/vasprun.xml from cache to *src_dir*."""
     try:
-        ident = identity_for_directory(Path(src_dir))
+        ident = _vc_identity(Path(src_dir))
     except IdentityInputError:
         return False
     if not _vc_has(src_dir, root=cache_root):

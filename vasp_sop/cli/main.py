@@ -354,6 +354,12 @@ def _add_defect_parser(subparsers) -> None:
     analyze_parser = defect_sub.add_parser("analyze", help="Run defect post-processing only")
     analyze_parser.add_argument("project_dir", type=Path, help="Project root directory")
 
+    # inventory — list defect dirs and ignored trees
+    inv_parser = defect_sub.add_parser("inventory", help="List defect directories and ignored trees")
+    inv_parser.add_argument("project_dir", type=Path, help="Project root directory")
+    inv_parser.add_argument("--include-defect-new", action="store_true",
+                            help="Include defect_new/ parallel tree")
+
 
 def _handle_defect(args: argparse.Namespace) -> None:
     if args.action == "init":
@@ -368,6 +374,8 @@ def _handle_defect(args: argparse.Namespace) -> None:
         print("defect build: standalone defect structure generation not yet implemented. Use 'batch run' instead.")
     elif args.action == "analyze":
         _do_defect_analyze(args)
+    elif args.action == "inventory":
+        _do_defect_inventory(args)
 
 
 def _do_defect_analyze(args: argparse.Namespace) -> None:
@@ -399,6 +407,44 @@ def _do_defect_analyze(args: argparse.Namespace) -> None:
     if status == "failed":
         raise SystemExit(1)
 
+
+
+def _do_defect_inventory(args: argparse.Namespace) -> None:
+    """Print defect directory inventory, including ignored trees."""
+    from vasp_sop.defect.analysis import _inventory
+    from vasp_sop.defect import DEFECT_NEW_DIR
+
+    project = args.project_dir.resolve()
+    df = project / "defect"
+    if not df.is_dir():
+        print(f"defect/ not found in {project}")
+        return
+
+    inv = _inventory(df)
+    print(f"Defect inventory for {project.name}:")
+    print(f"  dirs (valid defect):          {len(inv['dirs'])}")
+    print(f"  converged (ionic):           {len(inv['converged'])}")
+    print(f"  unconverged:                 {len(inv['unconverged'])}")
+    print(f"  with correction.json:        {len(inv['corrected'])}")
+
+    all_subdirs = {d for d in df.iterdir() if d.is_dir()}
+    ignored = all_subdirs - set(inv['dirs'])
+    if ignored:
+        print(f"\n  Ignored under defect/ ({len(ignored)}):")
+        for d in sorted(ignored):
+            reason = "no _ in name" if "_" not in d.name else "junk"
+            if d.name == DEFECT_NEW_DIR:
+                reason = "defect_new (use --include-defect-new)"
+            print(f"    {d.name} ({reason})")
+
+    if args.include_defect_new:
+        dn = project / DEFECT_NEW_DIR
+        if dn.is_dir():
+            dn_inv = _inventory(dn)
+            print(f"\n  defect_new/ included (sibling tree):")
+            print(f"    valid dirs:  {len(dn_inv['dirs'])}")
+            print(f"    converged:   {len(dn_inv['converged'])}")
+            print(f"    unconverged: {len(dn_inv['unconverged'])}")
 def _do_init(args: argparse.Namespace) -> None:
     """Generate plan.yaml with inference and dynamic comments."""
     from vasp_sop.core.config import generate_config
@@ -1391,26 +1437,6 @@ def _advance_one_system(s: dict, *, dry_run: bool = False, log_to_logger: bool =
 _MAX_RESTART = 5
 
 
-def _parse_max_f(outcar: Path) -> float:
-    """Extract max force from OUTCAR TOTAL-FORCE block."""
-    try:
-        text = outcar.read_text()
-    except Exception:
-        return 0.0
-    idx = text.rfind("TOTAL-FORCE (eV/Angst)")
-    if idx < 0:
-        return 0.0
-    max_f = 0.0
-    for line in text[idx:].splitlines()[2:]:
-        parts = line.strip().split()
-        if len(parts) < 6:
-            break
-        try:
-            max_f = max(max_f, abs(float(parts[3])),
-                        abs(float(parts[4])), abs(float(parts[5])))
-        except ValueError:
-            break
-    return max_f
 
 
 def _handle_unconverged_poll(wd: Path) -> None:
@@ -1424,17 +1450,14 @@ def _handle_unconverged_poll(wd: Path) -> None:
 
     _log = logging.getLogger(__name__)
     from vasp_sop.core.job_store import JobStore
-    from vasp_sop.vasp.io import restart_from_contcar
+    from vasp_sop.vasp.io import restart_from_contcar, parse_max_force
     from vasp_sop.core.jobs import submit_vasp
 
     wd_str = str(wd.resolve())
     history = JobStore().history(wd_str)
     attempt = history[-1].get("attempt", 0) if history else 0
 
-    # Read current max_f from the OUTCAR
-    cur_f = _parse_max_f(wd / "OUTCAR")
-    if cur_f == 0.0:
-        cur_f = _parse_max_f(wd / "output" / "OUTCAR")
+    cur_f = parse_max_force(wd)
 
     # Stall detection: compare with previous restart's max_f
     if cur_f > 0 and attempt > 0:
@@ -1555,17 +1578,37 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
 
     from vasp_sop.core.cache import cache_lookup, vasp_results_put as _cache_put
 
-    def _cache_phase_results(wd: Path) -> None:
-        try:
-            key = _cache_put(wd)
-            if key is None:
-                logger.warning(
-                    "%s: cache put returned None (missing output files?)",
-                    wd.name,
-                )
-        except Exception as exc:
-            logger.warning("Failed to cache %s: %s", wd.name, exc)
+    import threading
+    _deferred_cache: set[Path] = set()
+    _cache_lock = threading.Lock()
+    _cache_workers: list[threading.Thread] = []
 
+    def _defer_cache_put(wd: Path) -> None:
+        with _cache_lock:
+            _deferred_cache.add(wd)
+
+    def _flush_deferred_cache() -> None:
+        with _cache_lock:
+            if not _deferred_cache:
+                return
+            dirs = list(_deferred_cache)
+            _deferred_cache.clear()
+        def _do_put():
+            for wd in dirs:
+                try:
+                    _cache_put(wd)
+                except Exception as exc:
+                    logger.warning("Failed to cache %s: %s", wd.name, exc)
+        t = threading.Thread(target=_do_put, daemon=True)
+        _cache_workers.append(t)
+        t.start()
+
+    def _join_cache_workers() -> None:
+        with _cache_lock:
+            pending = list(_cache_workers)
+            _cache_workers.clear()
+        for t in pending:
+            t.join(timeout=30)
     # ── Submit helper ──────────────────────────────────────────────
     def _submit_or_skip(path: Path, label: str, sys_name: str) -> object:
         if dry_run:
@@ -1666,7 +1709,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                                 continue
                             move_crisp_outputs(child)
                             if _cc(child) and cache_lookup(child) is None:
-                                _cache_phase_results(child)
+                                _defer_cache_put(child)
                             orphaned += 1
                 if orphaned:
                     logger.info("Processed %d orphaned crisp outputs.", orphaned)
@@ -1681,7 +1724,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                         continue
                     if _cc(wd):
                         move_crisp_outputs(wd)
-                        _cache_phase_results(wd)
+                        _defer_cache_put(wd)
                         JobStore().record(wd_str, "converged")
                         JobStore().untrack(wd_str)
                         completed += 1
@@ -1838,10 +1881,14 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                 break
 
             _print_info(f"\n  Sleeping {poll_interval}s … (Ctrl+C to interrupt)")
+            _flush_deferred_cache()
             _time.sleep(poll_interval)
             first_pass = False
     except KeyboardInterrupt:
         _print_info("\nInterrupted.")
+    finally:
+        _flush_deferred_cache()
+        _join_cache_workers()
 
 
 def _batch_generate_inputs(root: Path, *, unitcell: bool = False) -> None:

@@ -473,6 +473,15 @@ class TestRestoreFromKey:
         (tgt / "OUTCAR").write_text("keep\n")
         assert not _cache.restore_from_key("bad-key", tgt)
         assert (tgt / "OUTCAR").read_text() == "keep\n"
+
+    def test_overwrite_passed_through_to_put(self, tmp_path: Path, monkeypatch):
+        overwrite_calls = []
+        monkeypatch.setattr("vasp_sop.core.cache._vc_put",
+                           lambda src_dir, **kw: (overwrite_calls.append(kw.get("overwrite", False)) or "key"))
+        _cache.vasp_results_put(tmp_path, overwrite=True)
+        assert overwrite_calls == [True]
+        _cache.vasp_results_put(tmp_path)
+        assert overwrite_calls == [True, False]
 #  MP phase list cache  (dead code but test for completeness)
 # ══════════════════════════════════════════════════════════════════════════
 

@@ -70,14 +70,35 @@ class TestJobStore:
     def test_reconcile_false_converged(self, store, tmp_path: Path, monkeypatch):
         from vasp_sop.core import job_store as js_mod
 
-        d = tmp_path / "Va_X_0"
-        d.mkdir()
+        d = tmp_path / "defect" / "Va_X_0"
+        d.mkdir(parents=True)
         (d / "OUTCAR").write_text("no timing\n")
         store.record(str(d.resolve()), "converged")
         monkeypatch.setattr(js_mod, "calc_done_on_disk", lambda p, task_type="": False)
         stats = js_mod.reconcile_false_converged(store)
         assert stats["fixed"] == 1
         assert store.latest(str(d.resolve())) == "unconverged"
+
+    def test_reconcile_filters_by_tree(self, store, tmp_path, monkeypatch):
+        from vasp_sop.core import job_store as js_mod
+
+        def _make(p, name):
+            d = p / name; d.mkdir(parents=True)
+            (d / "OUTCAR").write_text("no timing\n")
+            store.record(str(d.resolve()), "converged")
+            return d
+
+        main = _make(tmp_path / "defect", "Va_Ga_0")
+        dn = _make(tmp_path / "defect_new", "Va_Ga_0")
+        cpd = _make(tmp_path / "cpd", "NaCl_mp-12345")
+        uc = _make(tmp_path / "unitcell", "band")
+
+        monkeypatch.setattr(js_mod, "calc_done_on_disk", lambda p, task_type="": False)
+        stats = js_mod.reconcile_false_converged(store)
+        assert stats["fixed"] == 3
+        for d in (main, cpd, uc):
+            assert store.latest(str(d.resolve())) == "unconverged"
+        assert store.latest(str(dn.resolve())) == "converged"
 
     def test_record_if_done_converged(self, store, tmp_path: Path, monkeypatch):
         from vasp_sop.core import job_store as js_mod

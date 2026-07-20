@@ -1852,3 +1852,30 @@ class TestRunPipelineStartup:
         _batch_generate_inputs(tmp_path)
 
         assert input_ready(td), "target should have all inputs after generate"
+
+
+class TestDefectInventory:
+    """defect inventory — lists dirs and ignored trees."""
+
+    def test_inventory_counts_dirs(self, tmp_path, capsys):
+        project = tmp_path / "test"
+        project.mkdir()
+        df = project / "defect"
+        df.mkdir()
+        (df / "perfect").mkdir()
+        (df / "Va_Ga_0").mkdir()
+        (df / "junk").mkdir()
+        (df / "defect_new").mkdir()
+        dn = project / "defect_new"
+        dn.mkdir()
+        (dn / "Va_Ga_1").mkdir()
+
+        from vasp_sop.cli.main import _do_defect_inventory
+        import argparse
+        args = argparse.Namespace(project_dir=project, include_defect_new=True)
+        _do_defect_inventory(args)
+
+        out = capsys.readouterr().out
+        assert "Ignored under defect/ (3)" in out
+        assert "use --include-defect-new" in out
+        assert "defect_new/ included" in out
