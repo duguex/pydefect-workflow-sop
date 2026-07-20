@@ -677,9 +677,9 @@ def _add_cache_parser(subparsers) -> None:
     sp.add_argument("--limit", type=int, default=50, help="Max results")
 
     # migrate
-    sp = sub.add_parser("migrate", help="Migrate from old SQLite cache to JSONStore")
+    sp = sub.add_parser("migrate", help="Migrate from old SQLite cache to vasp-cache")
     sp.add_argument("--force", action="store_true",
-                    help="Force migration even if JSONStore already has data")
+                    help="Force migration even if vasp-cache already has data")
 
     # verify
     sub.add_parser("verify", help="Check store consistency")
@@ -1578,37 +1578,47 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
 
     from vasp_sop.core.cache import cache_lookup, vasp_results_put as _cache_put
 
-    import threading
-    _deferred_cache: set[Path] = set()
-    _cache_lock = threading.Lock()
-    _cache_workers: list[threading.Thread] = []
+    import threading, queue
+    _cache_queue: queue.Queue[Path | None] = queue.Queue()
+    _cache_worker: threading.Thread | None = None
+    _cache_seen: set[Path] = set()
 
-    def _defer_cache_put(wd: Path) -> None:
-        with _cache_lock:
-            _deferred_cache.add(wd)
-
-    def _flush_deferred_cache() -> None:
-        with _cache_lock:
-            if not _deferred_cache:
-                return
-            dirs = list(_deferred_cache)
-            _deferred_cache.clear()
-        def _do_put():
-            for wd in dirs:
+    def _start_cache_worker() -> None:
+        nonlocal _cache_worker
+        if _cache_worker is not None:
+            return
+        def _run():
+            while True:
+                wd = _cache_queue.get()
+                if wd is None:
+                    break
                 try:
                     _cache_put(wd)
                 except Exception as exc:
                     logger.warning("Failed to cache %s: %s", wd.name, exc)
-        t = threading.Thread(target=_do_put, daemon=True)
-        _cache_workers.append(t)
-        t.start()
+                finally:
+                    _cache_queue.task_done()
+        _cache_worker = threading.Thread(target=_run, daemon=True)
+        _cache_worker.start()
+
+    def _defer_cache_put(wd: Path) -> None:
+        if wd in _cache_seen:
+            return
+        _cache_seen.add(wd)
+        _start_cache_worker()
+        _cache_queue.put(wd)
+
+    def _flush_deferred_cache() -> None:
+        pass
 
     def _join_cache_workers() -> None:
-        with _cache_lock:
-            pending = list(_cache_workers)
-            _cache_workers.clear()
-        for t in pending:
-            t.join(timeout=30)
+        nonlocal _cache_worker
+        if _cache_worker is None:
+            return
+        _cache_queue.join()
+        _cache_queue.put(None)
+        _cache_worker.join()
+        _cache_worker = None
     # ── Submit helper ──────────────────────────────────────────────
     def _submit_or_skip(path: Path, label: str, sys_name: str) -> object:
         if dry_run:

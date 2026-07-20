@@ -425,19 +425,20 @@ and `target_vertices.yaml`.
 
 ## 8. Results Cache
 
-The cache layer (`vasp_sop/core/cache.py`) stores parsed VASP results for
-cross-project reuse and querying. Backed by **vasp-cache v0.3.0 (SQLite
-identity cache)** at `~/.vasp_sop/`.
+The cache layer (`vasp_sop/core/cache.py`) stores VASP calculation results for
+cross-project reuse. Backed by **vasp-cache v0.3.0**.  Cache root is
+controlled by ``$VASP_CACHE_ROOT`` (default: vasp-cache built-in).
 
 ### Architecture
 
-vasp-cache v0.3.0 (SQLite identity cache) — a local SQLite database keyed by
-content hash (formula + k-points + INCAR fingerprint + POTCAR species).
+vasp-cache v0.3.0 — a SQLite identity cache keyed by 6-layer hash
+(formula, INCAR, structure, KPOINTS, POTCAR, lattice).
 
 | Record Type | Content |
 |---|---|
-| **Metadata** | formula, content_hash, total_energy, bandgap, converged, calc_type, n_sites, space_group, tags, source_dir |
-| **Blobs** | Large parsed VASP output: outcar_dict, vasprun_dict, structure_dict, incar_dict, kpoints_dict |
+| **Identity** | 6-layer SHA-256: formula + incar + structure + kpoints + potcar + lattice |
+| **Extracts** | final_energy, total_mag, converged_ionic, n_ionic_steps, electrostatic_potentials |
+| **BLOBs** | zlib-compressed: OUTCAR, vasprun.xml, CONTCAR |
 
 ### Core Operations
 

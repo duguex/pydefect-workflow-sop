@@ -30,7 +30,7 @@ Priorities:
 
 ## 2. Phase B — cache as post-process data source
 
-Goal: analysis can run from JSONStore blobs when disk OUTCAR/vasprun are incomplete.
+Goal: analysis tolerates missing disk OUTCAR/vasprun are incomplete.
 
 - Restore `vasprun.xml` / OUTCAR from cache blobs into work dirs before pydefect
 - Or teach analysis to read TaskDoc/cache when files missing

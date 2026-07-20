@@ -38,7 +38,7 @@
     元数据表轻量（formula, content_hash, total_energy, bandgap, tags 等），blob 表存储 OUTCAR/vasprun/INCAR 大 JSON。
     解析层优先使用 emmet-core 的 `TaskDoc.from_directory()`，失败回退正则。
     支持语义查询（`cache query --formula GaN --functional HSE`），MongoDB 语法。
-    提供一个从旧 SQLite 迁移的工具（`cache migrate`）。
+    通过 `cache migrate` 从旧缓存迁移。
 
 ## 3. 点缺陷计算业务逻辑
 

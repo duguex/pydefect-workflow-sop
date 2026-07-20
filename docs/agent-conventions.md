@@ -1,7 +1,7 @@
 # Agent coding conventions (vasp_sop)
 
-> **Audience**: coding agents changing this repo.  
-> **Entrypoint**: root [`AGENTS.md`](../AGENTS.md).  
+> **Audience**: coding agents changing this repo.
+> **Entrypoint**: root [`AGENTS.md`](../AGENTS.md).
 > **Human start**: root [`README.md`](../README.md).
 
 > 架构文档: [`README.md`](README.md) — `_batch_run` 流程、`_phase()` 阶段机、`_advance_one_system` 各阶段操作、JobStore 状态模型、CONTCAR 重启逻辑。
@@ -25,7 +25,7 @@ vasp-sop 是一个**编排层**，把整条链路封装成一条命令。给定�
 | 一键批量 | `vasp-sop batch run .` 串行推进所有体系 |
 | 三波 VASP 调度 | Wave 1: 结构优化 → Wave 2: 竞争相+能带+DOS+介电+缺陷全并行 → Wave 3: 后处理 |
 | 容错 | CONTCAR 重启（最多 20 次）、12 种错误诊断、单体系失败不阻塞其他 |
-| 结果缓存 | Maggma JSONStore 双存储，跨项目复用 |
+| 结果缓存 | vasp-cache v0.3.0 SQLite identity cache |
 | 后处理编排 | 11 步 pydefect 管线 → `defect_energy_summary.json` |
 
 ### 不是什么
@@ -64,7 +64,7 @@ CLI (vasp-sop command)
   │       └── UNITCELL_DEFECT → build defect structures + submit VASP
   │
   ├── defect build .       ← standalone defect structure generation
-  ├── cache status/query/verify/migrate  ← JSONStore cache inspection & query
+  ├── cache status/query/verify/migrate
   └── materials fetch      ← MP query + download
 ```
 
@@ -89,7 +89,7 @@ sub-tasks + defect calculations). Wave 3 runs after all Wave 2 jobs complete.
 | Config | `vasp_sop/core/config.py` | `PipelineConfig` dataclass, `plan.yaml` I/O, `generate_config()` |
 | Jobs | `vasp_sop/core/jobs.py` | VASP submission (crisp/local), `VaspJob` hierarchy, `run_local()` |
 | State | `vasp_sop/core/job_store.py` | JobStore (SQLite) — per-calculation VASP job states (`submitted`/`converged`/`failed`), plus `tracked` table for active submissions |
-| Cache | `vasp_sop/core/cache.py` | maggma JSONStore dual-store (meta.json + blobs.json), TaskDoc + regex parse |
+| Cache | `vasp_sop/core/cache.py` | vasp-cache adapter (SQLite identity + BLOB) |
 | Builder | `vasp_sop/defect/builder.py` | Supercell (doped/pydefect) + defect enumeration + VASP inputs |
 | CPD | `vasp_sop/defect/cpd.py` | Competing phase diagram pipeline |
 | Unitcell | `vasp_sop/defect/unitcell.py` | Perfect-cell band/DOS/dielectric |
@@ -141,7 +141,7 @@ vasp_sop/
 └── __init__.py          ← version = "0.1.0"
 
 tests/
-├── test_cache.py        ← Cache tests (JSONStore + MP)
+├── test_cache.py        ← Cache tests (vasp-cache adapter + MP)
 ├── test_cli.py          ← CLI + dry-run + batch status tests
 ├── test_builder.py      ← Supercell builder tests
 ├── test_config.py       ← Config validation + YAML round-trip
@@ -187,7 +187,7 @@ vasp-sop cache status --verbose
 | `batch run` | Multi-system pipeline orchestrator (main workflow) |
 | `pipeline` | Single-system pipeline |
 | `defect build` | Standalone defect structure generation |
-| `cache status/query/verify/migrate` | JSONStore cache inspection, query & migration |
+| `cache status/query/verify` | vasp-cache SQLite inspection & query |
 | `materials fetch` | Materials Project query + download |
 | `vasp` | VASP operations |
 | `cpd` | CPD stage standalone |
@@ -208,23 +208,19 @@ vasp-sop cache status --verbose
 
 ### Cache
 
-- maggma ``JSONStore`` dual-store at ``~/.vasp_sop/``:
-  - ``meta.json`` — lightweight metadata (formula, content_hash, total_energy, bandgap,
-    converged, calc_type, n_sites, space_group, tags, source_dir)
-  - ``blobs.json`` — large parsed-output blobs (outcar_dict, vasprun_dict,
-    structure_dict, incar_dict, kpoints_dict)
-- ``vasp_results_put(src_dir, formula, content_hash, task_name)`` — parses
-  VASP outputs via ``TaskDoc.from_directory()`` (primary) with regex fallback,
-  writes to both meta and blob stores
-- ``vasp_results_get(formula, key)`` — returns ``Optional[dict]`` with
-  metadata merged with blob fields
-- ``query(formula=..., functional=..., calc_type=..., bandgap_min=...)`` —
-  semantic cross-project cache query with MongoDB-like syntax
-- ``migrate_from_sqlite()`` — one-shot migration from old SQLite ``cache.db``
+- vasp-cache v0.3.0 — SQLite identity cache at ``$VASP_CACHE_ROOT``:
+  - 6-layer SHA-256 identity: formula, INCAR, structure, KPOINTS, POTCAR, lattice
+  - zlib-compressed BLOBs: OUTCAR, vasprun.xml, CONTCAR
+  - Structured extracts: final_energy, converged_ionic, total_mag, n_ionic_steps
+- ``vasp_results_put(src_dir, *, cache_root=None, overwrite=False)`` — stores
+  VASP results via vasp-cache identity; returns key or None
+- ``vasp_results_get(formula, key)`` — retrieves cached metadata
+- ``cache_lookup(src_dir)`` — directory-based cache check
+- ``restore_from_cache(src_dir)`` — fetches OUTCAR/CONTCAR/vasprun from cache
+- ``restore_from_key(key, target_dir)`` — fetches via explicit key (atomic)
+- ``query(formula=..., limit=...)`` — cross-project query (formula + limit only)
 - ``list_cache()`` / ``cache_stats()`` — listing and aggregate statistics
-- Best-effort parsing: ``TaskDoc.from_directory()`` for structured output,
-  regex fallback for minimal OUTCARs
-- For testing: ``override_cache_root(tmp_path)`` isolates cache to temp directory
+- ``override_cache_root(path)`` — isolates both vasp-cache and SOP paths for testing
 
 ### Error Handling
 
@@ -265,7 +261,7 @@ crisp jobs                # List all jobs (JSON output)
 ```
 
 **Layout (current crisp):** results land **in the work dir** (no `output/`
-subdir). Slurm stdout/stderr log: **`{slurm_job_id}.log`**.  
+subdir). Slurm stdout/stderr log: **`{slurm_job_id}.log`**.
 `move_crisp_outputs()` remains for **legacy** `output/` trees only (mtime merge).
 
 
@@ -300,7 +296,7 @@ CONTCAR restart (`restart_from_contcar` / poll unconverged):
 ### Persistence
 
 - Job state: `~/.vasp_sop/jobs.db` (SQLite — `job_history`: per-calculation `submitted`/`converged`/`failed`; `tracked`: active submissions awaiting polling)
-- Calculation cache: `~/.vasp_sop/meta.json` + `~/.vasp_sop/blobs.json` (maggma JSONStore)
+- Results cache: vasp-cache v0.3.0 (SQLite identity + BLOB)
 - MP combo cache: `~/.vasp_sop/mp_cache/` (POSCARs + POTCARs on disk)
 - State is filesystem-based: phase determined by OUTCAR existence, convergence, YAML files
 
@@ -371,7 +367,7 @@ Notable gaps:
 |------|---------|
 | `vasp_sop/cli/main.py` | CLI entry, batch orchestrator, `_advance_one_system` |
 | `vasp_sop/core/config.py` | `PipelineConfig`, `plan.yaml` generation |
-| `vasp_sop/core/cache.py` | maggma JSONStore cache (meta.json + blobs.json) |
+| `vasp_sop/core/cache.py` | vasp-cache v0.3.0 adapter |
 | `vasp_sop/core/job_store.py` | JobStore, per-calculation state tracking |
 | `vasp_sop/defect/builder.py` | Supercell + defect generation |
 | `vasp_sop/defect/cpd.py` | Chemical potential diagram |
@@ -388,7 +384,7 @@ Notable gaps:
 ## Runtime Requirements
 
 - Python >= 3.10
-- Dependencies: pymatgen, pydefect, vise, numpy, pandas, pyyaml, emmet-core, maggma
+- Dependencies: pymatgen, pydefect, vise, numpy, pandas, pyyaml, emmet-core, vasp-cache
 - HPC cluster access with `crisp` scheduler agent
 - Materials Project API key (`MP_API_KEY` or `PMG_MAPI_KEY`)
 - VASP binary via singularity container (`/mnt/shared/vasp_latest.sif`)
