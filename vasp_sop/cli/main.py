@@ -1563,18 +1563,19 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
     _print_info(f"Batch run: {len(sys_list)} systems\n")
 
 
+    # ── Single JobStore for the entire batch run ─────────────────────
+    from vasp_sop.core.job_store import JobStore
+    js = JobStore()
+
     # ── Populate submission DB from crisp + filesystem ────────────────
     if not dry_run:
-        from vasp_sop.core.job_store import JobStore
         _crisp_active = _crisp_active_dirs(skip=False)
         if _crisp_active:
             logger.info("Found %d active crisp tasks, recording in JobStore.",
                         len(_crisp_active))
             for p in _crisp_active:
-                js = JobStore()
                 js.track(p)
                 js.record(p, "submitted", source="restored")
-                js.close()
 
     from vasp_sop.core.cache import cache_lookup, vasp_results_put as _cache_put
 
@@ -1634,11 +1635,8 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                     print(msg)
                 return None
             job = submit_vasp(path.resolve())
-            from vasp_sop.core.job_store import JobStore
-            js = JobStore()
             js.track(str(path.resolve()))
             js.record(str(path.resolve()), "submitted", source=job.task_name)
-            js.close()
             msg = f"  → {sys_name:<18} {label}: {job.task_name}"
             if loop:
                 logger.info(msg)
@@ -1673,7 +1671,6 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
         while not is_stop_requested():
             if not dry_run:
                 # ── Backfill cache ──────────────────────────────────
-                from vasp_sop.core.job_store import JobStore
                 from vasp_sop.vasp.io import check_converged as _cc, _tail_text
                 from vasp_sop.core.jobs import move_crisp_outputs
                 import time as _time
@@ -1686,7 +1683,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                     for pd in cpd_root.iterdir():
                         if not pd.is_dir() or "_mp-" not in pd.name:
                             continue
-                        if JobStore().latest(str(pd.resolve())) == "converged":
+                        if js.latest(str(pd.resolve())) == "converged":
                             continue
                         if not _cc(pd):
                             continue
@@ -1699,7 +1696,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                                 pd.name,
                             )
                         backfilled += 1
-                        JobStore().record(str(pd.resolve()), "converged", source="backfill")
+                        js.record(str(pd.resolve()), "converged", source="backfill")
                 if backfilled:
                     logger.info("Backfilled %d already-converged phase results.", backfilled)
 
@@ -1727,7 +1724,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                 # ── Poll tracked dirs ───────────────────────────────
                 completed = 0
                 crispy = _crisp_active_dirs(skip=False)
-                for row in JobStore().tracked_dirs():
+                for row in js.tracked_dirs():
                     wd = Path(row["dir_path"])
                     wd_str = str(wd.resolve())
                     if wd_str in crispy:
@@ -1735,8 +1732,8 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                     if _cc(wd):
                         move_crisp_outputs(wd)
                         _defer_cache_put(wd)
-                        JobStore().record(wd_str, "converged")
-                        JobStore().untrack(wd_str)
+                        js.record(wd_str, "converged")
+                        js.untrack(wd_str)
                         completed += 1
                         continue
                     outcar = wd / "OUTCAR"
@@ -1744,13 +1741,13 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                         outcar = wd / "output" / "OUTCAR"
                     if not outcar.is_file():
                         if _time.time() - row["submitted_at"] > 7 * 86400:
-                            JobStore().record(wd_str, "failed", reason="orphaned")
-                            JobStore().untrack(wd_str)
+                            js.record(wd_str, "failed", reason="orphaned")
+                            js.untrack(wd_str)
                         continue
                     tail = _tail_text(outcar, 4096)
                     if not tail or "General timing and accounting" not in tail:
-                        JobStore().record(wd_str, "failed", reason="vasp_crash")
-                        JobStore().untrack(wd_str)
+                        js.record(wd_str, "failed", reason="vasp_crash")
+                        js.untrack(wd_str)
                         continue
                     _handle_unconverged_poll(wd)
                 if completed:
@@ -1899,6 +1896,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
     finally:
         _flush_deferred_cache()
         _join_cache_workers()
+        js.close()
 
 
 def _batch_generate_inputs(root: Path, *, unitcell: bool = False) -> None:
