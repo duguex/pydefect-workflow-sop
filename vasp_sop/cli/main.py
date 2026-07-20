@@ -1439,60 +1439,59 @@ _MAX_RESTART = 5
 
 
 
-def _handle_unconverged_poll(wd: Path) -> None:
-    """VASP normal exit but unconverged — CONTCAR restart or give up.
-
-    Checks for stall: if max_f hasn't improved by at least 1% since
-    the last restart, the job is stuck and we give up immediately
-    instead of blindly retrying.
-    """
+def _handle_unconverged_poll(wd: Path, *, js: Any = None) -> None:
+    """VASP normal exit but unconverged — CONTCAR restart or give up."""
     import logging
 
     _log = logging.getLogger(__name__)
-    from vasp_sop.core.job_store import JobStore
     from vasp_sop.vasp.io import restart_from_contcar, parse_max_force
     from vasp_sop.core.jobs import submit_vasp
+    from vasp_sop.core.job_store import JobStore
 
     wd_str = str(wd.resolve())
-    history = JobStore().history(wd_str)
-    attempt = history[-1].get("attempt", 0) if history else 0
+    owned = js is None
+    store = js if not owned else JobStore()
+    try:
+        history = store.history(wd_str)
+        attempt = history[-1].get("attempt", 0) if history else 0
 
-    cur_f = parse_max_force(wd)
+        cur_f = parse_max_force(wd)
 
-    # Stall detection: compare with previous restart's max_f
-    if cur_f > 0 and attempt > 0:
-        for h in reversed(history):
-            reason = h.get("reason", "")
-            if reason.startswith("restart,"):
-                for part in reason.split(","):
-                    if part.startswith("prev_f="):
-                        prev_f = float(part.split("=")[1])
-                        if cur_f >= prev_f * 0.99:
-                            JobStore().record(wd_str, "failed",
+        if cur_f > 0 and attempt > 0:
+            for h in reversed(history):
+                reason = h.get("reason", "")
+                if reason.startswith("restart,"):
+                    for part in reason.split(","):
+                        if part.startswith("prev_f="):
+                            prev_f = float(part.split("=")[1])
+                            if cur_f >= prev_f * 0.99:
+                                store.record(wd_str, "failed",
                                               reason=f"stalled,max_f={cur_f:.4f}",
                                               attempt=attempt)
-                            JobStore().untrack(wd_str)
-                            _log.warning("! %s stalled (max_f %.4f→%.4f), giving up", wd.name, prev_f, cur_f)
-                            return
-                        break
-                break
+                                store.untrack(wd_str)
+                                _log.warning("! %s stalled (max_f %.4f→%.4f), giving up", wd.name, prev_f, cur_f)
+                                return
+                            break
+                    break
 
-    if attempt >= _MAX_RESTART:
-        JobStore().record(wd_str, "failed",
+        if attempt >= _MAX_RESTART:
+            store.record(wd_str, "failed",
                           reason=f"unconverged,max_f={cur_f:.4f}",
                           attempt=attempt)
-        JobStore().untrack(wd_str)
-        _log.error("! %s unconverged after %d restart(s), giving up", wd.name, attempt)
-        return
+            store.untrack(wd_str)
+            _log.error("! %s unconverged after %d restart(s), giving up", wd.name, attempt)
+            return
 
-    restart_from_contcar(wd)
+        restart_from_contcar(wd)
 
-
-    job = submit_vasp(wd.resolve())
-    JobStore().record(wd_str, "submitted",
+        job = submit_vasp(wd.resolve())
+        store.record(wd_str, "submitted",
                       source=job.task_name, attempt=attempt + 1,
                       reason=f"restart,prev_f={cur_f:.4f}")
-    _log.info("→ %s restart #%d (max_f %.4f, %s)", wd.name, attempt + 1, cur_f, job.task_name)
+        _log.info("→ %s restart #%d (max_f %.4f, %s)", wd.name, attempt + 1, cur_f, job.task_name)
+    finally:
+        if owned:
+            store.close()
 
 def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                exclude: list[str] | None = None, loop: bool = False) -> None:
@@ -1749,7 +1748,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                         js.record(wd_str, "failed", reason="vasp_crash")
                         js.untrack(wd_str)
                         continue
-                    _handle_unconverged_poll(wd)
+                    _handle_unconverged_poll(wd, js=js)
                 if completed:
                     _print_info(f"  Cached {completed} completed calculation(s).")
 
