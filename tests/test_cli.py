@@ -1879,3 +1879,70 @@ class TestDefectInventory:
         assert "Ignored under defect/ (3)" in out
         assert "use --include-defect-new" in out
         assert "defect_new/ included" in out
+
+
+
+class TestBatchStartStopDispatch:
+    """Issue #96: `_batch_start`/`_batch_stop` must dispatch to the
+    `batch_lifecycle` primitives without NameError. We mock
+    `daemonize`/`cleanup` (the child branch) and `_lifecycle_stop`
+    (stop branch) to verify wiring without forking real processes.
+    """
+
+    def test_batch_start_forks_then_runs_loop_and_cleans_up(
+        self, tmp_path, monkeypatch
+    ):
+        from vasp_sop.cli import main
+
+        # Track cleanup() invocation and simulate the child path of daemonize().
+        cleanup_calls: list = []
+        monkeypatch.setattr(
+            main, "cleanup", lambda root: cleanup_calls.append(root)
+        )
+        monkeypatch.setattr(main, "daemonize", lambda root: True)
+
+        run_calls: list = []
+        monkeypatch.setattr(
+            main, "_batch_run",
+            lambda root, **kw: run_calls.append({"root": root, **kw}),
+        )
+
+        main._batch_start(tmp_path)
+
+        assert len(run_calls) == 1
+        assert run_calls[0]["root"] == tmp_path
+        assert run_calls[0]["loop"] is True
+        assert cleanup_calls == [tmp_path]
+
+    def test_batch_start_skips_run_when_not_daemonized(
+        self, tmp_path, monkeypatch
+    ):
+        from vasp_sop.cli import main
+
+        monkeypatch.setattr(main, "daemonize", lambda root: False)
+        monkeypatch.setattr(
+            main, "_batch_run",
+            lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not run in parent")),
+        )
+        monkeypatch.setattr(
+            main, "cleanup",
+            lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not clean up in parent")),
+        )
+
+        # Parent path: daemonize() returned False → no loop, no cleanup.
+        main._batch_start(tmp_path)
+
+    def test_batch_stop_dispatches_to_lifecycle_stop(
+        self, tmp_path, monkeypatch
+    ):
+        from vasp_sop.cli import main
+
+        stop_calls: list = []
+        monkeypatch.setattr(
+            main, "_lifecycle_stop",
+            lambda root: stop_calls.append(root),
+        )
+
+        main._batch_stop(tmp_path)
+
+        assert stop_calls == [tmp_path.resolve()]
