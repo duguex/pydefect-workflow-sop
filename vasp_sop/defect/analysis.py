@@ -416,6 +416,21 @@ def analyze(
     unconverged_now = inv1["unconverged"]
     cr_present = [d for d in converged_now if (d / "calc_results.json").is_file()]
 
+    # ── normalize calc_results: override ionic_conv from OUTCAR evidence ──
+    from vasp_sop.defect.pydefect_adapter import _override_ionic_conv
+    import json as _json
+    _cr_norm = 0
+    for _d in cr_present:
+        try:
+            _data = _json.loads((_d / "calc_results.json").read_text())
+            if not _data.get("ionic_conv"):
+                if _override_ionic_conv(_d, _data):
+                    _cr_norm += 1
+        except Exception as _exc:
+            logger.warning("normalize cr failed for %s: %s", _d.name, _exc)
+    if _cr_norm:
+        logger.info("Normalized ionic_conv for %d calc_results.json", _cr_norm)
+
     # ── efnv: converged + calc_results only
     efnv_targets = cr_present
     if unconverged_now:

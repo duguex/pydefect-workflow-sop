@@ -40,8 +40,11 @@ def _read_json(path: Path) -> dict[str, Any] | None:
         return None
 
 
-def _override_ionic_conv(d: Path, data: dict[str, Any]) -> None:
-    """Patch ionic_conv in *data* and on disk if vasp-sop disagrees."""
+def _override_ionic_conv(d: Path, data: dict[str, Any]) -> bool:
+    """Patch ionic_conv in *data* and on disk if vasp-sop disagrees.
+
+    Returns ``True`` when the file was written, ``False`` otherwise.
+    """
     if not data.get("ionic_conv") and check_converged(d):
         logger.info(
             "Overriding ionic_conv=True for %s (pydefect said False, "
@@ -50,6 +53,8 @@ def _override_ionic_conv(d: Path, data: dict[str, Any]) -> None:
         data["ionic_conv"] = True
         cr_file = d / "calc_results.json"
         cr_file.write_text(json.dumps(data, indent=2) + "\n")
+        return True
+    return False
 
 
 def calc_results(dirs: list[Path], cwd: Path) -> list[dict[str, Any]]:

@@ -77,8 +77,7 @@ def prepare_inputs(
         cmd += f" {pp_opt}"
     if config.hubbard_u:
         cmd += " --options set_hubbard_u True"
-    nsw = "NSW 100" if task_type == "defect" else "NSW 50"
-    uis_flags = f"{nsw} {extra_uis} {encut_opt}".strip()
+    uis_flags = f"NSW 50 {extra_uis} {encut_opt}".strip()
     if config.hubbard_u and "ISPIN" not in uis_flags:
         uis_flags += " ISPIN 2"
     cmd += f" -uis {uis_flags}"
