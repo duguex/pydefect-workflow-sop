@@ -187,6 +187,28 @@ def _local_submit(
 
 def _crisp_submit(work_dir: Path) -> CrispVaspJob:
     logger.info("Submit crisp VASP in %s", work_dir)
+    # ── Dedup: crisp agent.db can have active jobs unknown to JobStore ─
+    import json as _json, sqlite3 as _sqlite3
+    _agent_db = Path.home() / ".crisp" / "data" / "agent.db"
+    if _agent_db.is_file():
+        try:
+            _conn = _sqlite3.connect(str(_agent_db), timeout=5)
+            _cur = _conn.execute(
+                "SELECT task_name, status FROM jobs WHERE local_dir = ? "
+                "AND status IN ('submit','submitted','running','ready_fetch')",
+                (str(work_dir.resolve()),),
+            )
+            _row = _cur.fetchone()
+            _conn.close()
+            if _row is not None:
+                _existing_task, _existing_status = _row
+                logger.info(
+                    "crisp job %s already %s for %s — skipping duplicate submit",
+                    _existing_task, _existing_status, work_dir.name,
+                )
+                return CrispVaspJob(work_dir, _existing_task)
+        except Exception:
+            logger.warning("agent.db dedup check failed, falling through to submit")
     result = subprocess.run(
         ["crisp", "submit"],
         cwd=str(work_dir),

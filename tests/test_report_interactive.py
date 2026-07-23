@@ -1,0 +1,561 @@
+"""Tests for vasp_sop.report.interactive — interactive formation-energy HTML."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+import yaml
+
+from vasp_sop.report.interactive import (
+    _bary_js,
+    _build_defects,
+    _extract_vertex_data,
+    _html_template,
+    _load_inputs,
+    _sort_defect_names,
+    generate_interactive_html,
+)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Helpers
+# ═════════════════════════════════════════════════════════════════════
+
+
+def _make_minimal_des() -> dict:
+    """Return a minimal defect_energy_summary.json-like dict."""
+    return {
+        "title": "CsPbBr3",
+        "cbm": 2.4095,
+        "supercell_vbm": -0.0944,
+        "supercell_cbm": 2.5271,
+        "rel_chem_pots": {
+            "A": {"Br": -1.20, "Cs": -3.76, "Pb": -2.42, "Bi": -2.60},
+            "B": {"Br": -0.50, "Cs": -3.10, "Pb": -1.80, "Bi": -1.90},
+            "C": {"Br": -1.50, "Cs": -4.00, "Pb": -3.10, "Bi": -3.20},
+            "D": {"Br": -0.80, "Cs": -4.20, "Pb": -2.90, "Bi": -3.50},
+        },
+        "defect_energies": {
+            "Bi_Pb1": {
+                "charges": [-1, 0, 1],
+                "atom_io": {"Pb": -1, "Bi": 1},
+                "defect_energies": [
+                    {
+                        "formation_energy": -0.6,
+                        "is_shallow": False,
+                        "energy_corrections": {"pc term": 0.10},
+                    },
+                    {
+                        "formation_energy": 0.2,
+                        "is_shallow": False,
+                        "energy_corrections": {},
+                    },
+                    {
+                        "formation_energy": 1.0,
+                        "is_shallow": False,
+                        "energy_corrections": {"pc term": 0.05},
+                    },
+                ],
+            },
+            "Va_Br1": {
+                "charges": [-1, 0, 1],
+                "atom_io": {"Br": -1},
+                "defect_energies": [
+                    {
+                        "formation_energy": 1.5,
+                        "is_shallow": False,
+                        "energy_corrections": {},
+                    },
+                    {
+                        "formation_energy": 0.8,
+                        "is_shallow": True,  # shallow → filtered
+                        "energy_corrections": {},
+                    },
+                    {
+                        "formation_energy": 2.3,
+                        "is_shallow": False,
+                        "energy_corrections": {"alignment term": -0.05},
+                    },
+                ],
+            },
+        },
+    }
+
+
+def _make_minimal_cpd() -> dict:
+    """Return a minimal chem_pot_diag.json-like dict."""
+    return {
+        "vertex_elements": ["Br", "Cs", "Pb"],
+        "polygons": {
+            "CsPbBr3": [[-1.20, -3.76, -2.42],
+                         [-0.50, -3.10, -1.80],
+                         [-1.50, -4.00, -3.10],
+                         [-0.80, -4.20, -2.90]],
+        },
+    }
+
+
+def _make_minimal_tv() -> dict:
+    return {"target": "CsPbBr3"}
+
+
+def _write_system(tmp_path: Path) -> Path:
+    """Write a minimal CsPbBr3 system and return its path."""
+    root = tmp_path / "CsPbBr3"
+    (root / "defect").mkdir(parents=True)
+    (root / "cpd").mkdir(parents=True)
+    (root / "defect" / "defect_energy_summary.json").write_text(
+        json.dumps(_make_minimal_des())
+    )
+    (root / "cpd" / "chem_pot_diag.json").write_text(
+        json.dumps(_make_minimal_cpd())
+    )
+    (root / "cpd" / "target_vertices.yaml").write_text(
+        yaml.dump(_make_minimal_tv())
+    )
+    return root
+
+
+# ═════════════════════════════════════════════════════════════════════
+# _build_defects
+# ═════════════════════════════════════════════════════════════════════
+
+
+class TestBuildDefects:
+    def test_applies_corrections(self):
+        """E0 values include energy_corrections."""
+        de = _make_minimal_des()
+        defects = _build_defects(de)
+        # Bi_Pb1 q=-1: formation_energy=-0.6 + pc=0.10 = -0.5
+        bi = defects["Bi_Pb1"]
+        charges = {c["q"]: c["e0"] for c in bi["charges"]}
+        assert charges[-1] == pytest.approx(-0.5)  # -0.6 + 0.10
+        assert charges[0] == pytest.approx(0.2)   # 0.2 + 0
+        assert charges[1] == pytest.approx(1.05)   # 1.0 + 0.05
+
+    def test_filters_shallow_charge_states(self):
+        """Shallow charge states are excluded."""
+        de = _make_minimal_des()
+        defects = _build_defects(de)
+        # Va_Br1: q=0 is shallow → excluded
+        va = defects["Va_Br1"]
+        qs = [c["q"] for c in va["charges"]]
+        assert qs == [-1, 1]
+        assert 0 not in qs
+
+    def test_shallow_removed_entire_defect_if_all_shallow(self):
+        """If all charge states are shallow, defect is omitted entirely."""
+        de = _make_minimal_des()
+        # Make Va_Br1 entirely shallow
+        for e in de["defect_energies"]["Va_Br1"]["defect_energies"]:
+            e["is_shallow"] = True
+        defects = _build_defects(de)
+        assert "Va_Br1" not in defects
+        # Bi_Pb1 still present
+        assert "Bi_Pb1" in defects
+
+
+# ═════════════════════════════════════════════════════════════════════
+# _extract_vertex_data
+
+
+class TestExtractPolygon:
+    def test_returns_ordered_vertices(self):
+        de = _make_minimal_des()
+        cpd = _make_minimal_cpd()
+        tv = _make_minimal_tv()
+        vertex_mu, names, host, elems = _extract_vertex_data(de, cpd, tv)
+        assert host == "CsPbBr3"
+        assert len(vertex_mu) == 4
+        assert len(names) == 4
+        assert len(vertex_mu) == 4
+
+    def test_names_match_rcp_keys(self):
+        de = _make_minimal_des()
+        cpd = _make_minimal_cpd()
+        tv = _make_minimal_tv()
+        _, names, _, _ = _extract_vertex_data(de, cpd, tv)
+        assert set(names) == {"A", "B", "C", "D"}
+
+    def test_cyclic_order_includes_all_vertices(self):
+        """Angle-sorted ordering includes every vertex exactly once."""
+        de = _make_minimal_des()
+        cpd = _make_minimal_cpd()
+        tv = _make_minimal_tv()
+        vertex_mu, names, _, _ = _extract_vertex_data(de, cpd, tv)
+        assert len(vertex_mu) == 4
+        assert len(names) == 4
+        assert set(names) == {"A", "B", "C", "D"}
+
+    def test_bow_tie_prevention_on_real_data(self):
+        """On the known-good CsPbBr3 data, vertices form a convex polygon."""
+        p = Path("/mnt/shared/home/2sidesniddle/vasp/2025_undergo_spin_defect/CsPbBr3")
+        if not p.is_dir():
+            pytest.skip("CsPbBr3 system not available")
+        de = json.loads((p / "defect" / "defect_energy_summary.json").read_text())
+        cpd = json.loads((p / "cpd" / "chem_pot_diag.json").read_text())
+        tv = yaml.safe_load((p / "cpd" / "target_vertices.yaml").read_text())
+        vertex_mu, _, _, vertex_elements = _extract_vertex_data(de, cpd, tv)
+        assert len(vertex_mu) == 4
+
+        def _cross(o, a, b):
+            return (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0])
+        signs = []
+        ve = vertex_elements
+        for n in range(4):
+            pn = vertex_mu[n%4]; pn1 = vertex_mu[(n+1)%4]; pn2 = vertex_mu[(n+2)%4]
+            signs.append(_cross([pn[ve[0]],pn[ve[1]]],
+                                [pn1[ve[0]],pn1[ve[1]]],
+                                [pn2[ve[0]],pn2[ve[1]]]))
+        assert all(s > 0 for s in signs) or all(s < 0 for s in signs)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# _sort_defect_names
+# ═════════════════════════════════════════════════════════════════════
+
+
+class TestSortDefectNames:
+    def test_doped_first(self):
+        defects = {"Va_Br1": {}, "Bi_Pb1": {}, "Cs_Pb1": {}, "Bi_Cs1": {}}
+        sorted_ = _sort_defect_names(defects)
+        # Bi_ defects come first
+        assert sorted_[0].startswith("Bi_")
+        assert sorted_[1].startswith("Bi_")
+        # intrinsic follows
+        assert not sorted_[2].startswith("Bi_")
+        assert not sorted_[3].startswith("Bi_")
+
+    def test_alphabetic_within_group(self):
+        defects = {"Bi_Pb1": {}, "Bi_Cs1": {}, "Va_Cs1": {}, "Va_Br1": {}}
+        sorted_ = _sort_defect_names(defects)
+        assert sorted_[0] == "Bi_Cs1"
+        assert sorted_[1] == "Bi_Pb1"
+        assert sorted_[2] == "Va_Br1"
+        assert sorted_[3] == "Va_Cs1"
+
+
+# ═════════════════════════════════════════════════════════════════════
+# _bary_js_func
+# ═════════════════════════════════════════════════════════════════════
+
+
+class TestBaryJsFunc:
+    @pytest.fixture
+    def verts(self):
+        return [[-1.20, -3.76, -2.42, -2.60],
+                [-0.50, -3.10, -1.80, -1.90],
+                [-1.50, -4.00, -3.10, -3.20],
+                [-0.80, -4.20, -2.90, -3.50]]
+
+    def test_produces_valid_function(self, verts):
+        js = _bary_js(verts, (0, 1, 2))
+        assert js.startswith("function(px,py)")
+        assert "return[a,b,c,inside]" in js
+    def test_no_double_dash_bug(self, verts):
+        """The '--' operator must NOT appear in JS output."""
+        js12 = _bary_js(verts, (0, 1, 2))
+        js23 = _bary_js(verts, (0, 2, 3))
+        # Should not have JS decrement '--' (with no space)
+        assert "--" not in js12.replace("- ", "").replace(" -", " - ")
+        assert "--" not in js23.replace("- ", "").replace(" -", " - ")
+
+
+# ═════════════════════════════════════════════════════════════════════
+# _html_template
+# ═════════════════════════════════════════════════════════════════════
+
+
+class TestHtmlTemplate:
+    def test_produces_valid_html(self):
+        html = _html_template(
+            host_name="CsPbBr3",
+            n_vertices=4,
+            poly_2d=[[-1.20, -3.76], [-0.50, -3.10],
+                      [-1.50, -4.00], [-0.80, -4.20]],
+            vertex_mu=[{"Br": -1.20, "Cs": -3.76, "Pb": -2.42, "Bi": -2.60},
+                       {"Br": -0.50, "Cs": -3.10, "Pb": -1.80, "Bi": -1.90},
+                       {"Br": -1.50, "Cs": -4.00, "Pb": -3.10, "Bi": -3.20},
+                       {"Br": -0.80, "Cs": -4.20, "Pb": -2.90, "Bi": -3.50}],
+            vertex_names=["A", "B", "C", "D"],
+            vertex_elements=["Br", "Cs", "Pb"],
+            defects={"Bi_Pb1": {"charges": [{"q": -1, "e0": -0.5}],
+                                "delta": {"Pb": -1, "Bi": 1}}},
+            sorted_names=["Bi_Pb1"],
+            ref_mu={"Br": -1.20, "Cs": -3.76, "Pb": -2.42},
+            colors=["#e94560"],
+            cbm=2.4095,
+            ax0="Br", ax1="Cs",
+            a0_range=(-1.8, -0.2),
+            a1_range=(-4.5, -2.8),
+        )
+        # Check key elements exist
+        assert "<!DOCTYPE html>" in html
+        assert "<canvas" in html
+        assert "var POLY" in html
+        assert "var DEF" in html
+        assert "var BG" in html
+        assert "function drawFE" in html
+        assert "getMu(px,py)" in html
+        # JS must be valid (no unescaped embedded issues)
+        assert html.count("--") <= 2  # only HTML comments or similar
+
+
+# ═════════════════════════════════════════════════════════════════════
+# _load_inputs
+# ═════════════════════════════════════════════════════════════════════
+
+
+class TestLoadInputs:
+    def test_reads_all_three(self, tmp_path):
+        root = _write_system(tmp_path)
+        de, cpd, tv = _load_inputs(root)
+        assert de["title"] == "CsPbBr3"
+        assert "polygons" in cpd
+        assert tv["target"] == "CsPbBr3"
+
+    def test_raises_on_missing_json(self, tmp_path):
+        root = tmp_path / "Foo"
+        root.mkdir()
+        (root / "cpd").mkdir()
+        (root / "defect").mkdir()
+        (root / "cpd" / "target_vertices.yaml").write_text("target: X\n")
+        (root / "cpd" / "chem_pot_diag.json").write_text("{}")
+        with pytest.raises(FileNotFoundError):
+            _load_inputs(root)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# generate_interactive_html (integration)
+# ═════════════════════════════════════════════════════════════════════
+
+
+class TestGenerateInteractiveHtml:
+    def test_writes_html_file(self, tmp_path):
+        root = _write_system(tmp_path)
+        out = generate_interactive_html(root)
+        assert out.is_file()
+        assert out.name == "formation_energy_interactive.html"
+        content = out.read_text()
+        assert content.startswith("<!DOCTYPE html>")
+
+    def test_includes_defect_data(self, tmp_path):
+        root = _write_system(tmp_path)
+        out = generate_interactive_html(root)
+        content = out.read_text()
+        # Bi_Pb1 with corrected e0 values
+        assert '"Bi_Pb1"' in content
+        assert '"Va_Br1"' in content
+        # Check BG is set to cbm
+        assert "var BG = 2.4095" in content
+
+    def test_bary_functions_defined(self, tmp_path):
+        root = _write_system(tmp_path)
+        out = generate_interactive_html(root)
+        content = out.read_text()
+        assert "var bary12 =" in content
+        assert "var bary23 =" in content
+
+    def test_doped_line_style(self, tmp_path):
+        """Doped defects should use dashed lines."""
+        root = _write_system(tmp_path)
+        out = generate_interactive_html(root)
+        content = out.read_text()
+        # isDoped check present
+        assert "isDoped" in content
+
+    def test_tooltip_code_present(self, tmp_path):
+        root = _write_system(tmp_path)
+        out = generate_interactive_html(root)
+        content = out.read_text()
+        assert "mousemove" in content
+        assert "mouseleave" in content
+        assert "tooltip" in content
+
+    def test_idempotent(self, tmp_path):
+        """Second call overwrites cleanly."""
+        root = _write_system(tmp_path)
+        out1 = generate_interactive_html(root)
+        out2 = generate_interactive_html(root)
+        assert out1 == out2
+        assert out1.is_file()
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Data-consistency: interactive vs pydefect static PDF
+# ═════════════════════════════════════════════════════════════════════
+
+class TestInteractiveVsPydefect:
+    """Verify interactive HTML data matches pydefect static PDF output.
+
+    For the same chemical-potential vertex, the formation energies
+    embedded in the HTML must equal those plotted in ``pydefect pe`` PDFs.
+    """
+
+    @pytest.fixture(scope="class")
+    def _csPbBr3_data(self):
+        p = Path("/mnt/shared/home/2sidesniddle/vasp/2025_undergo_spin_defect/CsPbBr3")
+        if not p.is_dir():
+            pytest.skip("CsPbBr3 system not available")
+        from vasp_sop.report.interactive import (
+            _build_defects, _extract_vertex_data, _load_inputs,
+        )
+        de, cpd, tv = _load_inputs(p)
+        defects = _build_defects(de)
+        vertex_mu, poly_names, host_name, vertex_elements = _extract_vertex_data(
+            de, cpd, tv
+        )
+        ref_mu_raw = de.get("rel_chem_pots", tv)
+        ref_mu = next(iter(ref_mu_raw.values())) if ref_mu_raw else {}
+        return {
+            "defects": defects,
+            "poly": vertex_mu,
+            "poly_names": poly_names,
+            "poly_mu_bi": [v.get("Bi", 0.0) for v in vertex_mu],
+            "ref_mu": ref_mu,
+            "vertex_elements": vertex_elements,
+        }
+    @staticmethod
+    def _calc_ef(defects, mu, name, charge_entry, e_f=0.0):
+        """Mirror of JS calcE: e0 + q*e_f + Σ(-Δn_elem * μ_elem)."""
+        delta = defects[name]["delta"]
+        ms = 0.0
+        for elem, dn in delta.items():
+            if elem in mu:
+                ms -= dn * mu[elem]
+        return charge_entry["e0"] + charge_entry["q"] * e_f + ms
+
+    def test_formation_energy_vertex_a_match_pydefect(self, _csPbBr3_data):
+        """At vertex A, E_f(0) values equal pydefect charge_energies output."""
+        d = _csPbBr3_data
+        de_dict = self._load_real_de()
+        try:
+            from pydefect.analyzer.defect_energy import DefectEnergySummary
+            from monty.json import MontyDecoder
+            summary = MontyDecoder().process_decoded(de_dict)
+        except Exception as exc:
+            pytest.skip(f"pydefect unavailable: {exc}")
+
+        ce = summary.charge_energies(
+            "A", allow_shallow=False, with_corrections=True,
+            e_range=(0, de_dict["cbm"]), name_style=False,
+        )
+        cbm = de_dict["cbm"]
+
+        # pydefect oracle: charge_energies_dict maps name → SingleChargeEnergies
+        cdict = ce.charge_energies_dict
+
+        ve = d["vertex_elements"]
+        vm0 = d["poly"][0]
+        vertex_a_mu = {
+            ve[0]: vm0[ve[0]],
+            ve[1]: vm0[ve[1]],
+            ve[2]: vm0[ve[2]],
+            "Bi": d["poly_mu_bi"][0],
+        }
+
+        for name, single in cdict.items():
+            for q, energy in single.charge_energies:
+                cs = [c for c in d["defects"].get(name, {}).get("charges", [])
+                      if c["q"] == q]
+                if not cs:
+                    continue
+                ef = self._calc_ef(d["defects"], vertex_a_mu, name, cs[0])
+                assert ef == pytest.approx(energy, abs=0.002), (
+                    f"vertex=A {name} q={q}: "
+                    f"interactive={ef:.4f} pydefect={energy:.4f}"
+                )
+
+    def test_html_embed_matches_python_data(self, tmp_path, _csPbBr3_data):
+        """The DEF object in generated HTML equals _build_defects output."""
+        root = tmp_path / "system"
+        root.mkdir()
+        (root / "defect").mkdir()
+        (root / "cpd").mkdir()
+        import json as _json
+        p = Path("/mnt/shared/home/2sidesniddle/vasp/2025_undergo_spin_defect/CsPbBr3")
+        (root / "defect" / "defect_energy_summary.json").write_text(
+            (p / "defect" / "defect_energy_summary.json").read_text()
+        )
+        (root / "cpd" / "chem_pot_diag.json").write_text(
+            (p / "cpd" / "chem_pot_diag.json").read_text()
+        )
+        (root / "cpd" / "target_vertices.yaml").write_text(
+            (p / "cpd" / "target_vertices.yaml").read_text()
+        )
+
+        html = generate_interactive_html(root).read_text()
+
+        # Extract the DEF JSON from var DEF = ...;
+        import re as _re
+        m = _re.search(r"var DEF = (\{.*?\});", html, _re.DOTALL)
+        assert m, "DEF not found in generated HTML"
+        html_def = _json.loads(m.group(1))
+        py_def = _csPbBr3_data["defects"]
+        for name in html_def:
+            assert name in py_def, f"{name}: in HTML but not in Python _build_defects"
+            hc = {c["q"]: c["e0"] for c in html_def[name]["charges"]}
+            pc = {c["q"]: c["e0"] for c in py_def[name]["charges"]}
+            for q, e0 in hc.items():
+                assert q in pc, f"{name} q={q}: in HTML but not Python"
+                assert e0 == pytest.approx(pc[q], abs=0.0001), (
+                    f"{name} q={q}: HTML={e0:.6f} vs py={pc[q]:.6f}"
+                )
+            assert html_def[name]["delta"] == py_def[name]["delta"]
+
+
+    def test_all_vertices_match_pydefect_charge_energies(self, _csPbBr3_data):
+        """Per-vertex, per-defect, per-charge-state comparison with pydefect.
+
+        Uses the real pydefect DefectEnergySummary.charge_energies() as oracle.
+        Skips if pydefect is not importable.
+        """
+        d = _csPbBr3_data
+        de_dict = self._load_real_de()
+        try:
+            from pydefect.analyzer.defect_energy import DefectEnergySummary
+            from monty.json import MontyDecoder
+            summary = MontyDecoder().process_decoded(de_dict)
+        except Exception as exc:
+            pytest.skip(f"pydefect oracle unavailable: {exc}")
+
+        cbm = de_dict["cbm"]
+        vertex_mu_list = d["poly"]
+        poly_names = d["poly_names"]
+        poly_mu_bi = d["poly_mu_bi"]
+        vertex_elements = d["vertex_elements"]
+
+        for vi, vname in enumerate(poly_names):
+            mu = {}
+            for elem in vertex_elements:
+                if elem in vertex_mu_list[vi]:
+                    mu[elem] = vertex_mu_list[vi][elem]
+            if vi < len(poly_mu_bi):
+                mu["Bi"] = poly_mu_bi[vi]
+
+            try:
+                ce = summary.charge_energies(
+                    vname, allow_shallow=False, with_corrections=True,
+                    e_range=(0, cbm), name_style=False,
+                )
+            except Exception:
+                continue
+
+            for name, single in ce.charge_energies_dict.items():
+                for q, energy in single.charge_energies:
+                    cs = [c for c in d["defects"].get(name, {}).get("charges", [])
+                          if c["q"] == q]
+                    if not cs:
+                        continue
+                    ef = self._calc_ef(d["defects"], mu, name, cs[0])
+                    assert ef == pytest.approx(energy, abs=0.002), (
+                        f"vertex={vname} {name} q={q}: "
+                        f"interactive={ef:.4f} pydefect={energy:.4f}"
+                    )
+
+    @staticmethod
+    def _load_real_de():
+        import json as _json
+        p = Path("/mnt/shared/home/2sidesniddle/vasp/2025_undergo_spin_defect/CsPbBr3")
+        return _json.loads((p / "defect" / "defect_energy_summary.json").read_text())

@@ -45,8 +45,14 @@ def prepare_inputs(
         task_type: Optional ``-t`` value (e.g. ``"defect"``).
         extra_uis: Extra ``-uis`` flags (e.g. ``"SIGMA 0.02 LORBIT 11"``).
     """
+    # Single-path SOC handling:
+    #   - if inputs already complete: patch (idempotent retrofit) and return
+    #   - else: run vise to generate, then patch (vise never sets SOC tags)
+    # patch_incar is read-modify-write, so existing non-SOC tags are preserved.
     if input_ready(work_dir):
         logger.debug("VASP input already ready in %s", work_dir)
+        if config.soc:
+            patch_incar(work_dir, LSORBIT=".TRUE.", ISYM=-1)
         return
 
     pp_opt = (
@@ -77,6 +83,10 @@ def prepare_inputs(
     cmd += f" -uis {uis_flags}"
 
     run_local(cmd, cwd=work_dir, timeout=300)
+    # vise never sets SOC tags — patch AFTER run_local so freshly
+    # generated INCAR inherits LSORBIT/ISYM without clobbering other tags.
+    if config.soc:
+        patch_incar(work_dir, LSORBIT=".TRUE.", ISYM=-1)
 
 
 def check_complete(path: Path) -> bool:

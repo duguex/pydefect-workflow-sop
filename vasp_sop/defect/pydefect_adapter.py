@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from vasp_sop.core.jobs import run_local
+from vasp_sop.vasp.io import check_converged
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,18 @@ def _read_json(path: Path) -> dict[str, Any] | None:
         return data if isinstance(data, dict) else None
     except (OSError, json.JSONDecodeError, ValueError):
         return None
+
+
+def _override_ionic_conv(d: Path, data: dict[str, Any]) -> None:
+    """Patch ionic_conv in *data* and on disk if vasp-sop disagrees."""
+    if not data.get("ionic_conv") and check_converged(d):
+        logger.info(
+            "Overriding ionic_conv=True for %s (pydefect said False, "
+            "vasp-sop check_converged says converged)", d.name,
+        )
+        data["ionic_conv"] = True
+        cr_file = d / "calc_results.json"
+        cr_file.write_text(json.dumps(data, indent=2) + "\n")
 
 
 def calc_results(dirs: list[Path], cwd: Path) -> list[dict[str, Any]]:
@@ -60,6 +73,7 @@ def calc_results(dirs: list[Path], cwd: Path) -> list[dict[str, Any]]:
         if cr_file.is_file():
             data = _read_json(cr_file)
             if data is not None:
+                _override_ionic_conv(d, data)
                 results.append(data)
                 continue
             logger.warning("calc_results: unreadable %s, re-running cr", cr_file)
@@ -73,6 +87,7 @@ def calc_results(dirs: list[Path], cwd: Path) -> list[dict[str, Any]]:
             continue
         data = _read_json(cr_file)
         if data is not None:
+            _override_ionic_conv(d, data)
             results.append(data)
         else:
             logger.warning("calc_results: no output for %s after cr", d.name)

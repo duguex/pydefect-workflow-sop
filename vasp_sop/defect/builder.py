@@ -32,9 +32,14 @@ def build_all(
     """
     defect_root.mkdir(parents=True, exist_ok=True)
     poscar = target_dir / "POSCAR"
+    contcar = target_dir / "CONTCAR"
     if not poscar.is_file():
         raise FileNotFoundError(f"Target POSCAR not found at {poscar}.")
-    uc_contcar = poscar  # use POSCAR as stand-in for CONTCAR
+    # Prefer CONTCAR (relaxed) when available; otherwise fall back to POSCAR.
+    # The supercell sizing from the unrelaxed lattice is fine, but the defect
+    # VASP input generation uses the relaxed cell parameters for better accuracy.
+    uc_contcar = contcar if contcar.is_file() else poscar
+    logger.info("Building supercell from %s", uc_contcar.name)
     # ── Config-fingerprint guard ───────────────────────────────────
     # Detect plan.yaml changes that affect the build.  If the current
     # config differs from the last build, clear all flag files so the
@@ -47,6 +52,7 @@ def build_all(
     _generate_structures(defect_root)
     _generate_vasp_inputs(defect_root, config)
 
+    _fix_defect_nelect(defect_root)
     # Write fingerprint *after* successful build.
     _write_fingerprint(defect_root, config)
 
@@ -426,3 +432,68 @@ def _write_fingerprint(defect_root: Path, config: PipelineConfig) -> None:
     """Persist the current config fingerprint so next build can detect changes."""
     fp = _config_fingerprint(config)
     (defect_root / ".build_fingerprint").write_text(fp + "\n")
+
+
+def _fix_defect_nelect(defect_root: Path) -> None:
+    """Per‑defect NELECT patch (Σ N_i·ZVAL_i − q).
+
+    Must run AFTER _generate_vasp_inputs, because that function copies
+    the first directory's INCAR (with host‑centric NELECT) to every
+    defect directory.  This post‑process step fixes each directory to
+    the correct NELECT for its specific defect and charge state.
+    """
+    from vasp_sop.vasp.io import read_incar, patch_incar
+    import re
+
+    # ZVAL per POTCAR variant — must match plan.yaml `pp:` order.
+    # Cs_sv:9, Pb_d:4, Br:7, Bi_d:5  (standard PAW_PBE suffixes)
+    ZVAL: dict[str, float] = {"Cs": 9.0, "Pb": 4.0, "Br": 7.0, "Bi": 5.0}
+
+    # Regex to extract q from directory name  e.g. Bi_Pb1_-1 → -1
+    Q_RE = re.compile(r"_(-?\d+)$")
+
+    for wd in sorted(defect_root.iterdir()):
+        if not wd.is_dir():
+            continue
+
+        # ── Parse species counts from POSCAR ────────────────────────
+        poscar = wd / "POSCAR"
+        if not poscar.is_file():
+            continue
+        text = poscar.read_text()
+        lines = text.splitlines()
+
+        # Locate species line (first line of all‑caps symbols)
+        species_line = None
+        for i, ln in enumerate(lines[:8]):
+            toks = ln.split()
+            if toks and all(re.match(r"^[A-Z][a-z]?$", t) for t in toks):
+                species_line = toks
+                species_idx = i
+                break
+        if species_line is None:
+            continue
+        # Next line: integer counts
+        counts_line = lines[species_idx + 1].split()
+        if len(counts_line) != len(species_line):
+            continue
+        if not all(c.isdigit() for c in counts_line):
+            continue
+        counts = dict(zip(species_line, map(int, counts_line)))
+
+        # ── Calculate base NELECT = Σ N_i·ZVAL_i ──────────────────
+        base = sum(counts.get(el, 0) * ZVAL.get(el, 0) for el in counts)
+
+        # ── Determine q and target NELECT ─────────────────────────--
+        name = wd.name
+        if name == "perfect":
+            target = base  # no charge adjustment
+        else:
+            m = Q_RE.search(name)
+            if not m:
+                continue
+            q = int(m.group(1))
+            target = base - q
+
+        # ── Idempotent patch ──────────────────────────────────────-
+        patch_incar(wd, NELECT=target)

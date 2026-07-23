@@ -53,6 +53,7 @@ DEFAULT_PLAN: dict = {
         "functional": "pbesol",
         "encut": None,
         "hubbard_u": False,
+        "soc": False,
         "pp": [],
     },
     "supercell": {"tool": "doped", "min_distance": 10.0},
@@ -93,6 +94,7 @@ class PipelineConfig:
     functional: str = "pbesol"
     encut: Optional[float] = None
     hubbard_u: bool = False
+    soc: bool = False
     potcar_overrides: list[str] = field(default_factory=list)
 
     supercell_tool: str = "doped"
@@ -188,6 +190,7 @@ class PipelineConfig:
             poscar_src=p.get("poscar_src", ""),
             functional=params.get("functional", "pbesol"),
             encut=params.get("encut"),
+            soc=params.get("soc", False),
             hubbard_u=params.get("hubbard_u", False),
             potcar_overrides=params.get("pp", []),
             supercell_min_atoms=sc.get("min_atoms", 200),
@@ -229,6 +232,7 @@ class PipelineConfig:
                 "functional": self.functional,
                 "encut": self.encut,
                 "hubbard_u": self.hubbard_u,
+                "soc": self.soc,
                 "pp": list(self.potcar_overrides),
             },
             "supercell": {
@@ -553,6 +557,7 @@ def _flat_to_nested(flat: dict) -> dict:
         "parameters": {
             "functional": flat.get("functional", "pbesol"),
             "encut": None,
+            "soc": flat.get("soc", False),
             "hubbard_u": False,
             "pp": flat.get("potcar_overrides", []),
         },

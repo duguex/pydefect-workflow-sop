@@ -166,8 +166,17 @@ def _handle_vasp(args: argparse.Namespace) -> None:
 
 
 def _handle_report(args: argparse.Namespace) -> None:
-    from vasp_sop.core.report import generate_report
+    if args.interactive:
+        from vasp_sop.report.interactive import generate_interactive_html
+        out = generate_interactive_html(args.system_dir)
+        if args.output:
+            import shutil
+            shutil.copy2(out, args.output)
+            out = args.output
+        print(f"Interactive report written to {out}")
+        return
 
+    from vasp_sop.core.report import generate_report
     report_path = generate_report(args.system_dir, args.output)
     print(f"Report written to {report_path}")
 
@@ -181,7 +190,12 @@ def _add_report_parser(subparsers) -> None:
         "system_dir", type=Path, help="System directory containing plan.yaml"
     )
     report_parser.add_argument(
-        "--output", type=Path, help="Output Markdown path (default: system_dir/calculation_report.md)"
+        "--output", type=Path,
+        help="Output path (default: system_dir/calculation_report.md or formation_energy_interactive.html)",
+    )
+    report_parser.add_argument(
+        "--interactive", action="store_true",
+        help="Generate interactive formation-energy HTML instead of Markdown",
     )
 
 
@@ -592,7 +606,8 @@ def _run_pipeline(config: PipelineConfig) -> None:
         # Poll completed submissions
         from vasp_sop.core.job_store import JobStore
         _js = JobStore()
-        for wd_str in list(_js.tracked_dirs()):
+        for row in list(_js.tracked_dirs()):
+            wd_str = row["dir_path"]
             wd = Path(wd_str)
             if check_converged(wd):
                 move_crisp_outputs(wd)
