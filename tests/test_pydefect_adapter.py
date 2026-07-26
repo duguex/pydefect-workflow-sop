@@ -224,3 +224,54 @@ class TestDefectEnergySummary:
         assert str(uc) in cmd
         assert str(pbes) in cmd
         assert str(tv) in cmd
+
+
+
+
+class TestOverrideIonicConv:
+    def test_patches_when_false_and_converged(self, tmp_path: Path):
+        d = tmp_path / "Va_Ba_0"
+        d.mkdir()
+        (d / "calc_results.json").write_text(json.dumps({"ionic_conv": False, "e": -10}))
+        check_calls = []
+        orig = pa.check_converged
+        pa.check_converged = lambda p: True
+        try:
+            data = json.loads((d / "calc_results.json").read_text())
+            result = pa._override_ionic_conv(d, data)
+        finally:
+            pa.check_converged = orig
+        assert result is True
+        written = json.loads((d / "calc_results.json").read_text())
+        assert written["ionic_conv"] is True
+        assert written["e"] == -10
+
+    def test_noop_when_already_true(self, tmp_path: Path):
+        d = tmp_path / "Va_Ba_0"
+        d.mkdir()
+        (d / "calc_results.json").write_text(json.dumps({"ionic_conv": True, "e": -10}))
+        orig = pa.check_converged
+        pa.check_converged = lambda p: True
+        try:
+            data = json.loads((d / "calc_results.json").read_text())
+            result = pa._override_ionic_conv(d, data)
+        finally:
+            pa.check_converged = orig
+        assert result is False
+        written = json.loads((d / "calc_results.json").read_text())
+        assert written["ionic_conv"] is True
+
+    def test_noop_when_unconverged_dir(self, tmp_path: Path):
+        d = tmp_path / "Va_Ba_0"
+        d.mkdir()
+        (d / "calc_results.json").write_text(json.dumps({"ionic_conv": False, "e": -10}))
+        orig = pa.check_converged
+        pa.check_converged = lambda p: False
+        try:
+            data = json.loads((d / "calc_results.json").read_text())
+            result = pa._override_ionic_conv(d, data)
+        finally:
+            pa.check_converged = orig
+        assert result is False
+        written = json.loads((d / "calc_results.json").read_text())
+        assert written["ionic_conv"] is False
