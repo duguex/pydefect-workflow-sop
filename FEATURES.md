@@ -20,6 +20,7 @@
 | | `submit` | Submit VASP calculations for all systems |
 | | `start` / `stop` | Start / stop the background batch loop |
 | | `history` | JobStore record timeline (`--prune` deletes records for missing dirs) |
+| | `reconcile` | Settle stale JobStore records from disk/crisp truth (no phase advance) |
 | `defect` | `init` | Generate `plan.yaml` with inference and dynamic comments |
 | | `run` | Run the full point-defect pipeline for one system |
 | | `resume` | Resume pipeline from saved state (legacy — use `batch run`) |

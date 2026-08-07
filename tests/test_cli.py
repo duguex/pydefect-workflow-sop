@@ -1996,3 +1996,99 @@ class TestChemicalEnvironmentAdvance:
         assert _system_phase(s) == "COMPLETE"
         advance_one_system(s, dry_run=False)
         assert calls == [], "no VASP submission expected for completed CE system"
+
+
+class TestReconcileStale:
+    """_reconcile_stale: untracked stale 'submitted' records settle to disk truth.
+
+    Regression: a 'submitted' record on an untracked defect dir deadlocks
+    wave3's analyze gate (every defect dir must read converged/failed/
+    unconverged).  Polish: Ba_Se1_1 (converged on disk, stale submitted).
+    """
+
+    def _sys(self, tmp_path: Path) -> Path:
+        sys = tmp_path / "sys"
+        sys.mkdir()
+        (sys / "plan.yaml").write_text(yaml.dump({
+            "project": {"formula": "NaCl", "dopant_elements": [],
+                         "poscar_src": "MP mp-12345"},
+            "parameters": {"functional": "pbesol"},
+            "supercell": {"tool": "doped", "min_distance": 10.0},
+        }))
+        return sys
+
+    def _record_submitted(self, *paths: Path) -> None:
+        from vasp_sop.core.job_store import JobStore
+
+        js = JobStore()
+        for p in paths:
+            js.record(str(p.resolve()), "submitted", source="test")
+        js.close()
+
+    def test_settles_converged_and_crash_keeps_live(
+            self, tmp_path: Path, monkeypatch):
+        """Converged OUTCAR -> converged; truncated OUTCAR -> failed;
+        live crisp task preserved as submitted (never settled)."""
+        from vasp_sop.core.orchestrator import BatchOrchestrator
+        from vasp_sop.core.job_store import JobStore
+        from vasp_sop.core.paths import override_cache_root
+
+        override_cache_root(tmp_path / ".vasp_sop")
+        sys = self._sys(tmp_path)
+        defect = sys / "defect"
+        conv, crash, live = defect / "conv", defect / "crash", defect / "live"
+        for d in (conv, crash, live):
+            d.mkdir(parents=True)
+        (conv / "OUTCAR").write_text(
+            "NSW = 50\nIBRION = 2\nEDIFFG = -0.005\n"
+            " General timing and accounting informations for this job:\n"
+            " TOTAL-FORCE (eV/Angst)\n"
+            " ---\n"
+            " 0.001 0.001 0.001 0.002 0.001 0.001\n"
+        )
+        _write_truncated_outcar(crash)
+        (live / "OUTCAR").write_text(" General timing and accounting\n")
+
+        monkeypatch.setattr(
+            "vasp_sop.core.jobs.crisp_active_dirs",
+            lambda skip=False: {str(live.resolve())},
+        )
+        self._record_submitted(conv, crash, live)
+
+        orch = BatchOrchestrator(tmp_path, dry_run=False)
+        settled = orch._reconcile_stale()
+        orch.js.close()
+
+        assert settled == 2
+        js = JobStore()
+        try:
+            assert js.latest(str(conv.resolve())) == "converged"
+            assert js.latest(str(crash.resolve())) == "failed"
+            assert js.latest(str(live.resolve())) == "submitted"
+        finally:
+            js.close()
+
+    def test_never_ran_directory_left_untouched(self, tmp_path, monkeypatch):
+        """Stale submitted with no OUTCAR (never ran) is preserved, not guessed."""
+        from vasp_sop.core.orchestrator import BatchOrchestrator
+        from vasp_sop.core.job_store import JobStore
+        from vasp_sop.core.paths import override_cache_root
+
+        override_cache_root(tmp_path / ".vasp_sop")
+        sys = self._sys(tmp_path)
+        ghost = sys / "defect" / "Va_X_0"
+        ghost.mkdir(parents=True)
+        monkeypatch.setattr("vasp_sop.core.jobs.crisp_active_dirs",
+                            lambda skip=False: set())
+        self._record_submitted(ghost)
+
+        orch = BatchOrchestrator(tmp_path, dry_run=False)
+        settled = orch._reconcile_stale()
+        orch.js.close()
+
+        assert settled == 0
+        js = JobStore()
+        try:
+            assert js.latest(str(ghost.resolve())) == "submitted"
+        finally:
+            js.close()

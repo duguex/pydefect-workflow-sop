@@ -55,3 +55,11 @@ _Avoid_: failed phase, skip list for failures
 **Chemical-environment system**:
 A system whose `plan.yaml` declares `scope: chemical-environment`: competing phases and the chemical-potential diagram only — no unit-cell or defect calculations. COMPLETE is reached when the CPD is done (ADR 0005); the batch loop never builds or submits UC/defect legs for it.
 _Avoid_: non-defect system, CPD-only flag
+
+**Production testbed**:
+The production system tree that exists to exercise and validate vasp-sop itself. Each system is a validation case: completing one is evidence the tool works — never a goal in itself. An operation on the testbed is either an existing tool capability or a discovered gap that becomes one (ADR 0006).
+_Avoid_: production job queue, deliverables
+
+**Stale record**:
+A calculation-state entry that says `submitted` for a directory whose job is no longer running — disk or crisp already has the truth. Repairing it is *reconciling*; an un-reconciled stale record deadlocks progress because the machine skips dirs it believes are still running (ADR 0006).
+_Avoid_: stuck job, ghost entry

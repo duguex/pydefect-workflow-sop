@@ -624,6 +624,16 @@ def _add_batch_parser(subparsers) -> None:
         help="Delete JobStore records whose directory no longer exists",
     )
 
+    # reconcile
+    p_reconcile = sub.add_parser(
+        "reconcile",
+        help="Settle stale JobStore records from disk/crisp truth (no phase advance)",
+    )
+    p_reconcile.add_argument(
+        "root", type=Path,
+        help="Project root directory containing system subdirectories",
+    )
+
     # generate-inputs
     gp = sub.add_parser("generate-inputs", help="Generate VASP inputs for all systems")
     gp.add_argument(
@@ -689,6 +699,8 @@ def _handle_batch(args: argparse.Namespace) -> None:
     elif args.batch_action == "history":
         _batch_history(args.root.resolve(), system=args.system,
                        prune=args.prune)
+    elif args.batch_action == "reconcile":
+        _batch_reconcile(args.root.resolve())
     elif args.batch_action == "generate-inputs":
         _batch_generate_inputs(args.root.resolve(), unitcell=args.unitcell)
     elif args.batch_action == "run":
@@ -959,9 +971,31 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
     ).run()
 
 
+def _batch_reconcile(root: Path) -> None:
+    """Settle JobStore records against disk+crisp truth without advancing.
+
+    Runs the housekeeping passes a full ``batch run`` would run (active-task
+    restore, backfill, orphan sweep, poll, stale-submitted reconciliation)
+    but stops before any state-machine transition or submission — safe to
+    run on a live testbed.
+    """
+    from vasp_sop.core.orchestrator import BatchOrchestrator
+
+    orch = BatchOrchestrator(root, dry_run=False)
+    orch._restore_crisp_active()
+    backfilled = orch._backfill()
+    orphaned = orch._orphan_sweep()
+    completed = orch._poll_tracked()
+    settled = orch._reconcile_stale()
+    orch.js.close()
+    print(
+        f"reconcile: backfill={backfilled} orphan_sweep={orphaned} "
+        f"poll_finalized={completed} stale_settled={settled}"
+    )
+
+
 def _batch_generate_inputs(root: Path, *, unitcell: bool = False) -> None:
     """Generate VASP inputs for all systems in *root* that need them.
-
     With ``unitcell=True``, also generates band/dos/dielectric inputs
     for systems whose structure_opt has a CONTCAR from handoff.
     """

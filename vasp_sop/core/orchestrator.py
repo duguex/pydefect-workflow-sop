@@ -883,6 +883,65 @@ class BatchOrchestrator:
             logger.info("Processed %d orphaned crisp outputs.", orphaned)
         return orphaned
 
+    def _reconcile_stale(self) -> int:
+        """Settle stale ``submitted`` records for untracked calc dirs.
+
+        ``_poll_tracked`` only reconciles dirs still in the ``tracked``
+        table.  A ``submitted`` record left behind on an *untracked* dir
+        (a manual finalize, a pre-track-era submission, a store reset)
+        never settles on its own — and since wave2/wave3 skip dirs whose
+        latest status is ``submitted``, it deadlocks the analyze gate
+        (every defect dir must read converged/failed/unconverged).
+
+        Disk truth wins: converged -> ``converged`` (outputs promoted),
+        OUTCAR without VASP's timing banner -> ``failed``, normal exit but
+        unconverged -> ``unconverged``; the dir is untracked either way.
+        Live crisp tasks and dirs with no OUTCAR (never ran) are left
+        untouched in case a run is genuinely pending.
+        """
+        from vasp_sop.core.jobs import crisp_active_dirs, move_crisp_outputs
+        from vasp_sop.vasp.convergence import convergence_verdict, _tail_text
+
+        crispy = crisp_active_dirs(skip=self.dry_run)
+        settled = 0
+        for s in self.systems:
+            root = s["root"]
+            for base in (root / "cpd", root / "unitcell", root / "defect"):
+                if not base.is_dir():
+                    continue
+                for child in base.iterdir():
+                    if not child.is_dir():
+                        continue
+                    cp = str(child.resolve())
+                    if self.js.latest(cp) != "submitted":
+                        continue
+                    if cp in crispy:
+                        continue
+                    self.js.untrack(cp)
+                    if convergence_verdict(child).converged:
+                        move_crisp_outputs(child)
+                        self.js.record(cp, "converged", source="reconcile")
+                        settled += 1
+                        continue
+                    outcar = child / "OUTCAR"
+                    if not outcar.is_file():
+                        outcar = child / "output" / "OUTCAR"
+                    if not outcar.is_file():
+                        continue
+                    tail = _tail_text(outcar, 4096)
+                    if not tail or "General timing and accounting" not in tail:
+                        self.js.record(cp, "failed", reason="vasp_crash")
+                        settled += 1
+                    else:
+                        self.js.record(cp, "unconverged", source="reconcile")
+                        settled += 1
+        if settled:
+            logger.info(
+                "Settled %d stale submitted record(s) from disk truth.",
+                settled,
+            )
+        return settled
+
     def _poll_tracked(self) -> int:
         """Poll tracked dirs: finalize converged, detect crashes, restart."""
         from vasp_sop.core.jobs import crisp_active_dirs
@@ -1089,6 +1148,12 @@ class BatchOrchestrator:
                     if completed:
                         self._print_info(
                             f"  Finalized {completed} completed calculation(s)."
+                        )
+                    settled = self._reconcile_stale()
+                    if settled:
+                        self._print_info(
+                            f"  Settled {settled} stale submitted record(s) "
+                            "from disk truth."
                         )
 
                 n_skipped, errors = self._advance_systems()
