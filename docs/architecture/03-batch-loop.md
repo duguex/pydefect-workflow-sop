@@ -1,4 +1,4 @@
-# `_batch_run()` 主循环
+# `BatchOrchestrator.run` 主循环
 
 ## 回填缓存 (Backfill)
 
@@ -7,27 +7,25 @@ for 每个系统:
     for 每个 cpd/竞争相手目录:
         if JobStore().latest(dir) == "converged":
             continue           # 已记录，跳过
-        if not check_converged(dir):
+        verdict = convergence_verdict(dir)
+        if not verdict.converged:
             continue           # 没收敛，跳过
         _cache_put(dir)        # 写入 maggma 缓存
         JobStore().record(dir, "converged", source="backfill")
 ```
 
 ## 轮询已完成作业 (Poll)
-
 ```python
-crisp_active = _crisp_active_dirs(skip=False)  # crisp 当前活跃列表
+crisp_active = crisp_active_dirs()  # crisp 当前活跃列表（core/jobs.py）
 
 for row in JobStore().tracked_dirs():
     wd = Path(row["dir_path"])
     if str(wd.resolve()) in crisp_active:
         continue                # 还在集群上跑
 
-    if check_converged(wd):
-        move_crisp_outputs(wd)
-        _cache_phase_results(wd)
-        JobStore().record(wd, "converged")
-        JobStore().untrack(wd)
+    verdict = convergence_verdict(wd)
+    if verdict.converged:
+        orchestrator.finalize_converged(wd)
         continue
 
     outcar = wd / "OUTCAR"
@@ -46,7 +44,7 @@ for row in JobStore().tracked_dirs():
         continue
 
     # VASP 正常结束但未收敛 → CONTCAR 重启或放弃
-    _handle_unconverged_poll(wd)
+    orchestrator.handle_unconverged(wd)
 ```
 
 ## CONTCAR 重启 + 停滞检测
@@ -54,6 +52,9 @@ for row in JobStore().tracked_dirs():
 ```python
 MAX_RESTART = 5
 STALL_THRESHOLD = 0.99  # 受力改进 < 1% 即停滞
+
+# 实际实现: BatchOrchestrator.handle_unconverged(wd) / is_stalled(prev, cur)
+# （vasp_sop/vasp/convergence.py 与 core/orchestrator.py）
 
 def _parse_max_f(outcar: Path) -> float:
     """从 OUTCAR TOTAL-FORCE 块解析最大受力。"""
@@ -67,7 +68,7 @@ def _parse_max_f(outcar: Path) -> float:
         max_f = max(max_f, abs(parts[3]), abs(parts[4]), abs(parts[5]))
     return max_f
 
-def _handle_unconverged_poll(wd: Path) -> None:
+def handle_unconverged(wd: Path) -> None:
     """VASP 正常结束但未收敛 → CONTCAR 重启或放弃。"""
     wd_str = str(wd.resolve())
     history = JobStore().history(wd_str)
@@ -108,9 +109,10 @@ def _handle_unconverged_poll(wd: Path) -> None:
 ## 逐个推进系统
 
 ```python
-for 每个系统:
-    p = _phase(s)
-    if p == COMPLETE or NO_TARGET:
+for root in systems:
+    sys = System(root, config)
+    p = sys.derive_phase()
+    if p == COMPLETE or p == NO_TARGET:
         continue
-    _advance_one_system(s)
+    advance_one_system(root_dict_for(sys))
 ```

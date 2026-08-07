@@ -1,4 +1,4 @@
-# 阶段机 (`_phase()`)
+# 阶段机 (`System.phase()`)
 
 ## 阶段定义
 
@@ -8,12 +8,14 @@ STRUCTURE_OPT → COMPETING → CHEM_POT_DIAGRAM → UNITCELL_DEFECT → COMPLET
 
 | 阶段 | 含义 | 判定条件 |
 |---|---|---|
-| `NO_TARGET` | 没有 MPID，无法运行 | `_target_dir()` 返回 None |
+| `NO_TARGET` | 没有 MPID，无法运行 | `System.target_dir` 返回 None |
 | `STRUCTURE_OPT` | 目标相 VASP 没算完 | JobStore 说 target 没 `converged` |
-| `COMPETING` | 竞争相还有没提交的 | `_competing_dirs()` 返回非空 |
+| `COMPETING` | 竞争相还有没提交的 | `System.competing_dirs(job_store)` 返回非空 |
 | `CHEM_POT_DIAGRAM` | 竞争相算完了，CPD 待生成 | 无 competing dirs，`target_vertices.yaml` 不存在 |
 | `UNITCELL_DEFECT` | CPD 完成，UC/缺陷阶段 | `target_vertices.yaml` 存在 |
 | `COMPLETE` | 全线完成 | 全部中间文件齐全 |
+
+> 持久化阶段（`{root}/state.json` 写入的 `phase` 字段）是权威值；`System.phase()` 优先读 state.json，再回退到基于文件系统的 `derive_phase()`，详见 [`docs/adr/0001-persisted-phase-authority.md`](../adr/0001-persisted-phase-authority.md)。
 
 ## COMPLETE 的具体判断
 

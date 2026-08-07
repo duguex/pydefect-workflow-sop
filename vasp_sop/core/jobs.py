@@ -23,6 +23,28 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+def crisp_active_dirs(*, skip: bool = False) -> set[str]:
+    """Return work dirs of crisp jobs currently in a live status.
+
+    The single seam for "what is crisp running right now": used by the batch
+    poll loop (dedup against tracked dirs) and by crisp submission.
+    When *skip* is True (e.g. dry-run), short-circuit and return an empty set
+    without spawning the subprocess. This avoids a 30 s wait on `crisp jobs`
+    when no submission is actually happening.
+    """
+    if skip:
+        return set()
+    try:
+        r = subprocess.run(["crisp", "jobs"], capture_output=True, text=True, timeout=30)
+        raw = json.loads(r.stdout)
+        jobs = raw.get("jobs", raw.get("data", {}).get("jobs", []))
+    except Exception:
+        return set()
+    alive = {"submit", "submitted", "running", "ready_fetch"}
+    return {j.get("local_dir", "") for j in jobs
+            if j.get("status") in alive and j.get("local_dir")}
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # VaspJob hierarchy
 # ══════════════════════════════════════════════════════════════════════════

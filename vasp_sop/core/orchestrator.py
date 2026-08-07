@@ -22,7 +22,15 @@ import logging
 from pathlib import Path
 from typing import Any, Callable
 
-from vasp_sop.core.system import System
+from vasp_sop.core.system import (
+    CHEM_POT_DIAGRAM,
+    COMPETING,
+    COMPLETE,
+    NO_TARGET,
+    STRUCTURE_OPT,
+    UNITCELL_DEFECT,
+    System,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +109,8 @@ def wave1_optimize(
     - ``sys.target_dir`` must not be ``None`` (cpd/ directory with target phase).
     - ``js`` is an open :class:`~vasp_sop.core.job_store.JobStore`.
     """
-    from vasp_sop.vasp.io import check_converged, input_ready
+    from vasp_sop.vasp.convergence import convergence_verdict
+    from vasp_sop.vasp.io import input_ready
     from vasp_sop.core.cache import cache_lookup
     from vasp_sop.core.job_store import record_if_done
 
@@ -111,7 +120,7 @@ def wave1_optimize(
         return
 
     if js.latest(str(td.resolve())) != "submitted":
-        if check_converged(td):
+        if convergence_verdict(td).converged:
             js.record(str(td.resolve()), "converged")
         else:
             cached = cache_lookup(td)
@@ -153,7 +162,8 @@ def wave2_submit(
     - ``sys.root`` must contain ``plan.yaml``.
     - ``js`` is an open :class:`~vasp_sop.core.job_store.JobStore`.
     """
-    from vasp_sop.vasp.io import check_converged, input_ready, prepare_inputs
+    from vasp_sop.vasp.convergence import convergence_verdict
+    from vasp_sop.vasp.io import input_ready, prepare_inputs
     from vasp_sop.core.cache import cache_lookup
     from vasp_sop.core.job_store import JobStore
     from vasp_sop.defect.builder import build_all as _build_defects
@@ -169,7 +179,7 @@ def wave2_submit(
             logger.info(
                 "%s: building defect structures (early, phase=%s) ...",
                 sys.name,
-                sys.phase(),
+                sys.derive_phase(js),
             )
             try:
                 _build_defects(df_root, td, sys.config)
@@ -222,9 +232,9 @@ def wave2_submit(
                 )
 
     # ── COMPETING: submit competing dirs ─────────────────────────────
-    p = sys.phase()
+    p = sys.derive_phase(js)
     if p == "COMPETING":
-        for cd in sys._competing_dirs(js):
+        for cd in sys.competing_dirs(js):
             if js.latest(str(cd.resolve())) == "submitted":
                 continue
             if "_mp-" in cd.name:
@@ -275,7 +285,7 @@ def wave2_submit(
     if perfect_dir.is_dir() and input_ready(perfect_dir):
         perfect_path = str(perfect_dir.resolve())
         perfect_state = js.latest(perfect_path)
-        if check_converged(perfect_dir):
+        if convergence_verdict(perfect_dir).converged:
             if perfect_state != "converged":
                 js.record(perfect_path, "converged", source="backfill")
         elif perfect_state not in ("submitted", "failed", "unconverged"):
@@ -299,7 +309,7 @@ def wave2_submit(
                 continue
 
             # Ion-converged but missing vasprun/calc_results -> recovery (#0016)
-            if check_converged(child):
+            if convergence_verdict(child).converged:
                 has_cr = (child / "calc_results.json").is_file()
                 if has_cr or has_vasprun(child) or recover_vasprun_artifacts(child):
                     if js.latest(str(child.resolve())) != "converged":
@@ -356,7 +366,8 @@ def wave3_postprocess(
     dict
         Status information with at least ``"phase"`` and ``"status"`` keys.
     """
-    from vasp_sop.vasp.io import check_converged, input_ready
+    from vasp_sop.vasp.convergence import convergence_verdict
+    from vasp_sop.vasp.io import input_ready
     from vasp_sop.core.jobs import move_crisp_outputs
     from vasp_sop.core.cache import vasp_results_put
     from vasp_sop.defect import cpd as _cpd
@@ -368,14 +379,14 @@ def wave3_postprocess(
     uc_root = sys.uc_dir
     df_root = sys.defect_dir
 
-    p = sys.phase()
+    p = sys.derive_phase(js)
     result: dict[str, Any] = {"phase": p}
 
     # ── CHEM_POT_DIAGRAM: CPD computation ────────────────────────────
     if p == "CHEM_POT_DIAGRAM":
         if not dry_run:
             for pd in cpd_root.iterdir():
-                if pd.is_dir() and check_converged(pd):
+                if pd.is_dir() and convergence_verdict(pd).converged:
                     move_crisp_outputs(pd)
             logger.info("%s: CPD post-processing ...", sys.name)
             try:
@@ -386,7 +397,7 @@ def wave3_postprocess(
                     cpd_root, sys.config, target_composition
                 )
                 f = sys.config.formula
-                m = sys._mpid
+                m = sys.mpid
                 if f and m:
                     td = sys.target_dir
                     so = uc_root / "structure_opt"
@@ -481,7 +492,7 @@ def wave3_postprocess(
         return (
             (child / "OUTCAR").is_file()
             or (child / "output" / "OUTCAR").is_file()
-            or check_converged(child)
+            or convergence_verdict(child).converged
         )
 
     df_vasp_ondisk = (
@@ -604,7 +615,7 @@ def cpd_only(
     # ── Wave 3: CPD post-processing ──────────────────────────────────
     if phase == "CHEM_POT_DIAGRAM":
         info(f"  Running CPD post-processing ...")
-        result = wave3_postprocess(sys_obj, dry_run, log_to_logger=log_to_logger)
+        result = wave3_postprocess(sys_obj, js, dry_run, log_to_logger=log_to_logger)
         info(f"  CPD complete: {result.get('status', 'unknown')}")
         return result
 
@@ -616,3 +627,565 @@ def cpd_only(
     info(f"  System not ready for CPD (phase={phase}). "
          f"Run structure_opt and competing phases first.")
     return {"phase": phase, "status": "not_ready"}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Whole-system advance + batch loop (moved from cli/main.py)
+# ══════════════════════════════════════════════════════════════════════════
+
+_MAX_RESTART = 5
+
+
+def advance_one_system(
+    s: dict, *, dry_run: bool = False, log_to_logger: bool = False
+) -> None:
+    """Advance one system by one cycle (runs serially in batch mode).
+
+    Thin dispatcher — builds a :class:`~vasp_sop.core.system.System`,
+    reads the (memory- or disk-derived) phase, and delegates to the wave
+    functions.  After a phase's work completes the disk is re-derived and the
+    result persisted (ADR 0001).
+    """
+    from vasp_sop.core.system import System
+    from vasp_sop.core.job_store import JobStore
+
+    _logger = logging.getLogger(__name__)
+
+    sys_obj = System(s["root"], s["config"])
+    js = JobStore()
+
+    p = sys_obj.phase(js)
+
+    # ── Failure gate ─────────────────────────────────────────────────
+    if p == UNITCELL_DEFECT:
+        failure = _unitcell_build_failure(s["root"])
+        if failure:
+            raise RuntimeError(
+                f"unitcell blocked for {s['name']}: {failure['reason']}; "
+                f"{failure['diagnostic']}"
+            )
+    if p == COMPLETE or p == NO_TARGET:
+        return
+
+    # ── Wave 1: STRUCTURE_OPT ────────────────────────────────────────
+    if p == STRUCTURE_OPT:
+        wave1_optimize(sys_obj, js, dry_run, log_to_logger=log_to_logger)
+        # Re-derive from disk — the target may now be recorded as done
+        p = sys_obj.derive_phase(js)
+
+    # ── Wave 2: COMPETING (early return) ─────────────────────────────
+    if p == COMPETING:
+        wave2_submit(sys_obj, js, dry_run, log_to_logger=log_to_logger)
+        sys_obj.save_phase(sys_obj.derive_phase(js))
+        return
+
+    # ── Wave 3: CHEM_POT_DIAGRAM ─────────────────────────────────────
+    if p == CHEM_POT_DIAGRAM:
+        wave3_postprocess(sys_obj, js, dry_run, log_to_logger=log_to_logger)
+
+    # ── Wave 2 + 3: UNITCELL_DEFECT ─────────────────────────────────
+    if p == UNITCELL_DEFECT:
+        try:
+            if dry_run:
+                wave3_postprocess(sys_obj, js, dry_run, log_to_logger=log_to_logger)
+            wave2_submit(sys_obj, js, dry_run, log_to_logger=log_to_logger)
+            if not dry_run:
+                wave3_postprocess(sys_obj, js, dry_run, log_to_logger=log_to_logger)
+        except Exception as exc:
+            _logger.error("%s UNITCELL_DEFECT failed: %s", s["name"], exc)
+            if _unitcell_build_failure(sys_obj.root):
+                raise
+            if not log_to_logger:
+                print(f"  ✗ {s['name']:<18} UNITCELL_DEFECT FAILED")
+
+    # ── Persist the post-cycle phase (ADR 0001) ─────────────────────
+    p = sys_obj.derive_phase(js)
+    sys_obj.save_phase(p)
+
+
+class BatchOrchestrator:
+    """Owns the JobStore handle, cache worker, and the batch poll loop.
+
+    The CLI constructs one and calls :meth:`run`.  Every transition
+    invariant — crisp restore, backfill, orphan sweep, converged finalize,
+    restart policy, snapshots, system advance — lives behind this object.
+    """
+
+    def __init__(
+        self,
+        root: Path,
+        *,
+        dry_run: bool = False,
+        exclude: list[str] | None = None,
+        poll_interval: int = 60,
+        loop: bool = False,
+    ) -> None:
+        from vasp_sop.core.job_store import JobStore
+        from vasp_sop.core.config import PipelineConfig
+        from vasp_sop.core.cache import CacheWorker
+
+        self.root = Path(root)
+        self.dry_run = dry_run
+        self.exclude = list(exclude or [])
+        self.poll_interval = poll_interval
+        self.loop = loop
+        self.js = JobStore()
+        self.cache = CacheWorker()
+        self.sw = None
+        if loop:
+            from vasp_sop.core.logging import setup_file_logging
+            from vasp_sop.core.snapshot import SnapshotWriter
+
+            setup_file_logging(self.root)
+            self.sw = SnapshotWriter(self.root)
+
+        self.systems: list[dict] = []
+        self.blocked_systems: set[str] = set()
+        self.first_pass = True
+
+        self._collect_systems()
+
+    def _collect_systems(self) -> None:
+        from vasp_sop.core.config import PipelineConfig
+
+        sys_list: list[dict] = []
+        for d in sorted(self.root.iterdir()):
+            if not d.is_dir():
+                continue
+            plan_path = d / "plan.yaml"
+            if not plan_path.is_file():
+                continue
+            try:
+                config = PipelineConfig.from_yaml(plan_path, root=d)
+            except Exception:
+                continue
+            src = config.poscar_src
+            mpid = src.split("mp-", 1)[1] if src.startswith("MP mp-") else None
+            sys_list.append({
+                "name": d.name,
+                "root": d,
+                "config": config,
+                "formula": config.formula,
+                "mpid": mpid,
+            })
+        if self.exclude:
+            sys_list = [s for s in sys_list if s["name"] not in self.exclude]
+        self.systems = sys_list
+
+    # ── logging helpers ─────────────────────────────────────────────
+
+    def _print_info(self, message: str) -> None:
+        if self.loop:
+            logger.info("%s", message)
+        else:
+            print(message)
+
+    # ── transitions ─────────────────────────────────────────────────
+
+    def finalize_converged(self, wd: Path) -> None:
+        """The one converged transition: move outputs, cache, record, untrack."""
+        from vasp_sop.core.jobs import move_crisp_outputs
+
+        wd_str = str(wd.resolve())
+        move_crisp_outputs(wd)
+        self.cache.put(wd)
+        self.js.record(wd_str, "converged")
+        self.js.untrack(wd_str)
+
+    def handle_unconverged(self, wd: Path) -> None:
+        """VASP normal exit but unconverged — CONTCAR restart or give up."""
+        from vasp_sop.vasp.io import restart_from_contcar
+        from vasp_sop.core.jobs import submit_vasp
+        from vasp_sop.vasp.convergence import convergence_verdict, is_stalled
+
+        wd_str = str(wd.resolve())
+        try:
+            history = self.js.history(wd_str)
+            attempt = history[-1].get("attempt", 0) if history else 0
+
+            cur_verdict = convergence_verdict(wd)
+            cur_f = cur_verdict.max_f if cur_verdict.max_f is not None else 0.0
+
+            if cur_f > 0 and attempt > 0:
+                for h in reversed(history):
+                    reason = h.get("reason", "")
+                    if reason.startswith("restart,"):
+                        for part in reason.split(","):
+                            if part.startswith("prev_f="):
+                                prev_f = float(part.split("=")[1])
+                                if is_stalled(prev_f, cur_f):
+                                    self.js.record(
+                                        wd_str, "failed",
+                                        reason=f"stalled,max_f={cur_f:.4f}",
+                                        attempt=attempt,
+                                    )
+                                    self.js.untrack(wd_str)
+                                    logger.warning(
+                                        "! %s stalled (max_f %.4f→%.4f), giving up",
+                                        wd.name, prev_f, cur_f,
+                                    )
+                                    return
+                                break
+                        break
+
+            if attempt >= _MAX_RESTART:
+                self.js.record(
+                    wd_str, "failed",
+                    reason=f"unconverged,max_f={cur_f:.4f}",
+                    attempt=attempt,
+                )
+                self.js.untrack(wd_str)
+                logger.error(
+                    "! %s unconverged after %d restart(s), giving up",
+                    wd.name, attempt,
+                )
+                return
+
+            restart_from_contcar(wd)
+            job = submit_vasp(wd.resolve())
+            self.js.record(
+                wd_str, "submitted",
+                source=job.task_name, attempt=attempt + 1,
+                reason=f"restart,prev_f={cur_f:.4f}",
+            )
+            logger.info(
+                "→ %s restart #%d (max_f %.4f, %s)",
+                wd.name, attempt + 1, cur_f, job.task_name,
+            )
+        except Exception as exc:
+            logger.warning("%s unconverged handling failed: %s", wd.name, exc)
+
+    # ── loop machinery ──────────────────────────────────────────────
+
+    def _restore_crisp_active(self) -> None:
+        """Populate JobStore from crisp's currently-running tasks."""
+        from vasp_sop.core.jobs import crisp_active_dirs
+
+        if self.dry_run:
+            return
+        active = crisp_active_dirs(skip=False)
+        if active:
+            logger.info(
+                "Found %d active crisp tasks, recording in JobStore.",
+                len(active),
+            )
+            for p in active:
+                self.js.track(p)
+                self.js.record(p, "submitted", source="restored")
+
+    def _backfill(self) -> int:
+        """Record already-converged CPD phases that never reached the store."""
+        from vasp_sop.core.jobs import move_crisp_outputs
+        from vasp_sop.vasp.convergence import convergence_verdict
+        from vasp_sop.core.cache import vasp_results_put
+
+        backfilled = 0
+        for s in self.systems:
+            cpd_root = s["root"] / "cpd"
+            if not cpd_root.is_dir():
+                continue
+            for pd in cpd_root.iterdir():
+                if not pd.is_dir() or "_mp-" not in pd.name:
+                    continue
+                if self.js.latest(str(pd.resolve())) == "converged":
+                    continue
+                if not convergence_verdict(pd).converged:
+                    continue
+                move_crisp_outputs(pd)
+                formula, mpid = pd.name.split("_mp-", 1)
+                key = vasp_results_put(pd, formula=formula, task_name=f"{formula}_mp-{mpid}")
+                if key is None:
+                    logger.warning(
+                        "%s: cache put returned None (missing output files?)",
+                        pd.name,
+                    )
+                backfilled += 1
+                self.js.record(str(pd.resolve()), "converged", source="backfill")
+        if backfilled:
+            logger.info("Backfilled %d already-converged phase results.", backfilled)
+        return backfilled
+
+    def _orphan_sweep(self) -> int:
+        """Promote legacy ``output/`` results from tracked subtrees."""
+        from vasp_sop.core.jobs import move_crisp_outputs
+        from vasp_sop.core.cache import cache_lookup
+        from vasp_sop.vasp.convergence import convergence_verdict
+
+        orphaned = 0
+        for s in self.systems:
+            for root_dir in (s["root"] / "unitcell", s["root"] / "defect"):
+                if not root_dir.is_dir():
+                    continue
+                for child in root_dir.iterdir():
+                    if not child.is_dir():
+                        continue
+                    out_dir = child / "output"
+                    if not out_dir.is_dir():
+                        continue
+                    if not (out_dir / "OUTCAR").is_file():
+                        continue
+                    move_crisp_outputs(child)
+                    if convergence_verdict(child).converged and cache_lookup(child) is None:
+                        self.cache.put(child)
+                    orphaned += 1
+        if orphaned:
+            logger.info("Processed %d orphaned crisp outputs.", orphaned)
+        return orphaned
+
+    def _poll_tracked(self) -> int:
+        """Poll tracked dirs: finalize converged, detect crashes, restart."""
+        from vasp_sop.core.jobs import crisp_active_dirs
+        from vasp_sop.vasp.convergence import convergence_verdict, _tail_text
+
+        completed = 0
+        crispy = crisp_active_dirs(skip=True) if self.dry_run else crisp_active_dirs(skip=False)
+        import time as _time
+        for row in self.js.tracked_dirs():
+            wd = Path(row["dir_path"])
+            wd_str = str(wd.resolve())
+            if wd_str in crispy:
+                continue
+            if convergence_verdict(wd).converged:
+                self.finalize_converged(wd)
+                completed += 1
+                continue
+            outcar = wd / "OUTCAR"
+            if not outcar.is_file():
+                outcar = wd / "output" / "OUTCAR"
+            if not outcar.is_file():
+                if _time.time() - row["submitted_at"] > 7 * 86400:
+                    self.js.record(wd_str, "failed", reason="orphaned")
+                    self.js.untrack(wd_str)
+                continue
+            tail = _tail_text(outcar, 4096)
+            if not tail or "General timing and accounting" not in tail:
+                self.js.record(wd_str, "failed", reason="vasp_crash")
+                self.js.untrack(wd_str)
+                continue
+            self.handle_unconverged(wd)
+        return completed
+
+    def _advance_systems(self) -> tuple[int, list[tuple[str, str]]]:
+        """Advance every system one cycle; return (skipped, errors)."""
+        n_skipped = 0
+        errors: list[tuple[str, str]] = []
+        for idx, s in enumerate(self.systems, 1):
+            name = s["name"]
+            if name in self.blocked_systems:
+                n_skipped += 1
+                continue
+            from vasp_sop.core.system import System
+
+            p = System(s["root"], s["config"]).phase()
+            failure = _unitcell_build_failure(s["root"])
+            if p == UNITCELL_DEFECT and failure:
+                self.blocked_systems.add(name)
+                reason = failure["reason"]
+                diagnostic = failure["diagnostic"]
+                message = f"{name} blocked: unitcell {reason}; {diagnostic}"
+                if self.loop:
+                    logger.error(message)
+                else:
+                    print(f"  ✗ {message}")
+                errors.append((name, reason))
+                continue
+            if p in (COMPLETE, NO_TARGET):
+                n_skipped += 1
+                continue
+
+            if self.loop:
+                try:
+                    advance_one_system(s, dry_run=self.dry_run, log_to_logger=True)
+                    logger.info(
+                        "  [%d/%d] %-18s %s ... done", idx, len(self.systems), name, p
+                    )
+                except Exception as exc:
+                    failure = _unitcell_build_failure(s["root"])
+                    if failure:
+                        self.blocked_systems.add(name)
+                        reason = failure["reason"]
+                    else:
+                        reason = str(exc).split("(")[0].strip() or type(exc).__name__
+                    logger.error("%s advance failed: %s", name, exc)
+                    errors.append((name, reason))
+            else:
+                print(
+                    f"  [{idx}/{len(self.systems)}] {name:<18} {p} ...",
+                    end="", flush=True,
+                )
+                try:
+                    advance_one_system(s, dry_run=self.dry_run)
+                    print(" done")
+                except Exception as exc:
+                    reason = str(exc).split("(")[0].strip() or type(exc).__name__
+                    logger.error("%s advance failed: %s", name, exc)
+                    print(f" FAILED ({reason})")
+                    errors.append((name, reason))
+        return n_skipped, errors
+
+    def _status(self, errors: list[tuple[str, str]]) -> tuple[dict, int]:
+        """Aggregate phase counts, report errors, write snapshot; return (counts, done)."""
+        from vasp_sop.core.system import System
+
+        phases = [System(s["root"], s["config"]).phase() for s in self.systems]
+        done_count = sum(
+            1 for p in phases
+            if p in (COMPLETE, NO_TARGET)
+        )
+        counts = {p: phases.count(p) for p in sorted(set(phases))}
+        parts = [f"{p}={n}" for p, n in sorted(counts.items())]
+        self._print_info("  ".join(parts))
+
+        if errors:
+            if self.loop:
+                logger.warning("%d system(s) with errors:", len(errors))
+                for name, reason in errors:
+                    logger.warning("  %-18s  %s", name, reason)
+            else:
+                print(f"\n  ⚠ {len(errors)} system(s) with errors:")
+                for name, reason in errors:
+                    print(f"    {name:<18}  {reason}")
+
+        if self.loop and self.sw is not None:
+            self._write_snapshot(counts, errors)
+        return counts, done_count
+
+    def _write_snapshot(
+        self, counts: dict, errors: list[tuple[str, str]]
+    ) -> None:
+        import json
+        import subprocess
+
+        from vasp_sop.defect.analysis import classify_analyze_status
+
+        analyze_counts = {"full": 0, "partial": 0, "failed": 0}
+        for s in self.systems:
+            defect_root = s["root"] / "defect"
+            if defect_root.is_dir():
+                try:
+                    analyze_counts[classify_analyze_status(defect_root)] += 1
+                except Exception:
+                    pass
+
+        crisp_active = crisp_running = crisp_failed = -1
+        try:
+            result = subprocess.run(
+                ["crisp", "jobs", "-a"], capture_output=True, text=True, timeout=30,
+            )
+            jobs = json.loads(result.stdout).get("jobs") or []
+            project_jobs = [
+                job for job in jobs
+                if (job.get("local_dir") or "").startswith(str(self.root))
+            ]
+            crisp_active = sum(
+                1 for job in project_jobs
+                if job.get("status") in (
+                    "submit", "submitted", "running", "ready_fetch", "pending",
+                )
+            )
+            crisp_running = sum(
+                1 for job in project_jobs if job.get("status") == "running"
+            )
+            crisp_failed = sum(
+                1 for job in project_jobs if job.get("status") == "failed"
+            )
+        except Exception:
+            pass
+
+        self.sw.write({
+            "phases": dict(counts),
+            "analyze": analyze_counts,
+            "crisp_active": crisp_active,
+            "crisp_running": crisp_running,
+            "crisp_failed": crisp_failed,
+            "errors": [
+                {"system": name, "reason": reason} for name, reason in errors
+            ],
+        })
+
+    # ── public entry ────────────────────────────────────────────────
+
+    def run(self, max_cycles: int | None = None) -> None:
+        """Run the batch cycle: one pass (single-shot) or continuous loop.
+
+        *max_cycles* bounds the loop (used by the single-system ``pipeline``
+        command); when exhausted without completion the loop just exits and
+        the caller checks the final phase.
+        """
+        from vasp_sop.core.batch_lifecycle import is_stop_requested
+
+        if not self.systems:
+            logger.warning("No systems found.")
+            self.js.close()
+            return
+        self._print_info(f"Batch run: {len(self.systems)} systems\n")
+        if self.dry_run:
+            self._print_info(
+                "Dry-run mode: will build defect structures and generate "
+                "inputs, NO VASP submission.\n"
+            )
+
+        self._restore_crisp_active()
+
+        cycle = 0
+        try:
+            while not is_stop_requested():
+                cycle += 1
+                if not self.dry_run:
+                    self._backfill()
+                    self._orphan_sweep()
+                    completed = self._poll_tracked()
+                    if completed:
+                        self._print_info(
+                            f"  Cached {completed} completed calculation(s)."
+                        )
+
+                n_skipped, errors = self._advance_systems()
+
+                if n_skipped:
+                    self._print_info(
+                        f"  [{n_skipped}/{len(self.systems)} systems already done, "
+                        "skipped]\n"
+                    )
+
+                counts, done_count = self._status(errors)
+
+                terminal_count = done_count + len(self.blocked_systems)
+                if done_count == len(self.systems):
+                    self._print_info("\nAll systems complete.")
+                    break
+                if self.loop and terminal_count == len(self.systems):
+                    self._print_info("\nAll systems complete or blocked.")
+                    break
+
+                if max_cycles is not None and cycle >= max_cycles:
+                    logger.warning(
+                        "Batch loop reached the %d-cycle cap; exiting "
+                        "(caller verifies final phase).",
+                        max_cycles,
+                    )
+                    break
+
+                if not self.loop:
+                    still = len(self.systems) - done_count
+                    blocked = len(errors)
+                    running = still - blocked
+                    print(
+                        f"\n{running} running, {blocked} blocked, {still} remaining "
+                        "— re-run `vasp-sop batch run .` after VASP jobs complete."
+                    )
+                    break
+
+                self._print_info(
+                    f"\n  Sleeping {self.poll_interval}s … (Ctrl+C to interrupt)"
+                )
+                self.cache.flush()
+                import time as _time
+
+                _time.sleep(self.poll_interval)
+                self.first_pass = False
+        except KeyboardInterrupt:
+            self._print_info("\nInterrupted.")
+        finally:
+            self.cache.join()
+            self.js.close()

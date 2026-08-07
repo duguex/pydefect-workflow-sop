@@ -7,6 +7,7 @@ submission, and that cached submission logic isn't silently skipped.
 from pathlib import Path
 import os
 import time
+from types import SimpleNamespace
 import yaml
 import pytest
 
@@ -89,7 +90,7 @@ def _write_truncated_outcar(d: Path) -> None:
 
 
 def _make_system_dict(root: Path) -> dict:
-    """Build the system dict that _advance_one_system expects."""
+    """Build the system dict that advance_one_system expects."""
     from vasp_sop.core.config import PipelineConfig
     plan = yaml.safe_load((root / "plan.yaml").read_text())
     config = PipelineConfig.from_plan(plan, root=root)
@@ -102,6 +103,13 @@ def _make_system_dict(root: Path) -> dict:
         "formula": config.formula,
         "mpid": mpid,
     }
+
+
+def _system_phase(s: dict) -> str:
+    """Canonical phase for a system dict (the former cli._phase)."""
+    from vasp_sop.core.system import System
+
+    return System(s["root"], s["config"]).phase()
 
 
 class TestHandleCpd:
@@ -126,7 +134,7 @@ class TestHandleCpd:
 
 
 class TestAdvanceOneSystem:
-    """_advance_one_system -- dry-run vs real submission."""
+    """advance_one_system -- dry-run vs real submission."""
 
     @pytest.fixture(autouse=True)
     def _patch_heavy(self, monkeypatch, tmp_path: Path):
@@ -135,8 +143,8 @@ class TestAdvanceOneSystem:
         monkeypatch.setattr("vasp_sop.core.cache.cache_lookup",
                             lambda p: {"total_energy": 0.0} if "NaCl_mp-12345" in str(p) else None)
         monkeypatch.setattr("vasp_sop.defect.builder.build_all", lambda *a, **kw: None)
-        monkeypatch.setattr("vasp_sop.vasp.io.check_converged",
-                            lambda p: "NaCl_mp-12345" in str(p))
+        monkeypatch.setattr("vasp_sop.vasp.convergence.convergence_verdict",
+                            lambda p: SimpleNamespace(converged="NaCl_mp-12345" in str(p), max_f=None))
         monkeypatch.setattr("vasp_sop.defect.cpd.compute_chemical_potentials",
                             lambda *a, **kw: None)
         monkeypatch.setattr("vasp_sop.defect.cpd._get_target_composition",
@@ -147,9 +155,9 @@ class TestAdvanceOneSystem:
         monkeypatch.setattr("vasp_sop.core.jobs.submit_vasp",
                             lambda p: (calls.append(p) or
                                        type("J", (), {"task_name": "t"})()))
-        from vasp_sop.cli.main import _advance_one_system
+        from vasp_sop.core.orchestrator import advance_one_system
         s = _make_system_dict(competing_system)
-        _advance_one_system(s, dry_run=True)
+        advance_one_system(s, dry_run=True)
         assert len(calls) == 0
 
     def test_non_dry_submits_competing(self, competing_system, monkeypatch):
@@ -157,9 +165,9 @@ class TestAdvanceOneSystem:
         monkeypatch.setattr("vasp_sop.core.jobs.submit_vasp",
                             lambda p: (calls.append(p) or
                                        type("J", (), {"task_name": "t"})()))
-        from vasp_sop.cli.main import _advance_one_system
+        from vasp_sop.core.orchestrator import advance_one_system
         s = _make_system_dict(competing_system)
-        _advance_one_system(s, dry_run=False)
+        advance_one_system(s, dry_run=False)
         assert len(calls) >= 1
         comp_dir = str(competing_system / "cpd" / "Other_mp-99999")
         assert comp_dir in {str(p) for p in calls}
@@ -171,7 +179,7 @@ class TestCompetingFailureGate:
         """A failed competing phase must not silently advance to CPD."""
         from vasp_sop.core.cache import override_cache_root
         from vasp_sop.core.job_store import JobStore
-        from vasp_sop.cli.main import _phase
+        
 
         override_cache_root(tmp_path / ".vasp_sop")
         root = competing_system
@@ -181,13 +189,13 @@ class TestCompetingFailureGate:
         store.record(str(target.resolve()), "converged")
         store.record(str(competing.resolve()), "failed", reason="crisp_failed")
 
-        assert _phase(_make_system_dict(root)) == "COMPETING"
+        assert _system_phase(_make_system_dict(root)) == "COMPETING"
 
     def test_missing_competing_inputs_blocks_cpd(self, competing_system, tmp_path):
         """A POSCAR-only competing phase must keep the system in COMPETING."""
         from vasp_sop.core.cache import override_cache_root
         from vasp_sop.core.job_store import JobStore
-        from vasp_sop.cli.main import _phase
+        
 
         override_cache_root(tmp_path / ".vasp_sop")
         root = competing_system
@@ -204,13 +212,13 @@ class TestCompetingFailureGate:
         _write_converged_outcar(incomplete)
         JobStore().record(str(target.resolve()), "converged")
 
-        assert _phase(_make_system_dict(root)) == "COMPETING"
+        assert _system_phase(_make_system_dict(root)) == "COMPETING"
 
     def test_failed_marker_overrides_old_converged_output(self, competing_system, tmp_path):
         """A failed latest attempt cannot validate an older converged OUTCAR."""
         from vasp_sop.core.cache import override_cache_root
         from vasp_sop.core.job_store import JobStore
-        from vasp_sop.cli.main import _phase
+        
 
         override_cache_root(tmp_path / ".vasp_sop")
         root = competing_system
@@ -224,7 +232,7 @@ class TestCompetingFailureGate:
         (competing / ".failed").write_text("EXIT_CODE: 1\n")
         JobStore().record(str(target.resolve()), "converged")
 
-        assert _phase(_make_system_dict(root)) == "COMPETING"
+        assert _system_phase(_make_system_dict(root)) == "COMPETING"
 
 
     def test_cpd_persistence_does_not_regress_on_failed_competing(
@@ -233,16 +241,17 @@ class TestCompetingFailureGate:
         """After CPD artifacts exist, later failed phase records do not regress phase."""
         from vasp_sop.core.cache import override_cache_root
         from vasp_sop.core.job_store import JobStore
-        from vasp_sop.cli.main import _phase
+        
 
         override_cache_root(tmp_path / ".vasp_sop")
         root = competing_system
         cpd = root / "cpd"
         (cpd / "target_vertices.yaml").write_text("vertices: []\n")
+        (cpd / "standard_energies.yaml").write_text("NaCl: 0.0\n")
         store = JobStore()
         store.record(str((cpd / "Other_mp-99999").resolve()), "failed")
 
-        assert _phase(_make_system_dict(root)) == "UNITCELL_DEFECT"
+        assert _system_phase(_make_system_dict(root)) == "UNITCELL_DEFECT"
 
 
 class TestBatchCpdTargetHandoff:
@@ -250,7 +259,7 @@ class TestBatchCpdTargetHandoff:
         """CPD phase: put target → fetch structure_opt from cache."""
         from vasp_sop.core.cache import override_cache_root
         from vasp_sop.core.job_store import JobStore
-        from vasp_sop.cli.main import _advance_one_system
+        from vasp_sop.core.orchestrator import advance_one_system
 
         override_cache_root(tmp_path / ".vasp_sop")
         root = competing_system
@@ -278,7 +287,7 @@ class TestBatchCpdTargetHandoff:
         monkeypatch.setattr("vasp_sop.defect.cpd.compute_chemical_potentials",
                            lambda *args, **kwargs: None)
 
-        _advance_one_system(_make_system_dict(root), dry_run=False)
+        advance_one_system(_make_system_dict(root), dry_run=False)
 
         assert len(put_calls) == 1 and put_calls[0] == target, "should put target"
         assert len(fetch_calls) == 1, "should fetch to staging"
@@ -372,8 +381,8 @@ class TestCrispActiveDirs:
             )
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        from vasp_sop.cli.main import _crisp_active_dirs
-        result = _crisp_active_dirs(skip=True)
+        from vasp_sop.core.jobs import crisp_active_dirs
+        result = crisp_active_dirs(skip=True)
         assert result == set()
         assert calls == []
 
@@ -401,8 +410,8 @@ class TestCrispActiveDirs:
             return r
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        from vasp_sop.cli.main import _crisp_active_dirs
-        result = _crisp_active_dirs(skip=False)
+        from vasp_sop.core.jobs import crisp_active_dirs
+        result = crisp_active_dirs(skip=False)
         assert result == {"/tmp/a", "/tmp/b"}
         assert len(calls) == 1
 
@@ -479,8 +488,8 @@ class TestAdvanceDryRunPostprocess:
         monkeypatch.setattr("vasp_sop.core.cache.cache_lookup",
                             lambda p: {"total_energy": 0.0} if "NaCl_mp-12345" in str(p) else None)
         monkeypatch.setattr("vasp_sop.defect.builder.build_all", lambda *a, **kw: None)
-        monkeypatch.setattr("vasp_sop.vasp.io.check_converged",
-                            lambda p: "NaCl_mp-12345" in str(p))
+        monkeypatch.setattr("vasp_sop.vasp.convergence.convergence_verdict",
+                            lambda p: SimpleNamespace(converged="NaCl_mp-12345" in str(p), max_f=None))
         monkeypatch.setattr("vasp_sop.defect.cpd.compute_chemical_potentials",
                             lambda *a, **kw: None)
         monkeypatch.setattr("vasp_sop.defect.cpd._get_target_composition",
@@ -540,9 +549,9 @@ class TestAdvanceDryRunPostprocess:
             ),
         )
 
-        from vasp_sop.cli.main import _advance_one_system
+        from vasp_sop.core.orchestrator import advance_one_system
         s = _make_system_dict(root)
-        _advance_one_system(s, dry_run=True)
+        advance_one_system(s, dry_run=True)
         captured = capsys.readouterr().out
         assert "would post-process" in captured
         assert analyze_calls == []
@@ -562,9 +571,9 @@ class TestAdvanceDryRunPostprocess:
         import shutil as _sh
         _sh.rmtree(root / "defect" / "Va_Na_0")
 
-        from vasp_sop.cli.main import _advance_one_system
+        from vasp_sop.core.orchestrator import advance_one_system
         s = _make_system_dict(root)
-        _advance_one_system(s, dry_run=True)
+        advance_one_system(s, dry_run=True)
         captured = capsys.readouterr().out
         assert "post-process blocked" in captured
         # The names of the missing files should be listed in the message.
@@ -587,8 +596,8 @@ class TestBatchNoDuplicateSubmission:
                            lambda *a, **kw: None)
         monkeypatch.setattr("vasp_sop.defect.builder._generate_vasp_inputs",
                            lambda *a, **kw: None)
-        monkeypatch.setattr("vasp_sop.vasp.io.check_converged",
-                           lambda p: "NaCl_mp-12345" in str(p))
+        monkeypatch.setattr("vasp_sop.vasp.convergence.convergence_verdict",
+                           lambda p: SimpleNamespace(converged="NaCl_mp-12345" in str(p), max_f=None))
         monkeypatch.setattr("vasp_sop.vasp.io.prepare_inputs",
                            lambda *a, **kw: None)
         monkeypatch.setattr("vasp_sop.defect.cpd.compute_chemical_potentials",
@@ -608,14 +617,14 @@ class TestBatchNoDuplicateSubmission:
         monkeypatch.setattr("vasp_sop.core.jobs.submit_vasp",
                            lambda p: (calls.append(str(p)) or
                                       type("J", (), {"task_name": "t"})()))
-        from vasp_sop.cli.main import _advance_one_system
+        from vasp_sop.core.orchestrator import advance_one_system
         s = _make_system_dict(competing_system)
 
-        _advance_one_system(s, dry_run=False)  # cycle 1
+        advance_one_system(s, dry_run=False)  # cycle 1
         cycle1_count = len(calls)
         assert cycle1_count >= 1, "first cycle should submit something"
 
-        _advance_one_system(s, dry_run=False)  # cycle 2
+        advance_one_system(s, dry_run=False)  # cycle 2
         assert len(calls) == cycle1_count, \
             "second cycle must not re-submit (is_submitted guard)"
 
@@ -682,15 +691,15 @@ class TestBatchNoDuplicateSubmission:
         monkeypatch.setattr("vasp_sop.core.jobs.submit_vasp",
                            lambda p: (calls.append(str(p)) or
                                       type("J", (), {"task_name": "t"})()))
-        from vasp_sop.cli.main import _advance_one_system
+        from vasp_sop.core.orchestrator import advance_one_system
         root = self._make_ucdf_system(tmp_path)
         s = _make_system_dict(root)
 
-        _advance_one_system(s, dry_run=False)  # cycle 1
+        advance_one_system(s, dry_run=False)  # cycle 1
         cycle1_count = len(calls)
         assert cycle1_count >= 1, "first cycle should submit UC + defect jobs"
 
-        _advance_one_system(s, dry_run=False)  # cycle 2
+        advance_one_system(s, dry_run=False)  # cycle 2
         assert len(calls) == cycle1_count, \
             "second cycle must not re-submit (is_submitted guard)"
 
@@ -759,7 +768,7 @@ class TestFullPipelineWalkthrough:
     """Drive a system through all 5 phases: STRUCTURE_OPT → COMPETING → CHEM_POT_DIAGRAM → UNITCELL_DEFECT → COMPLETE.
 
     Each phase transition is verified by checking _phase() output and
-    asserting _advance_one_system produces the expected side effects
+    asserting advance_one_system produces the expected side effects
     (submit_vasp calls, file creation, etc.).
     """
 
@@ -826,7 +835,7 @@ class TestFullPipelineWalkthrough:
 
     def test_walkthrough(self, tmp_path, monkeypatch):
         """Walk through STRUCTURE_OPT → COMPETING → CHEM_POT_DIAGRAM → UNITCELL_DEFECT → COMPLETE."""
-        from vasp_sop.cli.main import _phase, _advance_one_system
+        from vasp_sop.core.orchestrator import advance_one_system
         from vasp_sop.core.job_store import JobStore
 
         formula = "GaN"
@@ -848,8 +857,8 @@ class TestFullPipelineWalkthrough:
         s = _make_system_dict(root)
 
         # ── Phase 1: STRUCTURE_OPT ────────────────────────────────────────
-        assert _phase(s) == "STRUCTURE_OPT", "bare system should start in STRUCTURE_OPT"
-        _advance_one_system(s, dry_run=False)
+        assert _system_phase(s) == "STRUCTURE_OPT", "bare system should start in STRUCTURE_OPT"
+        advance_one_system(s, dry_run=False)
         # Target submitted; simulate backfill: mark converged for next cycle
         td = root / "cpd" / f"{formula}_mp-{mpid}"
         assert str(td.resolve()) in submit_calls, "target should be submitted"
@@ -874,8 +883,8 @@ class TestFullPipelineWalkthrough:
         self._write_unconverged_outcar(comp)
 
         # Advance — records target converged from disk, then submits competing
-        _advance_one_system(s, dry_run=False)
-        assert _phase(s) != "STRUCTURE_OPT", "system should advance past STRUCTURE_OPT"
+        advance_one_system(s, dry_run=False)
+        assert _system_phase(s) != "STRUCTURE_OPT", "system should advance past STRUCTURE_OPT"
         assert str(comp.resolve()) in submit_calls, \
             "competing phase should be submitted"
         self._assert_job_state(comp)
@@ -885,16 +894,18 @@ class TestFullPipelineWalkthrough:
         cache_data["Ga_142"] = {"total_energy": -5.0}
         self._write_converged_outcar(comp)
 
-        assert _phase(s) == "CHEM_POT_DIAGRAM", "no pending competing dirs → CHEM_POT_DIAGRAM"
-        _advance_one_system(s, dry_run=False)
+        assert _system_phase(s) == "CHEM_POT_DIAGRAM", "no pending competing dirs → CHEM_POT_DIAGRAM"
+        advance_one_system(s, dry_run=False)
 
         # ── Phase 4: UNITCELL_DEFECT ─────────────────────────────────────────
-        # Add CPD artifacts
+        # Add CPD artifacts, then drive the machine forward (persisted phase
+        # only moves on an advance cycle — ADR 0001).
         cpd = root / "cpd"
         (cpd / "target_vertices.yaml").write_text("tv: 1\n")
         (cpd / "standard_energies.yaml").write_text("se: 1\n")
 
-        assert _phase(s) == "UNITCELL_DEFECT", "CPD artifacts present → UNITCELL_DEFECT"
+        advance_one_system(s, dry_run=False)
+        assert _system_phase(s) == "UNITCELL_DEFECT", "CPD artifacts present → UNITCELL_DEFECT"
 
         # Create UC and defect directories
         uc = root / "unitcell"
@@ -918,7 +929,7 @@ class TestFullPipelineWalkthrough:
         _write_kpoints(defect_dir)
         _write_poscar(defect_dir, 2)
         _write_potcar(defect_dir)
-        _advance_one_system(s, dry_run=False)
+        advance_one_system(s, dry_run=False)
         # Should submit UC (band/dos/dielectric) + defect (perfect + Va_Ga_0)
         for t in ("band", "dos", "dielectric"):
             assert str((uc / t).resolve()) in submit_calls, \
@@ -951,10 +962,12 @@ class TestFullPipelineWalkthrough:
             (d / "defect_volume_fraction.json").write_text("{}\n")
         (perfect / "perfect_band_edge_state.json").write_text("{}\n")
 
-        assert _phase(s) == "COMPLETE", "all artifacts present → COMPLETE"
+        # Drive the final cycle so the machine re-derives and persists COMPLETE
+        advance_one_system(s, dry_run=False)
+        assert _system_phase(s) == "COMPLETE", "all artifacts present → COMPLETE"
     def test_structure_opt_cache_hit_skips_vasp_submission(self, tmp_path, monkeypatch):
         """STRUCTURE_OPT with cache hit restores from cache, never submits VASP."""
-        from vasp_sop.cli.main import _phase, _advance_one_system
+        from vasp_sop.core.orchestrator import advance_one_system
         from vasp_sop.core.job_store import JobStore
 
         formula, mpid = "GaN", "804"
@@ -983,16 +996,16 @@ class TestFullPipelineWalkthrough:
                                             if str(p.resolve()) == str(td.resolve()) else None))
 
         s = _make_system_dict(root)
-        assert _phase(s) == "STRUCTURE_OPT"
+        assert _system_phase(s) == "STRUCTURE_OPT"
 
-        _advance_one_system(s, dry_run=False)
+        advance_one_system(s, dry_run=False)
 
         assert restore_calls == [str(td.resolve())], "restore_from_cache should be called for target"
         assert JobStore().latest(str(td.resolve())) == "converged", "target should be marked converged"
 
     def test_cache_only_full_pipeline_zero_vasp_submit(self, tmp_path, monkeypatch):
         """STRUCTURE_OPT → CPD without any VASP when target + competing are cached."""
-        from vasp_sop.cli.main import _phase, _advance_one_system
+        from vasp_sop.core.orchestrator import advance_one_system
         from vasp_sop.core.job_store import JobStore
         from pymatgen.core import Composition
 
@@ -1050,11 +1063,11 @@ class TestFullPipelineWalkthrough:
         # Advance through phases
         phases_seen = set()
         for _ in range(10):
-            p = _phase(s)
+            p = _system_phase(s)
             phases_seen.add(p)
             if p in ("COMPLETE", "NO_TARGET", "UNITCELL_DEFECT"):
                 break
-            _advance_one_system(s, dry_run=False)
+            advance_one_system(s, dry_run=False)
 
         assert "CHEM_POT_DIAGRAM" in phases_seen, "should reach CPD phase"
         assert submit_calls == [], f"VASP submitted: {submit_calls}"
@@ -1064,7 +1077,7 @@ class TestFullPipelineWalkthrough:
 
     def test_uc_resubmit_when_vasprxml_missing(self, tmp_path, monkeypatch):
         """UC task with converged OUTCAR but missing vasprun.xml → re-submitted."""
-        from vasp_sop.cli.main import _phase, _advance_one_system
+        from vasp_sop.core.orchestrator import advance_one_system
         root = self._make_system(tmp_path, "GaN", "804")
         cpd = root / "cpd"
         (cpd / "target_vertices.yaml").write_text("tv: 1\n")
@@ -1092,7 +1105,7 @@ class TestFullPipelineWalkthrough:
                            lambda p: cache_data.get(str(p.resolve())))
 
         s = _make_system_dict(root)
-        _advance_one_system(s, dry_run=False)
+        advance_one_system(s, dry_run=False)
         self._assert_job_state(uc / "band")
 
         # band and dos should be re-submitted (missing vasprun.xml)
@@ -1170,7 +1183,7 @@ class TestPhaseFailedSkip:
 
     def test_failed_defect_does_not_block_complete(self, tmp_path: Path):
         """Failed defect without analysis intermediates must not block COMPLETE."""
-        from vasp_sop.cli.main import _phase
+        
         from vasp_sop.core.job_store import JobStore
 
         s, _root, df = self._complete_ready_system(tmp_path)
@@ -1183,11 +1196,11 @@ class TestPhaseFailedSkip:
         # No analysis intermediates — only JobStore failed
         JobStore().record(str(bad.resolve()), "failed", reason="unconverged")
 
-        assert _phase(s) == "COMPLETE"
+        assert _system_phase(s) == "COMPLETE"
 
     def test_unfinished_defect_blocks_complete(self, tmp_path: Path):
         """Defect without intermediates and not failed stays UNITCELL_DEFECT."""
-        from vasp_sop.cli.main import _phase
+        
 
         s, _root, df = self._complete_ready_system(tmp_path)
         pending = df / "Va_Ga_-1"
@@ -1197,18 +1210,18 @@ class TestPhaseFailedSkip:
         _write_potcar(pending)
         _write_kpoints(pending)
 
-        assert _phase(s) == "UNITCELL_DEFECT"
+        assert _system_phase(s) == "UNITCELL_DEFECT"
 
     def test_junk_subdir_without_vasp_inputs_ignored(self, tmp_path: Path):
         """Non-calculation subdirs under defect/ must not block COMPLETE."""
-        from vasp_sop.cli.main import _phase
+        
 
         s, _root, df = self._complete_ready_system(tmp_path)
         junk = df / "c3v"
         junk.mkdir()
         (junk / "readme.txt").write_text("not a calc\n")
 
-        assert _phase(s) == "COMPLETE"
+        assert _system_phase(s) == "COMPLETE"
 
 
 class TestUcFalseConvergedResubmit:
@@ -1226,7 +1239,7 @@ class TestUcFalseConvergedResubmit:
         monkeypatch.setattr("vasp_sop.defect.analysis.analyze", lambda *a, **kw: None)
 
     def test_stale_converged_band_resubmits(self, tmp_path: Path, monkeypatch):
-        from vasp_sop.cli.main import _advance_one_system
+        from vasp_sop.core.orchestrator import advance_one_system
         from vasp_sop.core.job_store import JobStore
 
         formula, mpid = "GaN", "804"
@@ -1279,13 +1292,13 @@ class TestUcFalseConvergedResubmit:
         )
 
         s = _make_system_dict(root)
-        _advance_one_system(s, dry_run=False)
+        advance_one_system(s, dry_run=False)
 
         assert str(band.resolve()) in submit_calls, \
             "band marked converged but missing vasprun.xml must resubmit"
 
 class TestAdvanceAnalyzeStatusPrint:
-    """batch _advance_one_system must surface analyze() full|partial|failed."""
+    """batch advance_one_system must surface analyze() full|partial|failed."""
 
     @pytest.fixture(autouse=True)
     def _isolate(self, tmp_path: Path, monkeypatch):
@@ -1397,9 +1410,9 @@ class TestAdvanceAnalyzeStatusPrint:
             "vasp_sop.defect.analysis.analyze",
             lambda *a, **kw: "partial",
         )
-        from vasp_sop.cli.main import _advance_one_system
+        from vasp_sop.core.orchestrator import advance_one_system
         s = _make_system_dict(root)
-        _advance_one_system(s, dry_run=False)
+        advance_one_system(s, dry_run=False)
         out = capsys.readouterr().out
         assert "post-process partial" in out
         assert "pipeline complete" not in out
@@ -1412,9 +1425,9 @@ class TestAdvanceAnalyzeStatusPrint:
             "vasp_sop.defect.analysis.analyze",
             lambda *a, **kw: "full",
         )
-        from vasp_sop.cli.main import _advance_one_system
+        from vasp_sop.core.orchestrator import advance_one_system
         s = _make_system_dict(root)
-        _advance_one_system(s, dry_run=False)
+        advance_one_system(s, dry_run=False)
         out = capsys.readouterr().out
         assert "pipeline complete" in out
 
@@ -1426,9 +1439,9 @@ class TestAdvanceAnalyzeStatusPrint:
             "vasp_sop.defect.analysis.analyze",
             lambda *a, **kw: "failed",
         )
-        from vasp_sop.cli.main import _advance_one_system
+        from vasp_sop.core.orchestrator import advance_one_system
         s = _make_system_dict(root)
-        _advance_one_system(s, dry_run=False)
+        advance_one_system(s, dry_run=False)
         out = capsys.readouterr().out
         assert "post-process failed" in out
         assert "pipeline complete" not in out
@@ -1452,9 +1465,9 @@ class TestAdvanceAnalyzeStatusPrint:
             lambda *a, **kw: analyze_calls.append((a, kw)),
         )
 
-        from vasp_sop.cli.main import _advance_one_system
+        from vasp_sop.core.orchestrator import advance_one_system
         with pytest.raises(RuntimeError, match="unitcell blocked"):
-            _advance_one_system(_make_system_dict(root), dry_run=False)
+            advance_one_system(_make_system_dict(root), dry_run=False)
 
         assert analyze_calls == []
         assert (root / "unitcell" / "unitcell_build_status.json").is_file()
@@ -1532,7 +1545,7 @@ class TestBatchRunLoopObservability:
                 "poscar_src": "", "formula": "GaN",
             })(),
         )
-        monkeypatch.setattr("vasp_sop.cli.main._phase", lambda system: "COMPLETE")
+        monkeypatch.setattr("vasp_sop.core.system.System.phase", lambda self, *a, **kw: "COMPLETE")
         monkeypatch.setattr(
             "vasp_sop.defect.analysis.classify_analyze_status",
             lambda defect_root: "full",
@@ -1566,7 +1579,7 @@ class TestBatchRunLoopObservability:
                 "poscar_src": "", "formula": "GaN",
             })(),
         )
-        monkeypatch.setattr("vasp_sop.cli.main._phase", lambda system: "COMPLETE")
+        monkeypatch.setattr("vasp_sop.core.system.System.phase", lambda self, *a, **kw: "COMPLETE")
         monkeypatch.setattr(
             "vasp_sop.core.logging.setup_file_logging",
             lambda root: (_ for _ in ()).throw(AssertionError("unexpected logging setup")),
@@ -1589,9 +1602,9 @@ class TestBatchRunLoopObservability:
                 "poscar_src": "", "formula": "GaN",
             })(),
         )
-        monkeypatch.setattr("vasp_sop.cli.main._phase", lambda system: "COMPETING")
+        monkeypatch.setattr("vasp_sop.core.system.System.phase", lambda self, *a, **kw: "COMPETING")
         monkeypatch.setattr(
-            "vasp_sop.cli.main._advance_one_system",
+            "vasp_sop.core.orchestrator.advance_one_system",
             lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
         )
 
@@ -1613,10 +1626,10 @@ class TestBatchRunLoopObservability:
                 "poscar_src": "", "formula": "GaN",
             })(),
         )
-        monkeypatch.setattr("vasp_sop.cli.main._phase", lambda system: "UNITCELL_DEFECT")
+        monkeypatch.setattr("vasp_sop.core.system.System.phase", lambda self, *a, **kw: "UNITCELL_DEFECT")
         advance_calls = []
         monkeypatch.setattr(
-            "vasp_sop.cli.main._advance_one_system",
+            "vasp_sop.core.orchestrator.advance_one_system",
             lambda *args, **kwargs: advance_calls.append(args),
         )
         stop_calls = []
@@ -1626,8 +1639,8 @@ class TestBatchRunLoopObservability:
             assert len(stop_calls) == 1, "batch loop did not terminate blocked system"
             return False
 
-        monkeypatch.setattr("vasp_sop.cli.main.is_stop_requested", stop_once)
-        monkeypatch.setattr("vasp_sop.cli.main._crisp_active_dirs", lambda **kwargs: set())
+        monkeypatch.setattr("vasp_sop.core.batch_lifecycle.is_stop_requested", stop_once)
+        monkeypatch.setattr("vasp_sop.core.jobs.crisp_active_dirs", lambda **kwargs: set())
 
         from vasp_sop.cli.main import _batch_run
         _batch_run(root, poll_interval=0, dry_run=True, loop=True)
@@ -1648,10 +1661,10 @@ class TestBatchRunLoopObservability:
                 "poscar_src": "", "formula": "GaN",
             })(),
         )
-        monkeypatch.setattr("vasp_sop.cli.main._phase", lambda system: "UNITCELL_DEFECT")
+        monkeypatch.setattr("vasp_sop.core.system.System.phase", lambda self, *a, **kw: "UNITCELL_DEFECT")
         advance_calls = []
         monkeypatch.setattr(
-            "vasp_sop.cli.main._advance_one_system",
+            "vasp_sop.core.orchestrator.advance_one_system",
             lambda *args, **kwargs: advance_calls.append(args),
         )
 
@@ -1671,7 +1684,7 @@ class TestBatchRunLoopObservability:
                 "poscar_src": "", "formula": "GaN",
             })(),
         )
-        monkeypatch.setattr("vasp_sop.cli.main._phase", lambda system: "UNITCELL_DEFECT")
+        monkeypatch.setattr("vasp_sop.core.system.System.phase", lambda self, *a, **kw: "UNITCELL_DEFECT")
         advance_calls = []
 
         def fail_advance(*args, **kwargs):
@@ -1682,7 +1695,7 @@ class TestBatchRunLoopObservability:
             )
             raise RuntimeError("unitcell build failed")
 
-        monkeypatch.setattr("vasp_sop.cli.main._advance_one_system", fail_advance)
+        monkeypatch.setattr("vasp_sop.core.orchestrator.advance_one_system", fail_advance)
         stop_calls = []
 
         def stop_once():
@@ -1690,8 +1703,8 @@ class TestBatchRunLoopObservability:
             assert len(stop_calls) == 1, "runtime-blocked system was retried"
             return False
 
-        monkeypatch.setattr("vasp_sop.cli.main.is_stop_requested", stop_once)
-        monkeypatch.setattr("vasp_sop.cli.main._crisp_active_dirs", lambda **kwargs: set())
+        monkeypatch.setattr("vasp_sop.core.batch_lifecycle.is_stop_requested", stop_once)
+        monkeypatch.setattr("vasp_sop.core.jobs.crisp_active_dirs", lambda **kwargs: set())
 
         from vasp_sop.cli.main import _batch_run
         _batch_run(root, poll_interval=0, dry_run=True, loop=True)
@@ -1706,7 +1719,7 @@ class TestBatchRunLoopObservability:
         _batch_run(tmp_path, loop=True)
 
         assert any(
-            record.name == "vasp_sop.cli.main"
+            record.name == "vasp_sop.core.orchestrator"
             and record.getMessage() == "No systems found."
             for record in caplog.records
         )
@@ -1730,7 +1743,7 @@ class TestBatchRunLoopObservability:
 
 
 class TestHandleUnconvergedPoll:
-    """_handle_unconverged_poll: CONTCAR restart without parameter changes."""
+    """BatchOrchestrator.handle_unconverged: CONTCAR restart without parameter changes."""
 
     def test_nsw_ibrion_preserved_on_restart(self, tmp_path: Path, monkeypatch):
         """CONTCAR→POSCAR must NOT rewrite NSW or IBRION (user policy)."""
@@ -1762,8 +1775,9 @@ class TestHandleUnconvergedPoll:
             lambda path: type("Job", (), {"task_name": "fake"}),  # return fake job
         )
 
-        from vasp_sop.cli.main import _handle_unconverged_poll
-        _handle_unconverged_poll(tmp_path)
+        from vasp_sop.core.orchestrator import BatchOrchestrator
+        orch = BatchOrchestrator(tmp_path, dry_run=True)
+        orch.handle_unconverged(tmp_path)
 
         # POSCAR replaced from CONTCAR
         assert (tmp_path / "POSCAR").read_text() == "contcar\n"

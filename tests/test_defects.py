@@ -1,10 +1,10 @@
-"""Tests for VASP convergence check — ``check_converged`` from vasp.io."""
+"""Tests for the VASP convergence verdict — ``vasp/convergence.py``."""
 
 from pathlib import Path
 
 import pytest
 
-from vasp_sop.vasp.io import check_converged
+from vasp_sop.vasp.convergence import convergence_verdict
 
 
 def _make_outcar(dir_path: Path, nsw: int = 50, ediffg: float = -0.03,
@@ -35,26 +35,26 @@ class TestVaspJobDone:
     def test_converged(self, tmp_path: Path):
         """Normal convergence: max_f < |EDIFFG|."""
         _make_outcar(tmp_path, nsw=50, last_ionic_step=5, max_force=0.01)
-        assert check_converged(tmp_path) is True
+        assert convergence_verdict(tmp_path).converged is True
 
     def test_unconverged(self, tmp_path: Path):
         """Completed but forces too high: max_f >= |EDIFFG|."""
         _make_outcar(tmp_path, nsw=50, last_ionic_step=50, max_force=0.5)
-        assert check_converged(tmp_path) is False
+        assert convergence_verdict(tmp_path).converged is False
 
     def test_truncated(self, tmp_path: Path):
         """VASP did not finish — no 'General timing and accounting'."""
         _make_outcar(tmp_path, completed=False)
-        assert check_converged(tmp_path) is False
+        assert convergence_verdict(tmp_path).converged is False
 
     def test_no_outcar(self, tmp_path: Path):
         """No OUTCAR file at all."""
-        assert check_converged(tmp_path) is False
+        assert convergence_verdict(tmp_path).converged is False
 
     def test_empty_outcar(self, tmp_path: Path):
         """OUTCAR exists but is empty."""
         (tmp_path / "OUTCAR").write_text("")
-        assert check_converged(tmp_path) is False
+        assert convergence_verdict(tmp_path).converged is False
 
     def test_missing_force_block(self, tmp_path: Path):
         """Relaxation OUTCAR has completion but no TOTAL-FORCE block → unconverged."""
@@ -62,7 +62,7 @@ class TestVaspJobDone:
         lines = ["  NSW = 50", "  EDIFFG = -0.03",
                  " General timing and accounting informations for this job:"]
         (tmp_path / "OUTCAR").write_text("\n".join(lines))
-        assert check_converged(tmp_path) is False
+        assert convergence_verdict(tmp_path).converged is False
 
     def test_many_atoms_converged(self, tmp_path: Path):
         """Multiple atoms, all forces below threshold."""
@@ -77,68 +77,68 @@ class TestVaspJobDone:
         lines.append("\n General timing and accounting informations for this job:\n")
         (tmp_path / "OUTCAR").write_text("\n".join(lines))
         # max_f = 0.025 < 0.03 → converged
-        assert check_converged(tmp_path) is True
+        assert convergence_verdict(tmp_path).converged is True
 
     def test_converged_output_subdir(self, tmp_path: Path):
         """OUTCAR in legacy output/ subdirectory still detected."""
         output_dir = tmp_path / "output"
         output_dir.mkdir()
         _make_outcar(output_dir, nsw=50, last_ionic_step=4, max_force=0.02)
-        assert check_converged(tmp_path) is True
+        assert convergence_verdict(tmp_path).converged is True
 
     def test_single_point_nsw1(self, tmp_path: Path):
         """NSW=1 single point → always converged if VASP finished."""
         (tmp_path / "INCAR").write_text("NSW = 1\nIBRION = -1\n")
         (tmp_path / "OUTCAR").write_text(
             " General timing and accounting informations for this job:\n")
-        assert check_converged(tmp_path) is True
+        assert convergence_verdict(tmp_path).converged is True
 
     def test_dfpt_dielectric_ibrion8(self, tmp_path: Path):
         """DFPT dielectric (IBRION=8) → always converged if VASP finished."""
         (tmp_path / "INCAR").write_text("NSW = 50\nIBRION = 8\nLEPSILON = .TRUE.\n")
         (tmp_path / "OUTCAR").write_text(
             " General timing and accounting informations for this job:\n")
-        assert check_converged(tmp_path) is True
+        assert convergence_verdict(tmp_path).converged is True
 
     def test_nsw_early_exit_converged(self, tmp_path: Path):
         """NSW=100, 50 ionic steps → converged (exited early = EDIFFG met)."""
         _make_outcar(tmp_path, nsw=100, last_ionic_step=50, max_force=0.01)
-        assert check_converged(tmp_path) is True
+        assert convergence_verdict(tmp_path).converged is True
 
     def test_nsw_exhausted_unconverged(self, tmp_path: Path):
         """NSW=50, 50 steps → unconverged (all NSW used)."""
         _make_outcar(tmp_path, nsw=50, last_ionic_step=50, max_force=0.5)
-        assert check_converged(tmp_path) is False
+        assert convergence_verdict(tmp_path).converged is False
 
     def test_md_ibrion0(self, tmp_path: Path):
         """IBRION=0 molecular dynamics → no relaxation check, converged."""
         (tmp_path / "INCAR").write_text("NSW = 100\nIBRION = 0\n")
         (tmp_path / "OUTCAR").write_text(
             " General timing and accounting informations for this job:\n")
-        assert check_converged(tmp_path) is True
+        assert convergence_verdict(tmp_path).converged is True
 
     def test_no_incar_fallback(self, tmp_path: Path):
         """No INCAR → treated as single point → converged if VASP finished."""
         (tmp_path / "OUTCAR").write_text(
             " General timing and accounting informations for this job:\n")
-        assert check_converged(tmp_path) is True
+        assert convergence_verdict(tmp_path).converged is True
 
     def test_incar_nsw_bump_does_not_false_converge(self, tmp_path: Path):
         """INCAR NSW raised for restart must not make exhausted OUTCAR look converged."""
         _make_outcar(tmp_path, nsw=50, last_ionic_step=50, max_force=0.08)
         # Simulate bulk CONTCAR restart bump
         (tmp_path / "INCAR").write_text("NSW = 250\nIBRION = 2\nEDIFFG = -0.03\n")
-        assert check_converged(tmp_path) is False
+        assert convergence_verdict(tmp_path).converged is False
 
     def test_force_ok_at_full_nsw_is_converged(self, tmp_path: Path):
         """n_ionic == NSW but max|F| <= |EDIFFG| → converged (avoid FN)."""
         _make_outcar(tmp_path, nsw=50, last_ionic_step=50, max_force=0.02)
-        assert check_converged(tmp_path) is True
+        assert convergence_verdict(tmp_path).converged is True
 
     def test_force_fail_even_if_early_exit_counts(self, tmp_path: Path):
         """If forces still high, do not trust n_ionic < NSW alone."""
         _make_outcar(tmp_path, nsw=100, last_ionic_step=40, max_force=0.2)
-        assert check_converged(tmp_path) is False
+        assert convergence_verdict(tmp_path).converged is False
 
 
 class TestVasprunRecovery:

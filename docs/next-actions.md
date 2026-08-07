@@ -52,7 +52,7 @@ class System:
     @property
     def target_dir(self) -> Path: ...  # resolve from cpd/ or unitcell/structure_opt
 
-    def phase(self) -> str: ...  # move _phase() logic here
+    def phase(self) -> str: ...  # land: see System.phase() in core/system.py (landed)
     def defect_dirs(self) -> list[Path]: ...  # filtered, no junk
 ```
 

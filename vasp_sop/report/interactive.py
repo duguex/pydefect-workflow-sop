@@ -20,6 +20,12 @@ Public API
 ``generate_interactive_html(system_dir) -> Path | None``
     Read inputs from *system_dir* and write ``formation_energy_interactive.html``.
     Returns ``None`` when the system is unsupported (e.g. single-vertex).
+
+The renderer never touches pydefect's raw dict shape: inputs arrive as
+:class:`~vasp_sop.defect.pydefect_adapter.DefectSummary` and
+:class:`~vasp_sop.defect.pydefect_adapter.CpdDiagram` value objects produced
+by the adapter, so an upstream schema rename fails loudly at the adapter
+instead of silently blanking the page.
 """
 
 from __future__ import annotations
@@ -28,8 +34,6 @@ import json
 import math
 from pathlib import Path
 from typing import Any
-
-import yaml
 
 # ── colour palette (stable, high-contrast) ─────────────────────────
 _COLORS: list[str] = [
@@ -48,32 +52,20 @@ _DOPANT_ELEMENTS: set[str] = {
 }
 
 
-def _read_json(path: Path) -> dict[str, Any]:
-    data = json.loads(path.read_text())
-    if not isinstance(data, dict):
-        raise TypeError(f"{path}: expected JSON object")
-    return data
-
-
 # ═════════════════════════════════════════════════════════════════════
-# Input extraction
+# Input extraction (typed — records come from the pydefect adapter)
 # ═════════════════════════════════════════════════════════════════════
 
-def _load_inputs(system_dir: Path) -> tuple[dict, dict, dict]:
-    """Return (defect_energy_summary, chem_pot_diag, target_vertices)."""
-    de = _read_json(system_dir / "defect" / "defect_energy_summary.json")
-    cpd = _read_json(system_dir / "cpd" / "chem_pot_diag.json")
-    tv = _load_target_vertices(system_dir / "cpd" / "target_vertices.yaml")
-    if not tv:
-        tv = _read_json(system_dir / "cpd" / "target_vertices.json")
-    return de, cpd, tv
+def _load_inputs(system_dir: Path) -> tuple[Any, Any]:
+    """Return (DefectSummary, CpdDiagram) parsed by the adapter."""
+    from vasp_sop.defect.pydefect_adapter import defect_summary, cpd_diagram
 
-
-def _load_target_vertices(path: Path) -> dict[str, Any] | None:
-    if not path.is_file():
-        return None
-    data = yaml.safe_load(path.read_text())
-    return data if isinstance(data, dict) else None
+    summary_path = system_dir / "defect" / "defect_energy_summary.json"
+    de = defect_summary(summary_path)
+    cpd = cpd_diagram(system_dir / "cpd", summary_path)
+    if de is None or cpd is None:
+        raise ValueError("missing interactive report inputs (summary or CPD)")
+    return de, cpd
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -81,7 +73,7 @@ def _load_target_vertices(path: Path) -> dict[str, Any] | None:
 # ═════════════════════════════════════════════════════════════════════
 
 def _extract_vertex_data(
-    de: dict, cpd: dict, tv: dict
+    cpd: Any,
 ) -> tuple[list[dict[str, float]], list[str], str, list[str]]:
     """Return (vertex_mu, vertex_names, host_name, vertex_elements).
 
@@ -90,16 +82,13 @@ def _extract_vertex_data(
     *vertex_names*: vertex labels (e.g. ``["A", "C", "D", "B"]``).
     *vertex_elements*: ordered list of host elements (from CPD).
     """
-    rcp_raw: dict = de.get("rel_chem_pots", tv)
+    rcp_raw: dict = cpd.rel_chem_pots
 
     # target phase name
-    target_keys = [k for k in cpd.get("polygons", {}) if k != "combos"]
-    host_name = tv.get("target", "") if isinstance(tv, dict) else ""
-    if not host_name:
-        host_name = de.get("title", target_keys[0] if target_keys else "host")
+    host_name = cpd.target
 
     # vertex elements (e.g. ["Br", "Cs", "Pb"] or ["Ba", "O"])
-    vertex_elements: list[str] = list(cpd.get("vertex_elements", []))
+    vertex_elements: list[str] = list(cpd.vertex_elements)
 
     # Collect per-vertex mu dicts — only keys with numeric chemical potentials
     _meta_keys = {"target", "chem_pot", "competing_phases", "impurity_phases"}
@@ -153,47 +142,32 @@ def _extract_vertex_data(
 # Defect data (filtered, corrected)
 # ═════════════════════════════════════════════════════════════════════
 
-def _build_defects(de: dict) -> dict[str, dict[str, Any]]:
+def _build_defects(summary: Any) -> dict[str, dict[str, Any]]:
     """Return {name: {charges: [{q, e0}, ...], delta: {elem: Δn}}}.
 
-    Applies corrections and filters shallow charge states (matching pydefect's
-    ``allow_shallow=False`` default).
+    Corrections are already aggregated into each ``FormationEnergy`` by the
+    adapter (the renderer never re-sums them); shallow charge states are
+    filtered (matching pydefect's ``allow_shallow=False`` default).
     """
-    shallow: dict[str, list[int]] = {}
-    for name, entry in de.get("defect_energies", {}).items():
-        if not isinstance(entry, dict) or "charges" not in entry:
-            continue
-        for i, q in enumerate(entry["charges"]):
-            e = _safe_entry(entry, i)
-            if e.get("is_shallow"):
-                shallow.setdefault(name, []).append(q)
+    shallow: dict[str, list[int]] = {
+        d.name: [fe.charge for fe in d.formation_energies if fe.is_shallow]
+        for d in summary.defects
+    }
 
     defects: dict[str, dict[str, Any]] = {}
-    for name, entry in de.get("defect_energies", {}).items():
-        if not isinstance(entry, dict) or "charges" not in entry:
-            continue
-        charges = entry["charges"]
-        atom_io: dict[str, int] = entry.get("atom_io", {})
-        skip_qs = shallow.get(name, [])
+    for d in summary.defects:
+        skip_qs = shallow.get(d.name, [])
         filtered: list[dict[str, float]] = []
-        for i, q in enumerate(charges):
-            if q in skip_qs:
+        for fe in d.formation_energies:
+            if fe.charge in skip_qs:
                 continue
-            e = _safe_entry(entry, i)
-            e0 = e.get("formation_energy", 0.0)
-            corr = sum(e.get("energy_corrections", {}).values())
-            filtered.append({"q": float(q), "e0": round(e0 + corr, 6)})
+            filtered.append({
+                "q": float(fe.charge),
+                "e0": round(fe.formation_energy + fe.correction, 6),
+            })
         if filtered:
-            defects[name] = {"charges": filtered, "delta": atom_io}
+            defects[d.name] = {"charges": filtered, "delta": dict(d.atom_io)}
     return defects
-
-
-def _safe_entry(entry: dict, i: int) -> dict:
-    energies = entry.get("defect_energies", [])
-    if isinstance(energies, list) and i < len(energies):
-        item = energies[i]
-        return item if isinstance(item, dict) else {}
-    return {}
 
 
 def _sort_defect_names(defects: dict[str, Any]) -> list[str]:
@@ -676,8 +650,8 @@ def generate_interactive_html(system_dir: Path) -> Path | None:
 
     Returns the output path, or ``None`` for unsupported systems.
     """
-    de, cpd, tv = _load_inputs(system_dir)
-    cbm_val = de.get("cbm", de.get("supercell_cbm"))
+    de, cpd = _load_inputs(system_dir)
+    cbm_val = de.cbm
     if cbm_val is None:
         import logging
         logging.getLogger(__name__).warning("No CBM found, skipping")
@@ -685,7 +659,7 @@ def generate_interactive_html(system_dir: Path) -> Path | None:
 
     try:
         vertex_mu, vertex_names, host_name, vertex_elements = _extract_vertex_data(
-            de, cpd, tv
+            cpd
         )
     except (ValueError, TypeError) as exc:
         import logging

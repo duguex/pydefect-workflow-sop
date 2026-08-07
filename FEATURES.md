@@ -297,7 +297,7 @@ VaspJob  (poll, done, task_name, work_dir)
 
 - `INCAR`, `POSCAR`, `POTCAR`, `KPOINTS`
 
-### Convergence Detection (`check_converged`)
+### Convergence Detection (`convergence_verdict`)
 
 See full rules: [`docs/architecture/06-convergence.md`](docs/architecture/06-convergence.md).
 
@@ -400,7 +400,7 @@ pipeline is skipped. Incomplete finals are demoted to
 
 ### Readiness / honesty
 
-- Ionic convergence via `check_converged` (OUTCAR NSW + force gate)
+- Ionic convergence via `convergence_verdict` (OUTCAR NSW + force gate)
 - `pydefect_vasp cr` / efnv require `vasprun.xml` or existing `calc_results.json`
   (issue #0010); OUTCAR-only dirs are tracked as `missing_vasprun`
 - `analyze_status.json` exposes `n_converged`, `n_corrected`, `n_dei`,
@@ -563,7 +563,7 @@ Unlike the legacy `StateStore` (file-based `.pipeline_state.json`), JobStore rec
 | `converged` | OUTCAR converged (ionic relaxation met or single-point completed) |
 | `failed` | Given up after max retries or VASP crash; `reason` field explains why |
 
-System-level phase (`STRUCTURE_OPT` → `COMPLETE`) is derived in real-time from JobStore + marker files by `_phase()`.
+System-level phase (`STRUCTURE_OPT` → `COMPLETE`) is derived in real-time from JobStore + marker files by `System.phase()`.
 
 ### Resume
 
@@ -578,7 +578,7 @@ VASP execution for defect supercells with automatic restart and recovery.
 
 ```
 For each defect directory:
-  1. Check convergence via OUTCAR (check_converged)
+  1. Check convergence via OUTCAR (`convergence_verdict`)
   2. If not converged and CONTCAR exists:
      a. Copy CONTCAR → POSCAR
      b. Set ISTART=1 in INCAR
@@ -624,7 +624,7 @@ When a defect is detected as stalled:
 | Section | Primary Source File(s) | Key Functions / Classes |
 |---|---|---|
 | 1 CLI | `vasp_sop/cli/main.py` | `main()`, 8 `_add_*_parser()` functions, 4 `_handle_*()` dispatch functions |
-| 2 Batch Orchestration | `vasp_sop/cli/main.py` | `_batch_run()`, `_advance_one_system()`, `_phase()` |
+| 2 Batch Orchestration | `vasp_sop/core/orchestrator.py` + `vasp_sop/core/system.py` | `BatchOrchestrator`, `advance_one_system()`, `System.phase()` |
 | 3 Configuration | `vasp_sop/core/config.py` | `PipelineConfig`, `generate_config()`, `DEFAULT_PLAN` |
 | 4 CPD | `vasp_sop/defect/cpd.py` | `run_cpd()`, `compute_chemical_potentials()`, `apply_molecule_corrections()`, `adjust_unstable_phase()` |
 | 5 Supercell & Defect Gen | `vasp_sop/defect/builder.py` | `build_all()`, `_build_supercell_doped()`, `_build_supercell_pydefect()`, `construct_complex_defects()` |

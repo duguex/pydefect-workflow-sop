@@ -171,7 +171,7 @@ class TestCpdMcePreflight:
         phase.joinpath("OUTCAR").write_text("energy\n")
         run_calls = []
         monkeypatch.setattr(
-            "vasp_sop.defect.cpd.run_local",
+            "vasp_sop.defect.pydefect_adapter.run_local",
             lambda *args, **kwargs: run_calls.append(args),
         )
 
@@ -201,7 +201,7 @@ class TestComputeChemicalPotentials:
             recorded_cmds.append(str(cmd))
             # Pretend every command succeeds.
 
-        monkeypatch.setattr("vasp_sop.defect.cpd.run_local", fake_run_local)
+        monkeypatch.setattr("vasp_sop.defect.pydefect_adapter.run_local", fake_run_local)
         monkeypatch.setattr(
             "vasp_sop.defect.cpd.adjust_unstable_phase",
             lambda *a, **kw: None,
@@ -233,7 +233,7 @@ class TestComputeChemicalPotentials:
                 raise RuntimeError("simulated matplotlib failure")
             # All other commands succeed.
 
-        monkeypatch.setattr("vasp_sop.defect.cpd.run_local", fake_run_local)
+        monkeypatch.setattr("vasp_sop.defect.pydefect_adapter.run_local", fake_run_local)
         monkeypatch.setattr(
             "vasp_sop.defect.cpd.adjust_unstable_phase",
             lambda *a, **kw: None,

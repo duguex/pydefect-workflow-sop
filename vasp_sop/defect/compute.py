@@ -6,7 +6,8 @@ import logging
 import time
 from pathlib import Path
 
-from vasp_sop.vasp.io import check_converged, input_ready, parse_max_force, restart_from_contcar
+from vasp_sop.vasp.io import input_ready, restart_from_contcar
+from vasp_sop.vasp.convergence import convergence_verdict, is_stalled
 from vasp_sop.core.jobs import move_crisp_outputs, submit_vasp
 from vasp_sop.vasp.errors import diagnose_failure, recommended_fix
 from vasp_sop.vasp.auto_heal import apply_correction
@@ -28,7 +29,7 @@ def run_vasp(defect_root: Path) -> None:
     def _collect_jobs() -> list[Path]:
         from vasp_sop.defect import is_valid_defect_dir
         result = []
-        if not check_converged(perfect_dir):
+        if not convergence_verdict(perfect_dir).converged:
             result.append(perfect_dir)
         for child in sorted(defect_root.iterdir()):
             if not child.is_dir() or child.name == "perfect":
@@ -37,7 +38,7 @@ def run_vasp(defect_root: Path) -> None:
                 continue
             if not input_ready(child):
                 continue
-            if not check_converged(child):
+            if not convergence_verdict(child).converged:
                 result.append(child)
         return result
 
@@ -52,11 +53,12 @@ def run_vasp(defect_root: Path) -> None:
         corrected: set[str] = set()
 
         for d in dirs:
-            if (d / "CONTCAR").is_file() and not check_converged(d):
+            if (d / "CONTCAR").is_file() and not convergence_verdict(d).converged:
                 dirname = d.name
                 old_f = prev_forces.get(dirname, 999.0)
-                cur_f = max(parse_max_force(d), 0.0)
-                if cur_f > 0 and cur_f >= old_f * 0.99:
+                _verdict = convergence_verdict(d)
+                cur_f = _verdict.max_f if _verdict.max_f is not None else 0.0
+                if is_stalled(old_f, cur_f):
                     stalled.add(dirname)
                     failure = diagnose_failure(d / "OUTCAR")
                     logger.info(

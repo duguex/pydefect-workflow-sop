@@ -2,9 +2,11 @@
 
 **VASP point-defect high-throughput pipeline orchestrator** (v0.1.0, MIT).
 
-Given a chemical formula and optional dopants, drives competing-phase search → chemical-potential diagram → unitcell properties → supercell/defect enumeration → VASP submission → formation-energy analysis.
+Given a mature scientific project directory (with its project configuration and existing calculation inputs), `vasp-sop` orchestrates the calculations and analyses required by the project: competing-phase search, chemical-potential analysis, unitcell properties, supercell/defect enumeration, VASP execution, and formation-energy analysis. Established scientific tools such as `pydefect`, `doped`, and `phonopy` are inputs/components of this orchestration layer.
 
-**Not** a DFT engine, materials database, or Slurm replacement. Submits work through **`crisp`** (or mpirun) and stores results via **[vasp-cache](https://github.com/duguex/vasp-cache)**.
+A chemical formula and optional dopants can be used by convenience commands to initialize a project configuration; they are not the core input model of the orchestration layer.
+
+**Not** a DFT engine, materials database, or Slurm replacement. Submits individual calculation units through **`crisp`** (or mpirun). Result reuse is integrated into CRISP through **[vasp-cache](https://github.com/duguex/vasp-cache)** and is linked separately as a component reference.
 
 ---
 

@@ -37,6 +37,65 @@ POSCAR_CACHE: Path = MP_CACHE / "poscars"
 CALC_CACHE: Path = SOP_ROOT / "calc_cache"
 
 
+class CacheWorker:
+    """Background thread draining a queue of result-put requests.
+
+    One instance per batch loop: converged calculation dirs are deferred to
+    it so the poll loop never blocks on cache writes.  A ``None`` sentinel
+    stops the worker.  ``flush()`` is a no-op kept for callers that used the
+    legacy inline worker's API.
+    """
+
+    def __init__(self) -> None:
+        import queue
+        import threading
+
+        self._queue: queue.Queue[Path | None] = queue.Queue()
+        self._thread: threading.Thread | None = None
+        self._seen: set[Path] = set()
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+
+        def _run() -> None:
+            while True:
+                wd = self._queue.get()
+                if wd is None:
+                    break
+                try:
+                    vasp_results_put(wd)
+                except Exception as exc:  # pragma: no cover - worker hygiene
+                    logger.warning("Failed to cache %s: %s", wd.name, exc)
+                finally:
+                    self._queue.task_done()
+
+        import threading
+
+        self._thread = threading.Thread(target=_run, daemon=True)
+        self._thread.start()
+
+    def put(self, wd: Path) -> None:
+        """Defer a converged dir for background caching (deduplicated)."""
+        if wd in self._seen:
+            return
+        self._seen.add(wd)
+        self.start()
+        self._queue.put(wd)
+
+    def flush(self) -> None:
+        pass
+
+    def join(self) -> None:
+        """Drain pending puts and stop the worker thread."""
+        if self._thread is None:
+            return
+        self._queue.join()
+        self._queue.put(None)
+        self._thread.join()
+        self._thread = None
+
+
 def lattice_too_large(src_dir: Path) -> bool:
     """True if max lattice vector exceeds MAX_LATTICE."""
     if MAX_LATTICE is None:

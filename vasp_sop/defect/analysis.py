@@ -19,14 +19,13 @@ from __future__ import annotations
 
 import json
 import logging
-import shlex
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
 
 from vasp_sop.core.config import PipelineConfig
-from vasp_sop.core.jobs import run_local
+from vasp_sop.defect import pydefect_adapter as _pdad
 
 logger = logging.getLogger(__name__)
 
@@ -65,10 +64,10 @@ def _eligible_dirs(defect_dirs: list[Path]) -> list[Path]:
 
 
 def _converged_dirs(dirs: list[Path]) -> list[Path]:
-    """Subset of *dirs* that pass ionic check_converged."""
-    from vasp_sop.vasp.io import check_converged
+    """Subset of *dirs* whose convergence verdict passes."""
+    from vasp_sop.vasp.convergence import convergence_verdict
 
-    return [d for d in dirs if check_converged(d)]
+    return [d for d in dirs if convergence_verdict(d).converged]
 
 
 def _cr_ready_dirs(dirs: list[Path]) -> list[Path]:
@@ -78,35 +77,6 @@ def _cr_ready_dirs(dirs: list[Path]) -> list[Path]:
         if (d / "calc_results.json").is_file() or _has_vasprun(d):
             ready.append(d)
     return ready
-
-
-def _quote_names(dirs: list[Path]) -> str:
-    return " ".join(shlex.quote(d.name) for d in dirs)
-
-def _run_dir_batches(
-    command_prefix: str,
-    dirs: list[Path],
-    *,
-    cwd: Path,
-    command_suffix: str = "",
-    batch_size: int = 20,
-    timeout: int = 600,
-) -> None:
-    """Run a per-directory pydefect step in bounded, resumable batches.
-
-    ``command_prefix`` includes ``-d``. ``command_suffix`` should include its
-    own leading space when non-empty. A failed batch raises to the caller;
-    previous batches' per-directory artifacts remain for the next rerun.
-    """
-    if batch_size < 1:
-        raise ValueError("batch_size must be >= 1")
-    for start in range(0, len(dirs), batch_size):
-        batch = dirs[start:start + batch_size]
-        run_local(
-            f"{command_prefix} {_quote_names(batch)}{command_suffix}",
-            cwd=cwd,
-            timeout=timeout,
-        )
 
 
 
@@ -383,7 +353,7 @@ def analyze(
     if not perfect_cr.is_file():
         if _has_vasprun(perfect_dir):
             try:
-                run_local("pydefect_vasp cr -d perfect", cwd=defect_root)
+                _pdad.perfect_calc_results(defect_root)
             except Exception as exc:
                 logger.warning("pydefect_vasp cr perfect failed: %s", exc)
         else:
@@ -393,10 +363,7 @@ def analyze(
             )
     if need_cr:
         try:
-            _run_dir_batches(
-                "pydefect_vasp cr -d", need_cr,
-                cwd=defect_root, batch_size=20, timeout=600,
-            )
+            _pdad.calc_results(need_cr, defect_root)
         except Exception as exc:
             logger.warning("pydefect_vasp cr (subset) failed: %s", exc)
     else:
@@ -417,17 +384,8 @@ def analyze(
     cr_present = [d for d in converged_now if (d / "calc_results.json").is_file()]
 
     # ── normalize calc_results: override ionic_conv from OUTCAR evidence ──
-    from vasp_sop.defect.pydefect_adapter import _override_ionic_conv
-    import json as _json
-    _cr_norm = 0
-    for _d in cr_present:
-        try:
-            _data = _json.loads((_d / "calc_results.json").read_text())
-            if not _data.get("ionic_conv"):
-                if _override_ionic_conv(_d, _data):
-                    _cr_norm += 1
-        except Exception as _exc:
-            logger.warning("normalize cr failed for %s: %s", _d.name, _exc)
+    # Single reconciliation point — lives in the adapter.
+    _cr_norm = _pdad.normalize_ionic_convergence(cr_present, defect_root)
     if _cr_norm:
         logger.info("Normalized ionic_conv for %d calc_results.json", _cr_norm)
 
@@ -447,15 +405,11 @@ def analyze(
         )
     if perfect_cr.is_file() and unitcell_yaml.is_file() and efnv_targets:
         try:
-            _run_dir_batches(
-                "pydefect efnv -d", efnv_targets,
-                cwd=defect_root,
-                command_suffix=(
-                    f" -pcr {shlex.quote(str(perfect_cr))}"
-                    f" -u {shlex.quote(str(unitcell_yaml))}"
-                ),
-                batch_size=20,
-                timeout=600,
+            _pdad.efnv(
+                efnv_targets, defect_root,
+                perfect_calc_results=perfect_cr,
+                unitcell_yaml=unitcell_yaml,
+                force=True,
             )
         except Exception as exc:
             logger.warning("pydefect efnv failed (partial corrections): %s", exc)
@@ -468,7 +422,7 @@ def analyze(
     dsi_targets = [d for d in converged_now if not (d / "defect_structure_info.json").is_file()]
     if dsi_targets:
         try:
-            _run_dir_batches("pydefect dsi -d", dsi_targets, cwd=defect_root, timeout=600)
+            _pdad.defect_structure_info(dsi_targets, defect_root)
         except Exception as exc:
             logger.warning("pydefect dsi failed: %s", exc)
     else:
@@ -479,7 +433,7 @@ def analyze(
     ]
     if dvf_targets:
         try:
-            _run_dir_batches("pydefect_util dvf -d", dvf_targets, cwd=defect_root, timeout=600)
+            _pdad.defect_volume_fraction(dvf_targets, defect_root)
         except Exception:
             logger.warning(
                 "pydefect_util dvf failed (may be slow on NFS or missing inputs), "
@@ -492,26 +446,18 @@ def analyze(
         logger.info("perfect_band_edge_state.json exists, skipping pydefect_vasp pbes.")
     else:
         try:
-            run_local("pydefect_vasp pbes -d perfect", cwd=defect_root)
+            _pdad.pbes(defect_root)
         except Exception as exc:
             logger.warning("pydefect_vasp pbes failed (vasprun?): %s", exc)
 
     # ── beoi + bes on converged only, batched (#0024)
     if pbes_json.is_file() and converged_now:
-        q_pbes = shlex.quote(str(pbes_json))
-        suffix = f" -pbes {q_pbes}"
         try:
-            _run_dir_batches(
-                "pydefect_vasp beoi -d", converged_now,
-                cwd=defect_root, command_suffix=suffix, timeout=600,
-            )
+            _pdad.band_edge_occupation(converged_now, defect_root, pbes_json)
         except Exception as exc:
             logger.warning("pydefect_vasp beoi failed: %s", exc)
         try:
-            _run_dir_batches(
-                "pydefect bes -d", converged_now,
-                cwd=defect_root, command_suffix=suffix, timeout=600,
-            )
+            _pdad.band_edge_states(converged_now, defect_root, pbes_json)
         except Exception as exc:
             logger.warning("pydefect bes failed: %s", exc)
 
@@ -531,16 +477,11 @@ def analyze(
                 ", ".join(d.name for d in not_corrected[:20]),
             )
         if corrected:
-            _run_dir_batches(
-                "pydefect dei -d", corrected,
-                cwd=defect_root,
-                command_suffix=(
-                    f" -pcr {shlex.quote(str(perfect_cr))}"
-                    f" -u {shlex.quote(str(unitcell_yaml))}"
-                    f" -s {shlex.quote(str(standard_energies))}"
-                ),
-                batch_size=20,
-                timeout=600,
+            _pdad.defect_energy_info(
+                corrected, defect_root,
+                perfect_calc_results=perfect_cr,
+                unitcell_yaml=unitcell_yaml,
+                standard_energies=standard_energies,
             )
 
     # ── des / cs
@@ -571,33 +512,28 @@ def analyze(
                 "correction+calc_results); skip summary."
             )
         elif allow_final_summary:
-            run_local(
-                f"pydefect des -d {_quote_names(ready_for_des)} "
-                f"-u {shlex.quote(str(unitcell_yaml))} "
-                f"-pbes {shlex.quote(str(pbes_json))} "
-                f"-t {shlex.quote(str(target_vertices))}",
-                cwd=defect_root,
+            # Real CLI failures abort the final-summary path (the adapter
+            # re-raises with raise_on_error); a missing summary file is not
+            # an error here — the closing classify/demote handles it.
+            _pdad.defect_energy_summary(
+                defect_root, ready_for_des,
+                unitcell_yaml, pbes_json, target_vertices,
+                raise_on_error=True,
             )
         else:
-            try:
-                run_local(
-                    f"pydefect des -d {_quote_names(ready_for_des)} "
-                    f"-u {shlex.quote(str(unitcell_yaml))} "
-                    f"-pbes {shlex.quote(str(pbes_json))} "
-                    f"-t {shlex.quote(str(target_vertices))}",
-                    cwd=defect_root,
-                )
-            except Exception as exc:
-                logger.warning("partial des failed: %s", exc)
+            summary = _pdad.defect_energy_summary(
+                defect_root, ready_for_des,
+                unitcell_yaml, pbes_json, target_vertices,
+            )
+            if summary is None:
+                logger.warning("partial des failed: no summary produced")
             status_tmp = classify_analyze_status(defect_root)
             if status_tmp != "full":
                 _demote_incomplete_summary(defect_root, "partial")
 
     if perfect_cr.is_file() and ready_for_des and allow_final_summary:
-        run_local(
-            f"pydefect cs -d {_quote_names(ready_for_des)} "
-            f"-pcr {shlex.quote(str(perfect_cr))}",
-            cwd=defect_root,
+        _pdad.correction_summary(
+            ready_for_des, defect_root, perfect_calc_results=perfect_cr,
         )
 
     # ── pe
@@ -610,10 +546,7 @@ def analyze(
         else:
             for vertex in vertices:
                 try:
-                    run_local(
-                        f"pydefect pe -d defect_energy_summary.json -l {vertex}",
-                        cwd=defect_root,
-                    )
+                    _pdad.plot_energy_vertex(defect_root, vertex)
                 except Exception as exc:
                     logger.warning(
                         "pydefect pe failed for vertex %s (often empty "

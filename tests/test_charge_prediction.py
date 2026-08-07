@@ -89,7 +89,7 @@ class TestChargePredictionFallback:
             defect_in = defect_root / "defect_in.yaml"
             defect_in.write_text(yaml.dump({"V_Ga": [-3, -2, -1, 0, 1]}))
 
-        monkeypatch.setattr("vasp_sop.defect.builder.run_local", fake_run_local)
+        monkeypatch.setattr("vasp_sop.defect.pydefect_adapter.run_local", fake_run_local)
         monkeypatch.setattr("builtins.__import__", mock_import)
 
         _generate_defect_list(defect_root, cfg)
@@ -114,7 +114,7 @@ class TestChargePredictionFallback:
             defect_in = defect_root / "defect_in.yaml"
             defect_in.write_text(yaml.dump({"V_N": [-1, 0, 1]}))
 
-        monkeypatch.setattr("vasp_sop.defect.builder.run_local", fake_run_local)
+        monkeypatch.setattr("vasp_sop.defect.pydefect_adapter.run_local", fake_run_local)
 
         _generate_defect_list(defect_root, cfg)
 
@@ -131,7 +131,7 @@ class TestChargePredictionFallback:
 
         calls = []
         monkeypatch.setattr(
-            "vasp_sop.defect.builder.run_local",
+            "vasp_sop.defect.pydefect_adapter.run_local",
             lambda cmd, **kw: calls.append(cmd),
         )
 
@@ -215,7 +215,7 @@ class TestChargePredictionDoped:
                 yaml.dump({"V_Ga": [-3, 0]})
             )
 
-        monkeypatch.setattr("vasp_sop.defect.builder.run_local", fake_run_local)
+        monkeypatch.setattr("vasp_sop.defect.pydefect_adapter.run_local", fake_run_local)
 
         _generate_defect_list(defect_root, cfg)
 
@@ -248,7 +248,7 @@ class TestChargePredictionDoped:
                 yaml.dump({"V_Ga": [-3, 0]})
             )
 
-        monkeypatch.setattr("vasp_sop.defect.builder.run_local", fake_run_local)
+        monkeypatch.setattr("vasp_sop.defect.pydefect_adapter.run_local", fake_run_local)
 
         _generate_defect_list(defect_root, cfg)
 

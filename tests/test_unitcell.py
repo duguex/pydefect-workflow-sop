@@ -24,7 +24,7 @@ class TestBuildUnitcellYaml:
         (tmp_path / "dielectric" / "OUTCAR").write_text("converged\n")
 
         recorded = []
-        monkeypatch.setattr("vasp_sop.defect.unitcell.run_local",
+        monkeypatch.setattr("vasp_sop.defect.pydefect_adapter.run_local",
                            lambda cmd, cwd, **kw: recorded.append(cmd))
 
         from vasp_sop.defect.unitcell import build_unitcell_yaml
@@ -46,7 +46,7 @@ class TestBuildUnitcellYaml:
         (uc / "band" / "vasprun.xml").write_text("<xml/>\n")
         recorded = []
         monkeypatch.setattr(
-            "vasp_sop.defect.unitcell.run_local",
+            "vasp_sop.defect.pydefect_adapter.run_local",
             lambda cmd, cwd, **kw: recorded.append(cmd),
         )
 
@@ -70,7 +70,7 @@ class TestBuildUnitcellYaml:
                 raise RuntimeError("simulated")
 
         recorded = []
-        monkeypatch.setattr("vasp_sop.defect.unitcell.run_local",
+        monkeypatch.setattr("vasp_sop.defect.pydefect_adapter.run_local",
                            lambda cmd, cwd, **kw: recorded.append(cmd) or
                            fake_run(cmd, cwd, **kw) if "vise pdf" in str(cmd) else None)
 
@@ -89,7 +89,7 @@ class TestBuildUnitcellYaml:
             if "pydefect_vasp u" in cmd:
                 raise RuntimeError("pydefect_vasp u failed: zero band gap")
 
-        monkeypatch.setattr("vasp_sop.defect.unitcell.run_local", fail_zero_gap)
+        monkeypatch.setattr("vasp_sop.defect.pydefect_adapter.run_local", fail_zero_gap)
 
         from vasp_sop.defect.unitcell import build_unitcell_yaml
         build_unitcell_yaml(tmp_path, PipelineConfig(formula="SeO2"))

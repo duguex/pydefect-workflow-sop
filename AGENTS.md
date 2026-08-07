@@ -12,11 +12,11 @@
 
 ## Always-on
 
-- **What this is**: **vasp-sop** — VASP **point-defect high-throughput orchestrator** (not a DFT code, not Slurm, not a materials DB). Depends on **vasp-cache**. Submits via **`crisp`** / mpirun.  
-- **State machine** (batch): `STRUCTURE_OPT → COMPETING → CHEM_POT_DIAGRAM → UNITCELL_DEFECT → COMPLETE` via `_advance_one_system`.
+- **What this is**: **vasp-sop** — VASP **point-defect high-throughput orchestrator** (not a DFT code, not Slurm, not a materials DB). It receives mature project directories and composes established scientific tools such as `pydefect`, `doped`, and `phonopy`. Individual prepared calculation directories are submitted via **`crisp`** / mpirun. Result reuse is a CRISP-integrated capability, separately documented as **`vasp-cache`**.
+- **State machine** (batch): `STRUCTURE_OPT → COMPETING → CHEM_POT_DIAGRAM → UNITCELL_DEFECT → COMPLETE` via `core/orchestrator.py::advance_one_system`, driven by `core/orchestrator.py::BatchOrchestrator`; the canonical phase machine is `core/system.py::System.phase()` (persisted `state.json` wins per `docs/adr/0001`).
 - **Three-wave VASP schedule**: Wave1 structure_opt → Wave2 competing+UC+defects parallel → Wave3 pydefect post.  
 - **CLI**: `vasp-sop batch run .` (`--dry-run`), `defect build`, `cache status|query|…`, `materials fetch`.  
-- **Config**: `plan.yaml` per project; JobStore (SQLite) for job state; vasp-cache for results cache.  
+- **Config**: `plan.yaml` per mature project; JobStore (SQLite) for orchestration state; result-reuse operations are exposed as a CRISP-integrated capability.
 - **Tests**: `python3 -m pytest tests/` — isolate cache paths; heavy patching of VASP/crisp in unit tests.  
 - **Do not invent** new phase names or store layouts — match code + FEATURES.md.  
 - **Secrets / MP API**: use env; do not commit keys. Production trees (e.g. `2025_undergo_spin_defect`) stay outside this package tree.  
@@ -53,3 +53,17 @@ vasp-sop cache status --verbose
 | Agent rules | This file only (until user adds CLAUDE) |
 | Phase names / CLI | `vasp_sop/` package ↔ FEATURES ↔ this file’s always-on |
 | Human README | quick start ↔ real CLI |
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues; use the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Five canonical roles mapped 1:1 to label strings (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.

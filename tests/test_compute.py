@@ -4,6 +4,22 @@ from pathlib import Path
 
 import pytest
 
+from vasp_sop.vasp.convergence import (
+    ConvergenceVerdict,
+    convergence_verdict as _real_verdict,
+)
+
+
+def _mk_verdict(predicate, p):
+    """Verdict with a mocked converged decision but real force evidence.
+
+    Mirrors legacy behaviour where the convergence *gate* was mocked while
+    max|F| came from the real OUTCAR read.
+    """
+    return ConvergenceVerdict(
+        predicate(p), "mock", max_f=_real_verdict(p).max_f
+    )
+
 
 def _make_minimal_outcar(d: Path, max_force: float = 0.01) -> None:
     """Write a minimal OUTCAR with convergence marker."""
@@ -88,8 +104,8 @@ class TestRunVasp:
 
         submitted = []
         monkeypatch.setattr(
-            "vasp_sop.defect.compute.check_converged",
-            lambda p: "perfect" in str(p),
+            "vasp_sop.defect.compute.convergence_verdict",
+            lambda p: _mk_verdict(lambda q: "perfect" in str(q), p),
         )
         monkeypatch.setattr(
             "vasp_sop.defect.compute.input_ready",
@@ -133,8 +149,8 @@ class TestRunVasp:
         corrected = []
         converge_count = [0]
         monkeypatch.setattr("vasp_sop.defect.compute.input_ready", lambda p: True)
-        monkeypatch.setattr("vasp_sop.defect.compute.check_converged",
-                           lambda p: "perfect" in str(p) or converge_count[0] > 1)
+        monkeypatch.setattr("vasp_sop.defect.compute.convergence_verdict",
+                           lambda p: _mk_verdict(lambda q: "perfect" in str(q) or converge_count[0] > 1, p))
         monkeypatch.setattr("vasp_sop.defect.compute.submit_vasp",
                            lambda p: (submitted.append(p), converge_count.__setitem__(0, converge_count[0] + 1), _mock_job(p))[-1])
         monkeypatch.setattr("vasp_sop.defect.compute.move_crisp_outputs", lambda p: None)
@@ -160,8 +176,8 @@ class TestRunVasp:
         defect = _make_defect_dir(tmp_path, "Va_X_0")
         _make_stalled_outcar(defect, max_force=0.5)
 
-        monkeypatch.setattr("vasp_sop.defect.compute.check_converged",
-                           lambda p: "perfect" in str(p))
+        monkeypatch.setattr("vasp_sop.defect.compute.convergence_verdict",
+                           lambda p: _mk_verdict(lambda q: "perfect" in str(q), p))
         submitted = []
         monkeypatch.setattr("vasp_sop.defect.compute.input_ready", lambda p: True)
         monkeypatch.setattr("vasp_sop.defect.compute.submit_vasp",

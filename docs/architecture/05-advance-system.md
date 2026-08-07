@@ -40,7 +40,7 @@ for task in ("band", "dos", "dielectric"):
 if defect_energy_summary.json 不存在:
     for 每个缺陷子目录:
         if 输入不齐全:                          跳过
-        if check_converged:                     记录 converged，跳过
+        if convergence_verdict(...).converged:  记录 converged，跳过
         if JobStore "submitted":                 跳过
         if JobStore "converged":                 跳过
         _submit_or_skip

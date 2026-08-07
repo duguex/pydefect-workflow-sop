@@ -9,7 +9,7 @@ from typing import Any
 
 import yaml
 
-from vasp_sop.vasp.io import check_converged
+from vasp_sop.vasp.convergence import convergence_verdict
 
 
 _MARKER = "reached required accuracy - stopping structural energy minimisation"
@@ -63,7 +63,7 @@ def _is_converged(path: Path) -> bool:
     if _MARKER in text:
         return True
     try:
-        return check_converged(path)
+        return convergence_verdict(path).converged
     except Exception:
         return False
 
@@ -129,7 +129,7 @@ def _convergence_evidence(path: Path) -> dict[str, Any]:
     converged = _MARKER in text
     if not converged:
         try:
-            converged = check_converged(path)
+            converged = convergence_verdict(path).converged
         except Exception:
             converged = False
     value = "completed/converged" if converged else "output present/not converged"

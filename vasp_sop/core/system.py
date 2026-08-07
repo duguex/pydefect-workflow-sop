@@ -1,16 +1,19 @@
 """System model — data holder + phase detection for a single material system.
 
 Introduced in issue #103.  This is intentionally a thin data holder with
-filesystem-based phase inference; it is **not** a god class.  The batch
-orchestrator in ``cli/main.py`` still uses its own ``_phase()`` for now
-(migration is tracked in issue #95).
+filesystem-based phase inference; it is **not** a god class.  It is the
+canonical phase machine: the former ``cli/main.py::_phase`` clone is
+deleted, and every phase decision (status, advance, batch loop) reads
+``System.phase()``.
 
 State markers
 -------------
 ``System.phase()`` checks ``{root}/state.json`` first and falls back to
 filesystem inference when the file is absent or unreadable.
 ``System.save_phase(phase)`` writes the phase key into ``state.json``
-without disturbing any other keys that may already be present.
+without disturbing any other keys that may already be present. Per
+``docs/adr/0001``, the persisted phase is authoritative: the advance path
+persists every post-cycle phase, so polls resume from memory.
 """
 
 from __future__ import annotations
@@ -76,7 +79,7 @@ class System:
         Identified by matching the MP-ID suffix extracted from
         ``config.poscar_src`` (e.g. ``"MP mp-830"`` → ``mp-830``).
         """
-        mpid = self._mpid
+        mpid = self.mpid
         if not mpid:
             return None
         cpd = self.cpd_dir
@@ -89,7 +92,7 @@ class System:
         return None
 
     @property
-    def _mpid(self) -> str | None:
+    def mpid(self) -> str | None:
         src: str = getattr(self.config, "poscar_src", "") or ""
         if src.startswith("MP mp-"):
             return "mp-" + src.split("mp-", 1)[1]
@@ -120,19 +123,32 @@ class System:
 
     # ── Phase detection ────────────────────────────────────────────────
 
-    def phase(self) -> str:
+    def phase(self, js: Any = None) -> str:
         """Return the current pipeline phase for this system.
 
         Resolution order:
         1. ``{root}/state.json`` ``"phase"`` key (explicit state marker).
-        2. Filesystem inference (mirrors ``_phase()`` in ``cli/main.py``).
+        2. Filesystem inference.
+
+        *js* is an optional :class:`~vasp_sop.core.job_store.JobStore`;
+        when omitted a fresh store is opened for the inference (and closed
+        again).  Pass one in to share a connection across many queries.
         """
         state = self._read_state()
         if state is not None:
             phase_val = state.get("phase")
             if phase_val:
                 return str(phase_val)
-        return self._infer_phase()
+        return self._infer_phase(js=js)
+
+    def derive_phase(self, js: Any = None) -> str:
+        """Fresh filesystem inference, ignoring persisted memory.
+
+        Used after a phase's work completes to compute the *next* phase (the
+        entry query uses :meth:`phase`, which honours persisted memory).  The
+        caller persists the result via :meth:`save_phase` (ADR 0001).
+        """
+        return self._infer_phase(js=js)
 
     def save_phase(self, phase: str) -> None:
         """Persist *phase* into ``{root}/state.json``.
@@ -167,17 +183,27 @@ class System:
         except (OSError, json.JSONDecodeError):
             return None
 
-    def _infer_phase(self) -> str:
+    def _infer_phase(self, js: Any = None) -> str:
         """Filesystem-based phase inference.
 
-        Mirrors ``_phase()`` in ``cli/main.py`` (issue #103 — the
-        canonical implementation will move here; ``cli/main.py`` migration
-        is tracked in issue #95).
+        The canonical phase machine (the former ``cli/main.py::_phase``
+        clone is deleted; see ``docs/adr/0001`` for the persistence rule).
+        *js* is an optional shared JobStore connection.
         """
         from vasp_sop.vasp.io import input_ready
         from vasp_sop.core.job_store import JobStore
 
-        _js = JobStore()
+        own_store = js is None
+        _js = js if not own_store else JobStore()
+        try:
+            return self._infer_phase_locked(_js, input_ready=input_ready)
+        finally:
+            if own_store:
+                close = getattr(_js, "close", None)
+                if close is not None:
+                    close()
+
+    def _infer_phase_locked(self, _js: Any, *, input_ready) -> str:
         td = self.target_dir
         if td is None:
             return NO_TARGET
@@ -258,7 +284,7 @@ class System:
         # ── Normal upstream progression (CPD not yet complete) ──────────
         if _js.latest(str(td.resolve())) != "converged":
             return STRUCTURE_OPT
-        if self._competing_dirs(_js) or self._competing_blockers(_js):
+        if self.competing_dirs(_js) or self.competing_blockers(_js):
             return COMPETING
         return CHEM_POT_DIAGRAM
 
@@ -293,9 +319,10 @@ class System:
                 return True
         return False
 
-    def _competing_dirs(self, store: Any) -> list[Path]:
+    def competing_dirs(self, store: Any) -> list[Path]:
         """Competing phases that still need VASP submission or retry."""
-        from vasp_sop.vasp.io import check_converged, input_ready
+        from vasp_sop.vasp.convergence import convergence_verdict
+        from vasp_sop.vasp.io import input_ready
         from vasp_sop.core.jobs import crisp_terminal_status
 
         td = self.target_dir
@@ -322,13 +349,13 @@ class System:
                 continue
             if not input_ready(pd):
                 continue
-            if check_converged(pd):
+            if convergence_verdict(pd).converged:
                 continue
             if current not in ("converged", "submitted"):
                 result.append(pd)
         return result
 
-    def _competing_blockers(self, store: Any) -> list[Path]:
+    def competing_blockers(self, store: Any) -> list[Path]:
         """Lifecycle states that block entering CPD post-processing."""
         from vasp_sop.vasp.io import input_ready
         from vasp_sop.core.jobs import crisp_terminal_status

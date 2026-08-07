@@ -100,6 +100,65 @@ def _make_minimal_tv() -> dict:
     return {"target": "CsPbBr3"}
 
 
+def _des_summary(de: dict) -> Any:
+    """Convert a defect_energy_summary-like dict into a DefectSummary."""
+    from vasp_sop.defect.pydefect_adapter import (
+        DefectEnergy, DefectSummary, FormationEnergy,
+    )
+
+    defects = []
+    for name, entry in de.get("defect_energies", {}).items():
+        if not isinstance(entry, dict) or "charges" not in entry:
+            continue
+        energies = entry.get("defect_energies", [])
+        fes = []
+        for i, q in enumerate(entry["charges"]):
+            item = {}
+            if isinstance(energies, list) and i < len(energies) and isinstance(energies[i], dict):
+                item = energies[i]
+            corr = item.get("energy_corrections", {})
+            if not isinstance(corr, dict):
+                corr = {}
+            fes.append(FormationEnergy(
+                charge=int(q),
+                formation_energy=float(item.get("formation_energy", 0.0)),
+                is_shallow=bool(item.get("is_shallow")),
+                correction=float(sum(corr.values())),
+            ))
+        defects.append(DefectEnergy(
+            name=name,
+            charges=[int(q) for q in entry["charges"]],
+            atom_io=dict(entry.get("atom_io", {})),
+            formation_energies=fes,
+        ))
+    cbm = de.get("cbm", de.get("supercell_cbm"))
+    return DefectSummary(
+        title=str(de.get("title", "")),
+        cbm=float(cbm) if isinstance(cbm, (int, float)) else None,
+        defects=defects,
+    )
+
+
+def _cpd_record(cpd: dict, tv: dict, de: dict) -> Any:
+    """Convert (chempot_diag, target_vertices, summary) dicts into a CpdDiagram."""
+    from vasp_sop.defect.pydefect_adapter import CpdDiagram
+
+    host = tv.get("target", "") if isinstance(tv, dict) else ""
+    target_keys = [k for k in cpd.get("polygons", {}) if k != "combos"]
+    if not host:
+        host = de.get("title", target_keys[0] if target_keys else "host")
+    rcp = de.get("rel_chem_pots", tv)
+    if not isinstance(rcp, dict):
+        rcp = {}
+    return CpdDiagram(
+        target=str(host),
+        vertex_elements=[str(e) for e in cpd.get("vertex_elements", [])],
+        polygons=dict(cpd.get("polygons", {}) or {}),
+        rel_chem_pots=rcp,
+        title=str(de.get("title", "")),
+    )
+
+
 def _write_system(tmp_path: Path) -> Path:
     """Write a minimal CsPbBr3 system and return its path."""
     root = tmp_path / "CsPbBr3"
@@ -124,9 +183,8 @@ def _write_system(tmp_path: Path) -> Path:
 
 class TestBuildDefects:
     def test_applies_corrections(self):
-        """E0 values include energy_corrections."""
-        de = _make_minimal_des()
-        defects = _build_defects(de)
+        """E0 values include energy_corrections (aggregated in the record)."""
+        defects = _build_defects(_des_summary(_make_minimal_des()))
         # Bi_Pb1 q=-1: formation_energy=-0.6 + pc=0.10 = -0.5
         bi = defects["Bi_Pb1"]
         charges = {c["q"]: c["e0"] for c in bi["charges"]}
@@ -136,8 +194,7 @@ class TestBuildDefects:
 
     def test_filters_shallow_charge_states(self):
         """Shallow charge states are excluded."""
-        de = _make_minimal_des()
-        defects = _build_defects(de)
+        defects = _build_defects(_des_summary(_make_minimal_des()))
         # Va_Br1: q=0 is shallow → excluded
         va = defects["Va_Br1"]
         qs = [c["q"] for c in va["charges"]]
@@ -150,7 +207,7 @@ class TestBuildDefects:
         # Make Va_Br1 entirely shallow
         for e in de["defect_energies"]["Va_Br1"]["defect_energies"]:
             e["is_shallow"] = True
-        defects = _build_defects(de)
+        defects = _build_defects(_des_summary(de))
         assert "Va_Br1" not in defects
         # Bi_Pb1 still present
         assert "Bi_Pb1" in defects
@@ -165,7 +222,7 @@ class TestExtractPolygon:
         de = _make_minimal_des()
         cpd = _make_minimal_cpd()
         tv = _make_minimal_tv()
-        vertex_mu, names, host, elems = _extract_vertex_data(de, cpd, tv)
+        vertex_mu, names, host, elems = _extract_vertex_data(_cpd_record(cpd, tv, de))
         assert host == "CsPbBr3"
         assert len(vertex_mu) == 4
         assert len(names) == 4
@@ -175,7 +232,7 @@ class TestExtractPolygon:
         de = _make_minimal_des()
         cpd = _make_minimal_cpd()
         tv = _make_minimal_tv()
-        _, names, _, _ = _extract_vertex_data(de, cpd, tv)
+        _, names, _, _ = _extract_vertex_data(_cpd_record(cpd, tv, de))
         assert set(names) == {"A", "B", "C", "D"}
 
     def test_cyclic_order_includes_all_vertices(self):
@@ -183,7 +240,7 @@ class TestExtractPolygon:
         de = _make_minimal_des()
         cpd = _make_minimal_cpd()
         tv = _make_minimal_tv()
-        vertex_mu, names, _, _ = _extract_vertex_data(de, cpd, tv)
+        vertex_mu, names, _, _ = _extract_vertex_data(_cpd_record(cpd, tv, de))
         assert len(vertex_mu) == 4
         assert len(names) == 4
         assert set(names) == {"A", "B", "C", "D"}
@@ -196,7 +253,7 @@ class TestExtractPolygon:
         de = json.loads((p / "defect" / "defect_energy_summary.json").read_text())
         cpd = json.loads((p / "cpd" / "chem_pot_diag.json").read_text())
         tv = yaml.safe_load((p / "cpd" / "target_vertices.yaml").read_text())
-        vertex_mu, _, _, vertex_elements = _extract_vertex_data(de, cpd, tv)
+        vertex_mu, _, _, vertex_elements = _extract_vertex_data(_cpd_record(cpd, tv, de))
         assert len(vertex_mu) == 4
 
         def _cross(o, a, b):
@@ -310,10 +367,10 @@ class TestHtmlTemplate:
 class TestLoadInputs:
     def test_reads_all_three(self, tmp_path):
         root = _write_system(tmp_path)
-        de, cpd, tv = _load_inputs(root)
-        assert de["title"] == "CsPbBr3"
-        assert "polygons" in cpd
-        assert tv["target"] == "CsPbBr3"
+        de, cpd = _load_inputs(root)
+        assert de.title == "CsPbBr3"
+        assert cpd.polygons
+        assert cpd.target == "CsPbBr3"
 
     def test_raises_on_missing_json(self, tmp_path):
         root = tmp_path / "Foo"
@@ -322,7 +379,7 @@ class TestLoadInputs:
         (root / "defect").mkdir()
         (root / "cpd" / "target_vertices.yaml").write_text("target: X\n")
         (root / "cpd" / "chem_pot_diag.json").write_text("{}")
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(ValueError):
             _load_inputs(root)
 
 
@@ -401,12 +458,12 @@ class TestInteractiveVsPydefect:
         from vasp_sop.report.interactive import (
             _build_defects, _extract_vertex_data, _load_inputs,
         )
-        de, cpd, tv = _load_inputs(p)
+        de, cpd = _load_inputs(p)
         defects = _build_defects(de)
         vertex_mu, poly_names, host_name, vertex_elements = _extract_vertex_data(
-            de, cpd, tv
+            cpd
         )
-        ref_mu_raw = de.get("rel_chem_pots", tv)
+        ref_mu_raw = cpd.rel_chem_pots
         ref_mu = next(iter(ref_mu_raw.values())) if ref_mu_raw else {}
         return {
             "defects": defects,

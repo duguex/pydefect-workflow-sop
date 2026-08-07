@@ -179,11 +179,16 @@ class TestPhaseInference:
         import vasp_sop.core.job_store as js_mod
         import vasp_sop.core.jobs as jobs_mod
         import vasp_sop.vasp.io as io_mod
+        import vasp_sop.vasp.convergence as conv_mod
+        from vasp_sop.vasp.convergence import ConvergenceVerdict
 
         fake = FakeJobStore(job_states or {})
         monkeypatch.setattr(js_mod, "JobStore", lambda: fake, raising=False)
         monkeypatch.setattr(jobs_mod, "crisp_terminal_status", lambda d: None, raising=False)
-        monkeypatch.setattr(io_mod, "check_converged", lambda d: False, raising=False)
+        monkeypatch.setattr(
+            conv_mod, "convergence_verdict",
+            lambda d: ConvergenceVerdict(False, "mock"), raising=False,
+        )
         monkeypatch.setattr(io_mod, "input_ready", lambda d: False, raising=False)
         for attr, val in io_overrides.items():
             monkeypatch.setattr(io_mod, attr, val, raising=False)

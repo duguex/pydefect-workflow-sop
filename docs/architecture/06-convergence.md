@@ -1,6 +1,6 @@
-# 收敛判定 (`check_converged`)
+# 收敛判定 (`convergence_verdict`)
 
-实现：`vasp_sop/vasp/io.py::check_converged`。  
+实现：`vasp_sop/vasp/convergence.py::convergence_verdict`。  
 任务级产物完整性：`check_task_complete`（band/dos/dielectric）。
 
 ---
@@ -45,7 +45,7 @@ reached required accuracy - stopping structural energy minimisation
 
 ```text
 NSW ≤ 1  或  IBRION ∉ {1,2,3}
-  → 有 General timing → check_converged True
+  → 有 General timing → convergence_verdict True
   → 不使用 max|F| / EDIFFG 离子判据
 ```
 
@@ -72,7 +72,7 @@ NSW ≤ 1  或  IBRION ∉ {1,2,3}
 | 路径 | 角色 |
 |------|------|
 | `{calc}/output/*` | 旧 crisp 拉回路径 |
-| 查找 | `check_converged` / `has_vasprun` 仍：**根优先，再 `output/`** |
+| 查找 | `convergence_verdict` / `has_vasprun` 仍：**根优先，再 `output/`** |
 | 上提 | `move_crisp_outputs`：按 **mtime 择优** 合并到根，然后删除 `output/` |
 
 ### 混合树注意

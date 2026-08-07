@@ -19,7 +19,8 @@ from pymatgen.core import Composition
 
 from vasp_sop.materials import list_phases
 from vasp_sop.vasp.io import check_complete, prepare_inputs
-from vasp_sop.core.jobs import VaspJob, run_local, submit_vasp
+from vasp_sop.defect import pydefect_adapter as _pdad
+from vasp_sop.core.jobs import VaspJob, submit_vasp
 
 logger = logging.getLogger(__name__)
 
@@ -351,9 +352,7 @@ def compute_chemical_potentials(
     # ── composition_energies.yaml ────────────────────────────────────
     if not target_vertices.is_file():
         # Collect only the phase directories validated for mce.
-        dirs = " ".join(preflight.phase_dirs)
-        escaped = dirs.replace("(", r"\(").replace(")", r"\)")
-        run_local(f"pydefect_vasp mce -d {escaped}", cwd=cpd_root)
+        _pdad.mce(cpd_root, preflight.phase_dirs)
 
         if composition_energies.is_file():
             apply_molecule_corrections(
@@ -376,7 +375,7 @@ def compute_chemical_potentials(
 
     # ── relative_energies.yaml / standard_energies.yaml ──────────────
     if not target_vertices.is_file():
-        run_local("pydefect sre", cwd=cpd_root)
+        _pdad.sre(cpd_root)
 
     # ── Chem-pot diagram (energy adjustment for unstable phases) ─────
     if not target_vertices.is_file():
@@ -401,7 +400,7 @@ def compute_chemical_potentials(
             # Plotting is a diagnostic only — a failure here must NOT block
             # the rest of the pipeline. See issues/0002-skip-4d-cpd-diagram.md.
             try:
-                run_local("pydefect pc", cwd=cpd_root)
+                _pdad.chem_pot_diagram(cpd_root)
             except Exception as exc:
                 logger.warning(
                     "pydefect pc failed for %s (non-fatal): %s",
@@ -493,7 +492,7 @@ def adjust_unstable_phase(
     current_energy = origin_energy
 
     try:
-        run_local(f'pydefect cv -t "{target_string}"', cwd=cpd_root)
+        _pdad.chemical_vertices(cpd_root, target_string)
     except RuntimeError:
         logger.warning(
             "pydefect cv failed (common for single-element or unstable systems). "
@@ -546,7 +545,7 @@ def _energy_adjustment_loop(
         with open(relative_energies_path, "w") as f:
             yaml.dump(rel_energies, f, default_flow_style=None)
         try:
-            run_local(f'pydefect cv -t "{target_string}"', cwd=cpd_root)
+            _pdad.chemical_vertices(cpd_root, target_string)
         except RuntimeError:
             continue
     return current_energy

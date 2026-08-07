@@ -7,7 +7,8 @@ Also supports a tracked table for active job directories awaiting
 completion checks.
 
 System-level phase is derived from per-calculation states + marker
-files in ``_phase()`` (see ``vasp_sop/cli/main.py``).
+files by :class:`vasp_sop.core.system.System` (the canonical phase
+machine; ``cli/main.py::_phase`` was deleted).
 """
 
 from __future__ import annotations
@@ -173,15 +174,16 @@ def calc_done_on_disk(path: Path, *, task_type: str = "") -> bool:
     """True if *path* is complete enough to record as converged.
 
     Unitcell band/dos/dielectric use :func:`check_task_complete`; all other
-    calcs use ionic :func:`check_converged`.
+    calcs use ionic :func:`vasp_sop.vasp.convergence.convergence_verdict`.
     """
+    from vasp_sop.vasp.convergence import convergence_verdict
+
     path = Path(path)
     name = task_type or path.name
     if name in ("band", "dos", "dielectric"):
         from vasp_sop.vasp.io import check_task_complete
         return check_task_complete(path, name)
-    from vasp_sop.vasp.io import check_converged
-    return check_converged(path)
+    return convergence_verdict(path).converged
 
 
 def record_if_done(

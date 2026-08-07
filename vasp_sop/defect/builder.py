@@ -12,7 +12,7 @@ import yaml
 
 from vasp_sop.core.config import PipelineConfig
 from vasp_sop.vasp.io import prepare_inputs
-from vasp_sop.core.jobs import run_local
+from vasp_sop.defect import pydefect_adapter as _pdad
 
 logger = logging.getLogger(__name__)
 
@@ -88,12 +88,7 @@ def _build_supercell_pydefect(defect_root: Path, uc_contcar: Path, config: Pipel
     ``doped`` happy path is the canonical way to satisfy a minimum
     image-distance constraint. See issue #15.
     """
-    cmd = (
-        f"pydefect s -p {uc_contcar} "
-        f"--max_atoms {config.supercell_max_atoms} "
-        f"--min_atoms {config.supercell_min_atoms}"
-    )
-    run_local(cmd, cwd=defect_root, timeout=600)
+    _pdad.make_supercell(defect_root, uc_contcar, config)
 
 
 def _build_supercell_doped(defect_root: Path, uc_contcar: Path, config: PipelineConfig) -> None:
@@ -179,7 +174,7 @@ def _handle_interstitials(defect_root: Path, config: PipelineConfig) -> None:
         return
 
     logger.info("Candidates for interstitials (from %s):", dos_extrema)
-    run_local(f"pydefect_print {dos_extrema}", cwd=defect_root)
+    _pdad.print_dos_extrema(defect_root, dos_extrema)
 
     if not config.interstitial_indices:
         raise RuntimeError(
@@ -189,10 +184,8 @@ def _handle_interstitials(defect_root: Path, config: PipelineConfig) -> None:
         )
 
     interstitial_sites = " ".join(config.interstitial_indices)
-    run_local(
-        f"pydefect_util ai --local_extrema {dos_extrema} -i {interstitial_sites}",
-        cwd=defect_root,
-    )
+    _pdad.atom_indices(defect_root, dos_extrema, interstitial_sites)
+
 
 
 def _generate_defect_list(defect_root: Path, config: PipelineConfig) -> None:
@@ -233,11 +226,7 @@ def _generate_defect_list(defect_root: Path, config: PipelineConfig) -> None:
 
 def _generate_defect_list_pydefect(defect_root: Path, config: PipelineConfig) -> None:
     """Fallback: run ``pydefect ds`` to produce ``defect_in.yaml``."""
-    if config.dopant_elements:
-        cmd = f"pydefect ds -d {' '.join(config.dopant_elements)}"
-    else:
-        cmd = "pydefect ds"
-    run_local(cmd, cwd=defect_root)
+    _pdad.defect_list(defect_root, config.dopant_elements)
 
 
 def _generate_defect_list_doped(defect_root: Path, config: PipelineConfig) -> None:
@@ -307,7 +296,7 @@ def _generate_structures(defect_root: Path) -> None:
         logger.info("Defect structures already generated, skipping.")
         return
 
-    run_local("pydefect_vasp de", cwd=defect_root)
+    _pdad.defect_structures(defect_root)
     flag.touch()
 
 

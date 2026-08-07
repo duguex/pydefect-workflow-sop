@@ -21,6 +21,7 @@ from vasp_sop.core.jobs import (
     wait_all,
     run_local,
 )
+from vasp_sop.defect import pydefect_adapter as _pdad
 
 logger = logging.getLogger(__name__)
 
@@ -28,11 +29,6 @@ _UNITCELL_DIR = "unitcell"
 _STRUCTURE_OPT = "structure_opt"
 _UNITCELL_YAML = "unitcell.yaml"
 
-_VISE_TASKS: dict[str, str] = {
-    "band": "vise vs -x pbesol -t band",
-    "dos": "vise vs -x pbesol -t dos -k 2 -uis LVTOT True LAECHG True KPAR 1",
-    "dielectric": "vise vs -x pbesol -t dielectric_dfpt -k 2",
-}
 
 
 def _prepare_all_inputs(uc_root: Path, target_dir: Path, config: PipelineConfig) -> None:
@@ -59,7 +55,7 @@ def _prepare_all_inputs(uc_root: Path, target_dir: Path, config: PipelineConfig)
     task_cmd_overrides = f" -x {config.functional} {encut_opt}"
     pp_suffix = f" --options set_hubbard_u True {pp_opt}"
 
-    for task_name in _VISE_TASKS:
+    for task_name in _pdad.vise_task_types():
         task_dir = uc_root / task_name
         task_dir.mkdir(exist_ok=True)
         if not input_ready(task_dir):
@@ -67,7 +63,7 @@ def _prepare_all_inputs(uc_root: Path, target_dir: Path, config: PipelineConfig)
         # Replace the hardcoded ``-x pbesol`` baked into the template with the
         # config's functional, and inject ENCUT after the existing -uis flags
         # (or as the first -uis token if none present).
-        base = _VISE_TASKS[task_name].replace("-x pbesol", task_cmd_overrides, 1)
+        base = _pdad.VISE_TASKS[task_name].replace("-x pbesol", task_cmd_overrides, 1)
         if config.encut and "ENCUT" not in base:
             base = base + f" -uis ENCUT {config.encut}"
         cmd = base + pp_suffix
@@ -77,7 +73,7 @@ def _prepare_all_inputs(uc_root: Path, target_dir: Path, config: PipelineConfig)
 
 def _get_task_dirs(uc_root: Path, config: PipelineConfig) -> list[Path]:
     """Return [band_dir, dos_dir, dielectric_dir] for submission."""
-    return [uc_root / t for t in _VISE_TASKS]
+    return [uc_root / t for t in _pdad.vise_task_types()]
 
 
 
@@ -154,30 +150,25 @@ def build_unitcell_yaml(uc_root: Path, config: PipelineConfig) -> None:
 
     if band_vasprun.is_file():
         try:
-            run_local("cd band && vise pb", cwd=uc_root)
+            _pdad.run_in_subdir(uc_root, "band", "vise pb")
         except Exception:
             logger.warning("vise pb failed (likely no band structure to plot), skipping band plot.")
 
     if dos_dir.is_dir():
         try:
-            run_local("cd dos && vise pd", cwd=uc_root)
+            _pdad.run_in_subdir(uc_root, "dos", "vise pd")
         except Exception:
             logger.warning("vise pd failed (likely missing vasprun.xml), skipping DOS plot.")
         try:
-            run_local(
-                "cd dos && pydefect_vasp le -v AECCAR0 AECCAR2 "
-                "-i all_electron_charge",
-                cwd=uc_root,
-            )
+            _pdad.local_extrema(uc_root)
         except Exception:
             logger.warning("pydefect_vasp le failed (AECCAR missing), skipping local-extrema.")
 
     if dielectric_dir.is_dir():
         try:
-            run_local("cd dielectric && vise pdf", cwd=uc_root)
+            _pdad.run_in_subdir(uc_root, "dielectric", "vise pdf")
         except Exception:
             logger.warning("vise pdf failed (likely no band gap), skipping dielectric plot.")
-
     cmd = (
         f"pydefect_vasp u -vb {shlex.quote(str(band_vasprun))} "
         f"-ob {shlex.quote(str(band_outcar))} "
@@ -186,7 +177,13 @@ def build_unitcell_yaml(uc_root: Path, config: PipelineConfig) -> None:
         f"-n {shlex.quote(config.formula)}"
     )
     try:
-        run_local(cmd, cwd=uc_root)
+        _pdad.unitcell_yaml(
+            uc_root,
+            band_vasprun=band_vasprun,
+            band_outcar=band_outcar,
+            dielectric_outcar=dielectric_outcar,
+            formula=config.formula,
+        )
     except Exception as exc:
         logger.warning(
             "pydefect_vasp u failed (likely zero band gap or missing "

@@ -24,7 +24,7 @@ def _force_converged(monkeypatch, dirs=None):
 
 def test_run_dir_batches_covers_targets_once(tmp_path: Path, monkeypatch):
     """Large pydefect steps split explicit dirs into bounded batches (#0024)."""
-    from vasp_sop.defect import analysis as an
+    from vasp_sop.defect import pydefect_adapter as _pdad
 
     dirs = []
     for i in range(45):
@@ -33,10 +33,10 @@ def test_run_dir_batches_covers_targets_once(tmp_path: Path, monkeypatch):
         dirs.append(d)
     commands = []
     monkeypatch.setattr(
-        an, "run_local", lambda cmd, cwd, **kw: commands.append((cmd, kw)),
+        _pdad, "run_local", lambda cmd, cwd, **kw: commands.append((cmd, kw)),
     )
 
-    an._run_dir_batches(
+    _pdad._run_batches(
         "pydefect dsi -d", dirs, cwd=tmp_path, batch_size=20, timeout=123,
     )
 
@@ -94,7 +94,7 @@ class TestAnalyze:
         (tmp_path / "perfect").mkdir()
         calls = []
         monkeypatch.setattr(
-            "vasp_sop.defect.analysis.run_local",
+            "vasp_sop.defect.pydefect_adapter.run_local",
             lambda *a, **kw: calls.append(a),
         )
         from vasp_sop.defect.analysis import analyze
@@ -119,7 +119,7 @@ class TestAnalyze:
             (tmp_path / name).write_text("x: 1\n")
         recorded = []
         monkeypatch.setattr(
-            "vasp_sop.defect.analysis.run_local",
+            "vasp_sop.defect.pydefect_adapter.run_local",
             lambda cmd, cwd=None, **kw: recorded.append(cmd),
         )
         monkeypatch.setattr(
@@ -151,7 +151,7 @@ class TestAnalyze:
         for name in ("u.yaml", "se.yaml", "tv.yaml"):
             (tmp_path / name).write_text("x: 1\n")
         monkeypatch.setattr(
-            "vasp_sop.defect.analysis.run_local", lambda *a, **kw: None,
+            "vasp_sop.defect.pydefect_adapter.run_local", lambda *a, **kw: None,
         )
         monkeypatch.setattr(
             "vasp_sop.core.cache.restore_from_cache", lambda p: False,
@@ -191,7 +191,7 @@ class TestAnalyze:
                 (good / "correction.json").write_text("{}\n")
                 (good / "defect_energy_info.json").write_text("{}\n")
 
-        monkeypatch.setattr("vasp_sop.defect.analysis.run_local", fake_run)
+        monkeypatch.setattr("vasp_sop.defect.pydefect_adapter.run_local", fake_run)
         monkeypatch.setattr(
             "vasp_sop.core.cache.restore_from_cache", lambda p: False,
         )
@@ -245,7 +245,7 @@ class TestAnalyze:
                 (bad / "defect_structure_info.json").write_text("{}\n")
                 return
 
-        monkeypatch.setattr("vasp_sop.defect.analysis.run_local", fake_run)
+        monkeypatch.setattr("vasp_sop.defect.pydefect_adapter.run_local", fake_run)
         monkeypatch.setattr(
             "vasp_sop.core.cache.restore_from_cache", lambda p: False,
         )
@@ -290,7 +290,7 @@ class TestAnalyze:
             if "efnv" in cmd:
                 (good / "correction.json").write_text("{}\n")
 
-        monkeypatch.setattr("vasp_sop.defect.analysis.run_local", fake_run)
+        monkeypatch.setattr("vasp_sop.defect.pydefect_adapter.run_local", fake_run)
         monkeypatch.setattr(
             "vasp_sop.core.cache.restore_from_cache", lambda p: False,
         )
@@ -347,7 +347,7 @@ class TestAnalyze:
                 (d / "defect_structure_info.json").write_text("{}\n")
                 return
 
-        monkeypatch.setattr("vasp_sop.defect.analysis.run_local", fake_run)
+        monkeypatch.setattr("vasp_sop.defect.pydefect_adapter.run_local", fake_run)
         monkeypatch.setattr(
             "vasp_sop.core.cache.restore_from_cache", lambda p: False,
         )

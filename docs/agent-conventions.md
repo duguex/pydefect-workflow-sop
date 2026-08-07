@@ -4,7 +4,7 @@
 > **Entrypoint**: root [`AGENTS.md`](../AGENTS.md).
 > **Human start**: root [`README.md`](../README.md).
 
-> 架构文档: [`README.md`](README.md) — `_batch_run` 流程、`_phase()` 阶段机、`_advance_one_system` 各阶段操作、JobStore 状态模型、CONTCAR 重启逻辑。
+> 架构文档: [`README.md`](README.md) — `BatchOrchestrator.run` 流程、`System.phase()` 阶段机、`advance_one_system` 各阶段操作、JobStore 状态模型、CONTCAR 重启逻辑。
 
 ## 项目定位
 
@@ -57,7 +57,7 @@ submitting and tracking hundreds of VASP jobs through the HPC cluster scheduler
 CLI (vasp-sop command)
   │
   ├── batch run .          ← multi-system pipeline orchestrator
-  │   └── _advance_one_system()  ← per-system state machine
+  │   └── advance_one_system()  ← per-system state machine (core/orchestrator.py)
   │       ├── STRUCTURE_OPT → submit structure_opt VASP
   │       ├── COMPETING      → submit/check competing phases
   │       ├── CHEM_POT_DIAGRAM → run chemical potential diagram
@@ -70,7 +70,7 @@ CLI (vasp-sop command)
 
 ### Three-Wave VASP Scheduling
 
-The batch orchestrator in `cli/main.py` (`_batch_run` / `_advance_one_system`) uses a three-wave model:
+The batch orchestrator in `core/orchestrator.py` (`BatchOrchestrator` / `advance_one_system`) uses a three-wave model:
 
 | Wave | Phase | Work |
 |------|-------|------|
@@ -85,7 +85,7 @@ sub-tasks + defect calculations). Wave 3 runs after all Wave 2 jobs complete.
 
 | Module | Path | Role |
 |--------|------|------|
-| CLI | `vasp_sop/cli/main.py` | argparse dispatch (8 subcommands), batch orchestrator |
+| CLI | `vasp_sop/cli/main.py` | argparse dispatch (8 subcommands); thin wrapper around `BatchOrchestrator` |
 | Config | `vasp_sop/core/config.py` | `PipelineConfig` dataclass, `plan.yaml` I/O, `generate_config()` |
 | Jobs | `vasp_sop/core/jobs.py` | VASP submission (crisp/local), `VaspJob` hierarchy, `run_local()` |
 | State | `vasp_sop/core/job_store.py` | JobStore (SQLite) — per-calculation VASP job states (`submitted`/`converged`/`failed`), plus `tracked` table for active submissions |
@@ -94,9 +94,9 @@ sub-tasks + defect calculations). Wave 3 runs after all Wave 2 jobs complete.
 | CPD | `vasp_sop/defect/cpd.py` | Competing phase diagram pipeline |
 | Unitcell | `vasp_sop/defect/unitcell.py` | Perfect-cell band/DOS/dielectric |
 | Analysis | `vasp_sop/defect/analysis.py` | Formation energy post-processing (10 pydefect steps) |
-| Batch orchestrator | `vasp_sop/cli/main.py` | Three-wave VASP orchestration (`_batch_run`, `_advance_one_system`) |
+| Batch orchestrator | `vasp_sop/core/orchestrator.py` | Three-wave VASP orchestration (`BatchOrchestrator`, `advance_one_system`, `wave1_optimize`/`wave2_submit`/`wave3_postprocess`) |
 | Compute | `vasp_sop/defect/compute.py` | Defect VASP execution with CONTCAR restart loop |
-| VASP I/O | `vasp_sop/vasp/io.py` | `check_converged()`, `prepare_inputs()`, `restart_from_contcar()` |
+| VASP I/O | `vasp_sop/vasp/io.py` | `check_task_complete()`, `prepare_inputs()`, `restart_from_contcar()`, `has_vasprun()` |
 | VASP Errors | `vasp_sop/vasp/errors.py` | Error pattern diagnosis (12 modes), fix suggestions |
 | Materials | `vasp_sop/materials/mp.py` | MP API integration, parameter inference |
 
@@ -118,7 +118,7 @@ plan.yaml → PipelineConfig
 
 ### Batch Pipeline State Machine
 
-Each system cycles through phases determined by `_phase()`:
+Each system cycles through phases determined by `System.phase()`:
 
 ```
 STRUCTURE_OPT → COMPETING → CHEM_POT_DIAGRAM → UNITCELL_DEFECT → COMPLETE
@@ -127,16 +127,16 @@ STRUCTURE_OPT → COMPETING → CHEM_POT_DIAGRAM → UNITCELL_DEFECT → COMPLET
 - Phase is determined by filesystem state (OUTCAR presence, convergence, target_vertices.yaml, etc.)
 - `--dry-run` does one pass and exits (no VASP submission)
 - Cache hit in STRUCTURE_OPT/COMPETING skips submission (saves `.target_submit.json` with `"cached"`)
-- Errors in `_advance_one_system` are caught per-system — one failure doesn't block others
+- Errors in `advance_one_system` are caught per-system — one failure doesn't block others
 
 ## Key Directories
 
 ```
 vasp_sop/
-├── cli/main.py          ← CLI entry point (1609 lines)
+├── cli/main.py          ← CLI entry point; thin wrapper around `BatchOrchestrator`
 ├── core/                ← Config, jobs, state, cache
 ├── defect/              ← Pipeline stages (cpd, unitcell, builder, compute, analysis, _legacy)
-├── vasp/                ← VASP I/O layer + error diagnosis (check_converged, prepare_inputs, diagnose_failure)
+├── vasp/                ← VASP I/O layer + error diagnosis (convergence, prepare_inputs, diagnose_failure)
 ├── materials/           ← Materials Project integration
 └── __init__.py          ← version = "0.1.0"
 
@@ -225,15 +225,15 @@ vasp-sop cache status --verbose
 ### Error Handling
 
 - CLI commands catch top-level exceptions and log via `logger.exception()`
-- Batch pipeline: errors in `_advance_one_system` are caught per-system, not propagated
+- Batch pipeline: errors in `advance_one_system` are caught per-system, not propagated
 - `run_local()` raises `RuntimeError` on non-zero exit or timeout
-- `check_converged()` returns `bool`, never raises
+- `convergence_verdict()` returns `ConvergenceVerdict` dataclass; never raises
 - Cache functions catch exceptions during pymatgen parsing, log warnings, store what they can
 - Per-system isolation: one failing system doesn't block others in batch mode
 
 ### Execution Model
 
-- **Serial batch advancement**: systems advance one-by-one in `_batch_run` — no process pool, no orphan workers
+- **Serial batch advancement**: systems advance one-by-one in `BatchOrchestrator.run` — no process pool, no orphan workers
 - **Serial input generation**: VASP input file preparation runs in serial (avoids NFS thundering-herd on shared storage)
 - **VASP-level parallelism**: individual VASP jobs each request multiple MPI ranks via Slurm (`crisp submit -n TASK_NAME`)
 - VASP jobs run independently per-phase, submitted via crisp or local subprocess
@@ -267,7 +267,7 @@ subdir). Slurm stdout/stderr log: **`{slurm_job_id}.log`**.
 
 ### VASP Convergence Detection
 
-`check_converged()` in `vasp_sop/vasp/io.py` (detail: `docs/architecture/06-convergence.md`):
+`convergence_verdict()` in `vasp_sop/vasp/convergence.py` (detail: `docs/architecture/06-convergence.md`):
 
 - **Relaxation vs non-relaxation:** force/EDIFFG only for ionic relax
   (`IBRION∈{1,2,3}` and `NSW>1`). Single-point / DFPT / NSW≤1 use job completion
@@ -365,16 +365,16 @@ Notable gaps:
 
 | File | Purpose |
 |------|---------|
-| `vasp_sop/cli/main.py` | CLI entry, batch orchestrator, `_advance_one_system` |
+| `vasp_sop/cli/main.py` | CLI entry; thin wrapper calling `BatchOrchestrator.run` and `advance_one_system` |
 | `vasp_sop/core/config.py` | `PipelineConfig`, `plan.yaml` generation |
 | `vasp_sop/core/cache.py` | vasp-cache v0.3.0 adapter |
 | `vasp_sop/core/job_store.py` | JobStore, per-calculation state tracking |
 | `vasp_sop/defect/builder.py` | Supercell + defect generation |
 | `vasp_sop/defect/cpd.py` | Chemical potential diagram |
-| `vasp_sop/cli/main.py` | Batch orchestrator / three-wave schedule |
+| `vasp_sop/core/orchestrator.py` | Batch orchestrator / three-wave schedule (`BatchOrchestrator`, `advance_one_system`, `wave1_optimize`/`wave2_submit`/`wave3_postprocess`) |
 | `vasp_sop/defect/compute.py` | Defect VASP execution with CONTCAR restart + error diagnosis |
 | `vasp_sop/defect/analysis.py` | Formation energy post-processing |
-| `vasp_sop/vasp/io.py` | `check_converged()`, `prepare_inputs()`, `restart_from_contcar()` |
+| `vasp_sop/vasp/io.py` | `check_task_complete()`, `prepare_inputs()`, `restart_from_contcar()`, `has_vasprun()` (convergence moved to `vasp/convergence.py`) |
 | `vasp_sop/vasp/errors.py` | VASP error pattern diagnosis (12 modes), `diagnose_failure()` |
 | `vasp_sop/materials/mp.py` | MP query + parameter inference |
 | `pyproject.toml` | Dependencies, entry point, pytest config |

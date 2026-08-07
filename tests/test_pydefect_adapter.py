@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from vasp_sop.defect import pydefect_adapter as pa
+from vasp_sop.vasp.convergence import ConvergenceVerdict
 
 
 # ── calc_results ────────────────────────────────────────────────────────────
@@ -233,9 +234,8 @@ class TestOverrideIonicConv:
         d = tmp_path / "Va_Ba_0"
         d.mkdir()
         (d / "calc_results.json").write_text(json.dumps({"ionic_conv": False, "e": -10}))
-        check_calls = []
-        orig = pa.check_converged
-        pa.check_converged = lambda p: True
+        orig = pa.convergence_verdict
+        pa.convergence_verdict = lambda p: ConvergenceVerdict(True, "mock")
         try:
             data = json.loads((d / "calc_results.json").read_text())
             result = pa._override_ionic_conv(d, data)
@@ -250,13 +250,13 @@ class TestOverrideIonicConv:
         d = tmp_path / "Va_Ba_0"
         d.mkdir()
         (d / "calc_results.json").write_text(json.dumps({"ionic_conv": True, "e": -10}))
-        orig = pa.check_converged
-        pa.check_converged = lambda p: True
+        orig = pa.convergence_verdict
+        pa.convergence_verdict = lambda p: ConvergenceVerdict(True, "mock")
         try:
             data = json.loads((d / "calc_results.json").read_text())
             result = pa._override_ionic_conv(d, data)
         finally:
-            pa.check_converged = orig
+            pa.convergence_verdict = orig
         assert result is False
         written = json.loads((d / "calc_results.json").read_text())
         assert written["ionic_conv"] is True
@@ -265,13 +265,13 @@ class TestOverrideIonicConv:
         d = tmp_path / "Va_Ba_0"
         d.mkdir()
         (d / "calc_results.json").write_text(json.dumps({"ionic_conv": False, "e": -10}))
-        orig = pa.check_converged
-        pa.check_converged = lambda p: False
+        orig = pa.convergence_verdict
+        pa.convergence_verdict = lambda p: ConvergenceVerdict(False, "mock")
         try:
             data = json.loads((d / "calc_results.json").read_text())
             result = pa._override_ionic_conv(d, data)
         finally:
-            pa.check_converged = orig
+            pa.convergence_verdict = orig
         assert result is False
         written = json.loads((d / "calc_results.json").read_text())
         assert written["ionic_conv"] is False
