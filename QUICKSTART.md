@@ -38,9 +38,9 @@ export MP_API_KEY="your-api-key-here"
 
 > 也支持 `PMG_MAPI_KEY` 环境变量（pymatgen 格式）。
 
-### vasp-cache 检查
+### CRISP 集成的结果复用检查
 
-vasp-sop 依赖 [vasp-cache](https://github.com/duguex/vasp-cache) 存储计算结果。确认缓存目录可用：
+结果复用是 CRISP 的集成能力，`vasp-cache` 作为该能力的独立组件参考；`vasp-sop` 通过项目/计算流程使用它。确认 CRISP 集成的缓存目录可用：
 
 ```bash
 vasp-sop cache status
@@ -79,7 +79,7 @@ mkdir my_project && cd my_project
 vasp-sop defect init -f GaN -d Mg
 ```
 
-这会在当前目录生成 `plan.yaml` 配置文件。编辑该文件调整参数（functional、supercell 大小等）。
+这一步只是用化学式/掺杂便捷初始化成熟项目的 `plan.yaml`；后续 `vasp-sop batch run` 的顶层输入仍是项目目录。编辑该文件调整参数（functional、supercell 大小等）。
 
 ### 步骤 3：干运行（不提交 VASP）
 

@@ -14,11 +14,11 @@
 ## 1. 项目目标
 
 1. 解构、模块化现有成熟第一性原理计算项目
-2. 构建不同种类的vasp计算的sop
-3. 通过编排实现更复杂的计算项目:
-   - 点缺陷性质计算工作流:给定化学式与可选掺杂元素,自动完成从完美晶胞优化到形成能/转变能图谱的端到端计算
-   - 声子性质、电声耦合、激发态、线形计算
-4. 一套将新的计算或程序转化为sop的方法论
+2. 构建不同种类的 VASP 计算 SOP
+3. 通过编排实现更复杂的计算项目：
+   - 接收成熟科学项目目录，组织完美晶胞、竞争相、缺陷、声子及形成能/转变能等计算；`pydefect`、`doped`、`phonopy` 等是该编排层调用的既有科学工具。
+   - 化学式与可选掺杂元素可以用于便捷地初始化项目配置，但不是 `vasp_sop` 编排层的核心输入。
+4. 一套将新的计算或程序转化为 SOP 的方法论
 
 ---
 
@@ -34,11 +34,9 @@
 8. phonopy — 声子性质
 9. **crisp** — 计算资源管理。所有作业操作必须通过 `crisp` CLI（`crisp submit / cancel -n TASK_NAME / jobs`），不得直接 `scancel`/`sbatch`。Agent 操作前需加载 skill://crisp。
 10. VASP — DFT 程序
-11. maggma JSONStore — 计算结果缓存后端。`~/.vasp_sop/meta.json` + `~/.vasp_sop/blobs.json`。
-    元数据表轻量（formula, content_hash, total_energy, bandgap, tags 等），blob 表存储 OUTCAR/vasprun/INCAR 大 JSON。
-    解析层优先使用 emmet-core 的 `TaskDoc.from_directory()`，失败回退正则。
-    支持语义查询（`cache query --formula GaN --functional HSE`），MongoDB 语法。
-    通过 `cache migrate` 从旧缓存迁移。
+11. **CRISP-integrated result reuse** — `vasp-cache` is the separately documented component behind CRISP's result-reuse capability.
+   - Result identity, storage, and restoration are exposed as part of the CRISP calculation lifecycle; equivalent VASP calculations need not be rerun.
+   - The component is linked separately for inspection and reuse; it is not described here as a separate `vasp_sop` orchestration layer.
 
 ## 3. 点缺陷计算业务逻辑
 
@@ -57,7 +55,7 @@ Defect → 缺陷计算 → defect_energy_summary.json
 
 ### 3.4 CPD 阶段（化学势图）
 
-**输入**：化学式、掺杂元素、MP API
+**输入（阶段字段）**：项目 `plan.yaml` 中的 `formula`、`dopant_elements` 和 Materials Project API；这些字段属于成熟项目内部的 CPD 阶段，不改变 `vasp_sop` 以成熟项目目录为顶层输入的模型。
 
 **步骤**：
 1. `pydefect_vasp mp` 下载目标相 + 所有竞争相的 POSCAR/POTCAR
