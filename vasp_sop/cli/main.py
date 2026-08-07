@@ -634,6 +634,20 @@ def _add_batch_parser(subparsers) -> None:
         help="Project root directory containing system subdirectories",
     )
 
+    # retry
+    p_retry = sub.add_parser(
+        "retry",
+        help="Reset calc dirs to pending so the next `batch run` resubmits them",
+    )
+    p_retry.add_argument(
+        "root", type=Path,
+        help="Project root directory containing system subdirectories",
+    )
+    p_retry.add_argument(
+        "dirs", nargs="+", type=str,
+        help="Calc dir(s) relative to root, e.g. BaGe4O9/unitcell/dielectric",
+    )
+
     # generate-inputs
     gp = sub.add_parser("generate-inputs", help="Generate VASP inputs for all systems")
     gp.add_argument(
@@ -701,6 +715,8 @@ def _handle_batch(args: argparse.Namespace) -> None:
                        prune=args.prune)
     elif args.batch_action == "reconcile":
         _batch_reconcile(args.root.resolve())
+    elif args.batch_action == "retry":
+        _batch_retry(args.root.resolve(), args.dirs)
     elif args.batch_action == "generate-inputs":
         _batch_generate_inputs(args.root.resolve(), unitcell=args.unitcell)
     elif args.batch_action == "run":
@@ -992,6 +1008,34 @@ def _batch_reconcile(root: Path) -> None:
         f"reconcile: backfill={backfilled} orphan_sweep={orphaned} "
         f"poll_finalized={completed} stale_settled={settled}"
     )
+
+
+def _batch_retry(root: Path, dirs: list[str]) -> None:
+    """Reset calc dirs to ``pending`` (+ untrack) so the next run submits them.
+
+    The recovery path for terminal records — failed/unconverged, including
+    dirs ``batch reconcile`` settled to orphaned.  Hand JobStore surgery is
+    exactly what ADR 0006 forbids, so this is the sanctioned reset: the
+    same wave2/wave3 leg that submitted a dir will resubmit it once its
+    record reads ``pending``.
+    """
+    from vasp_sop.core.job_store import JobStore
+
+    js = JobStore()
+    try:
+        for rel in dirs:
+            d = (root / rel).resolve()
+            if not d.is_relative_to(root):
+                print(f"  SKIP {rel}: outside project root")
+                continue
+            if not d.is_dir() or not (d / "INCAR").is_file():
+                print(f"  SKIP {rel}: not a prepared calculation dir")
+                continue
+            js.record(str(d), "pending", source="retry")
+            js.untrack(str(d))
+            print(f"  OK   {rel}: pending (next batch run will resubmit)")
+    finally:
+        js.close()
 
 
 def _batch_generate_inputs(root: Path, *, unitcell: bool = False) -> None:

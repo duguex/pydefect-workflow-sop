@@ -887,22 +887,29 @@ class BatchOrchestrator:
         """Settle stale ``submitted`` records for untracked calc dirs.
 
         ``_poll_tracked`` only reconciles dirs still in the ``tracked``
-        table.  A ``submitted`` record left behind on an *untracked* dir
-        (a manual finalize, a pre-track-era submission, a store reset)
-        never settles on its own — and since wave2/wave3 skip dirs whose
-        latest status is ``submitted``, it deadlocks the analyze gate
-        (every defect dir must read converged/failed/unconverged).
+        table (it owns live/pending dirs, complete with the 7-day orphan
+        timeout).  A ``submitted`` record left behind on an *untracked* dir
+        never settles on its own: wave2/wave3 skip dirs whose latest status
+        is ``submitted``, so the analyze gate deadlocks (Ba_Se1_1 case) and
+        a never-executed run hides forever.
 
-        Disk truth wins: converged -> ``converged`` (outputs promoted),
-        OUTCAR without VASP's timing banner -> ``failed``, normal exit but
-        unconverged -> ``unconverged``; the dir is untracked either way.
-        Live crisp tasks and dirs with no OUTCAR (never ran) are left
-        untouched in case a run is genuinely pending.
+        Untracked dirs that crisp no longer lists as live are settled from
+        disk truth; everything else is left untouched:
+        - converged verdict -> ``converged`` (outputs promoted)
+        - OUTCAR without VASP's timing banner -> ``failed`` (vasp_crash)
+        - normal exit, unconverged -> ``unconverged``
+        - never ran (no OUTCAR) but inputs are installed -> ``failed``
+          (orphaned) — matches the tracked-dir orphan policy; re-run is a
+          human call via ``batch retry``
+        - never ran AND inputs not installed -> untouched (a scope decision,
+          not a machine one)
         """
         from vasp_sop.core.jobs import crisp_active_dirs, move_crisp_outputs
         from vasp_sop.vasp.convergence import convergence_verdict, _tail_text
+        from vasp_sop.vasp.io import input_ready
 
         crispy = crisp_active_dirs(skip=self.dry_run)
+        tracked = {r["dir_path"] for r in self.js.tracked_dirs()}
         settled = 0
         for s in self.systems:
             root = s["root"]
@@ -915,9 +922,8 @@ class BatchOrchestrator:
                     cp = str(child.resolve())
                     if self.js.latest(cp) != "submitted":
                         continue
-                    if cp in crispy:
+                    if cp in crispy or cp in tracked:
                         continue
-                    self.js.untrack(cp)
                     if convergence_verdict(child).converged:
                         move_crisp_outputs(child)
                         self.js.record(cp, "converged", source="reconcile")
@@ -927,6 +933,9 @@ class BatchOrchestrator:
                     if not outcar.is_file():
                         outcar = child / "output" / "OUTCAR"
                     if not outcar.is_file():
+                        if input_ready(child):
+                            self.js.record(cp, "failed", reason="orphaned")
+                            settled += 1
                         continue
                     tail = _tail_text(outcar, 4096)
                     if not tail or "General timing and accounting" not in tail:

@@ -2092,3 +2092,140 @@ class TestReconcileStale:
             assert js.latest(str(ghost.resolve())) == "submitted"
         finally:
             js.close()
+
+
+class TestReconcileGhostResidual:
+    """Ghost dir (submitted, never ran, no OUTCAR) reconcile residual.
+
+    Regression: a stale 'submitted' on an untracked, fully-prepared dir that
+    never ran used to stay submitted forever — wave2 skips submitted and
+    wave3's analyze gate requires non-submitted, so it deadlocked the system.
+
+    Scope guard: dirs still tracked (poll owns them, with the 7-day orphan
+    timeout) and dirs whose inputs are not installed (human scope decision)
+    are never settled by reconcile.
+    """
+
+    def _sys(self, tmp_path: Path, *, track: bool = False) -> tuple[Path, Path]:
+        from vasp_sop.core.job_store import JobStore
+
+        sys = tmp_path / "sys"
+        sys.mkdir()
+        (sys / "plan.yaml").write_text(yaml.dump({
+            "project": {"formula": "NaCl", "dopant_elements": [],
+                         "poscar_src": "MP mp-12345"},
+            "parameters": {"functional": "pbesol"},
+            "supercell": {"tool": "doped", "min_distance": 10.0},
+        }))
+        ghost = sys / "defect" / "Va_X_0"
+        ghost.mkdir(parents=True)
+        _write_poscar(ghost, 4)
+        _write_incar(ghost)
+        _write_potcar(ghost)
+        _write_kpoints(ghost)
+
+        js = JobStore()
+        try:
+            js.record(str(ghost.resolve()), "submitted", source="test")
+            if track:
+                js.track(str(ghost.resolve()))
+        finally:
+            js.close()
+        return sys, ghost
+
+    def test_prepared_ghost_settles_to_orphaned_failed(
+            self, tmp_path: Path, monkeypatch):
+        """Fully-prepared dir, stale submitted, no OUTCAR: failed (orphaned)."""
+        from vasp_sop.core.orchestrator import BatchOrchestrator
+        from vasp_sop.core.job_store import JobStore
+        from vasp_sop.core.paths import override_cache_root
+
+        override_cache_root(tmp_path / ".vasp_sop")
+        monkeypatch.setattr("vasp_sop.core.jobs.crisp_active_dirs",
+                            lambda skip=False: set())
+        sys, ghost = self._sys(tmp_path)
+
+        orch = BatchOrchestrator(tmp_path, dry_run=False)
+        settled = orch._reconcile_stale()
+        orch.js.close()
+
+        assert settled == 1
+        js = JobStore()
+        try:
+            assert js.latest(str(ghost.resolve())) == "failed"
+            assert js.history(str(ghost.resolve()))[-1]["reason"] == "orphaned"
+        finally:
+            js.close()
+
+    def test_tracked_ghost_left_for_poll(self, tmp_path: Path, monkeypatch):
+        """Tracked dirs are poll's job — reconcile must not touch them
+        (a just-submitted run could be queued and not yet in crisp's list)."""
+        from vasp_sop.core.orchestrator import BatchOrchestrator
+        from vasp_sop.core.job_store import JobStore
+        from vasp_sop.core.paths import override_cache_root
+
+        override_cache_root(tmp_path / ".vasp_sop")
+        monkeypatch.setattr("vasp_sop.core.jobs.crisp_active_dirs",
+                            lambda skip=False: set())
+        sys, ghost = self._sys(tmp_path, track=True)
+
+        orch = BatchOrchestrator(tmp_path, dry_run=False)
+        settled = orch._reconcile_stale()
+        orch.js.close()
+
+        assert settled == 0
+        js = JobStore()
+        try:
+            assert js.latest(str(ghost.resolve())) == "submitted"
+        finally:
+            js.close()
+
+
+class TestBatchRetry:
+    """batch retry: reset terminal calc dirs to pending for re-submission."""
+
+    def test_resets_failed_dir_to_pending(self, tmp_path: Path, monkeypatch):
+        from vasp_sop.core.job_store import JobStore
+        from vasp_sop.core.paths import override_cache_root
+        from vasp_sop.cli.main import _batch_retry
+
+        override_cache_root(tmp_path / ".vasp_sop")
+        root = tmp_path / "root"
+        d = root / "BaGe4O9" / "unitcell" / "dielectric"
+        d.mkdir(parents=True)
+        _write_incar(d)
+        (d / "POSCAR").write_text("p\n")
+        (d / "POTCAR").write_text("p\n")
+        (d / "KPOINTS").write_text("k\n")
+
+        js = JobStore()
+        js.record(str(d.resolve()), "failed", source="test", reason="vasp_crash")
+        js.close()
+
+        _batch_retry(root, ["BaGe4O9/unitcell/dielectric"])
+
+        js = JobStore()
+        try:
+            assert js.latest(str(d.resolve())) == "pending"
+            assert js.history(str(d.resolve()))[-1]["source"] == "retry"
+        finally:
+            js.close()
+
+    def test_skips_outside_root_and_unprepared(self, tmp_path, monkeypatch):
+        from vasp_sop.core.job_store import JobStore
+        from vasp_sop.core.paths import override_cache_root
+
+        override_cache_root(tmp_path / ".vasp_sop")
+        root = tmp_path / "root"
+        root.mkdir()
+        (tmp_path / "outside").write_text("f\n")
+
+        from vasp_sop.cli.main import _batch_retry
+        _batch_retry(root, ["../outside", "missing/thing"])
+
+        js = JobStore()
+        try:
+            assert js.latest(str((tmp_path / "outside").resolve())) is None
+            assert js.latest(str((root / "missing" / "thing").resolve())) is None
+        finally:
+            js.close()

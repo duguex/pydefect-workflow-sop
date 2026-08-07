@@ -13,7 +13,13 @@ it believes are still running. Instead of fixing the tool, the gap was
 hand-patched with a direct `JobStore.record(...)` call — training the tool
 to route around its own defect. The repair is now the `batch reconcile`
 pass (settles stale records from disk/crisp truth, wired into every `batch
-run` cycle) with regression tests.
+run` cycle) with regression tests. It also settles the never-executed ghost
+dirs: a fully-prepared dir with a stale `submitted` and no OUTCAR reads
+`failed` (orphaned) — matching the tracked-dir orphan policy — unblocking
+the analyze gate instead of hiding forever; dirs lacking inputs stay
+untouched (a human scope decision). Recovery from a terminal record goes
+through `batch retry` (reset to `pending`), never through hand-edited
+JobStore rows.
 
 We chose "gap = development task" over "ad-hoc one-off" because one-off
 operations are faster today but leave the tool with the same gap forever;
