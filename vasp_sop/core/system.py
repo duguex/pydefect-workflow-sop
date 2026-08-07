@@ -326,6 +326,12 @@ class System:
         Returns a set of phase directory names to skip during competing
         phase submission.  The file format is a YAML list of directory
         names (or substrings to match against directory names).
+
+        Exclusions are a project-scope decision — phases that are not
+        worth computing at all.  Never use this to hide a phase whose
+        calculation ran and failed to converge: COMPLETE (ADR 0004)
+        requires every engaged calculation to have converged, and an
+        exclusion is not a failure bucket.
         """
         import yaml as _yaml
 

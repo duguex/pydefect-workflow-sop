@@ -47,3 +47,7 @@ _Avoid_: status, done flag
 **Status table**:
 `vasp-sop batch status`'s per-system view. D/T columns are disk truth — the convergence verdict over every directory on disk; Run counts live `submitted` records; % is completed-dirs-over-all-dirs (100% when the defect summary exists).
 _Avoid_: progress report (the old `batch progress` command)
+
+**Excluded phase**:
+A competing phase deliberately removed from a system's calculation set via `cpd_excluded_phases.yaml` (issue #93), because it is not worth computing at all — out of project scope or known-irrelevant. An exclusion is a scope decision, never a record of convergence difficulties: a phase that ran and failed must be re-run or fixed, not excluded.
+_Avoid_: failed phase, skip list for failures

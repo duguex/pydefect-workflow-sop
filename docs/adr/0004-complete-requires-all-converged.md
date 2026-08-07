@@ -16,10 +16,14 @@ summary. The status table's new % column exposed the gap, and the phase
 machine now agrees with it — COMPLETE and 100% coincide.
 
 Costs: a system with any failed/unconverged calculation stays
-UNITCELL_DEFECT until a human resolves the failure (re-run, fix inputs,
-or exclude the phase via `cpd_excluded_phases.yaml`). The batch loop does
-not auto-resubmit `failed`/`unconverged` dirs (wave2 skips them), so no
-resubmission loop is introduced. Phase-persistence (ADR 0001) is
+UNITCELL_DEFECT until that calculation is genuinely resolved (re-run,
+fix inputs). Excluding a phase via `cpd_excluded_phases.yaml` is a
+project-scope decision for phases that are **not worth computing at
+all** (e.g. known-irrelevant chemistry) — it is not a bucket for
+convergence failures; hiding a failed phase behind an exclusion would
+re-introduce exactly the laundering this ADR removes. The batch loop
+does not auto-resubmit `failed`/`unconverged` dirs (wave2 skips them),
+so no resubmission loop is introduced. Phase-persistence (ADR 0001) is
 unaffected: once `target_vertices.yaml` exists the system never returns
 COMPETING, but it can now be pinned in UNITCELL_DEFECT by an unconverged
 competing phase that was previously invisible.
