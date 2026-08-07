@@ -290,7 +290,6 @@ def analyze(
     perfect_dir = defect_root / "perfect"
 
     # ── OUTCAR recovery (do not hard-fail whole system — #0011) ─────
-    from vasp_sop.core.cache import restore_from_cache
     from vasp_sop.core.jobs import move_crisp_outputs
     from vasp_sop.defect import is_valid_defect_dir, iter_defect_dirs
 
@@ -306,19 +305,7 @@ def analyze(
         move_crisp_outputs(d)
         if _has_outcar(d):
             continue
-        if not (d / "POSCAR").is_file():
-            logger.debug("Skipping cache restore for %s: POSCAR missing", d)
-            if d.name != "perfect" and "_" in d.name:
-                missing_outcars.append(d.name)
-            continue
-        try:
-            restored = restore_from_cache(d)
-        except Exception as exc:
-            logger.debug("Cache restore skipped for %s: %s", d.name, exc)
-            restored = False
-        if restored:
-            logger.info("Restored outputs for %s from cache", d.name)
-        elif d.name != "perfect" and "_" in d.name:
+        if d.name != "perfect" and "_" in d.name:
             missing_outcars.append(d.name)
     if missing_outcars:
         logger.warning(

@@ -22,8 +22,8 @@ vasp-sop batch run /path/to/project --dry-run
 # advance systems for real
 vasp-sop batch run /path/to/project
 
-# cache / jobs
-vasp-sop cache status --verbose
+# result reuse (crisp-owned)
+crisp cache status
 
 # generate a read-only evidence report from current files
 vasp-sop report /path/to/project

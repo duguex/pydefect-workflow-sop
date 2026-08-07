@@ -22,6 +22,26 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Calculations with max lattice vector > MAX_LATTICE are skipped
+# (not submitted). Set to None to disable.
+MAX_LATTICE: float | None = 25.0
+
+
+def lattice_too_large(src_dir: Path) -> bool:
+    """True if max lattice vector exceeds MAX_LATTICE."""
+    if MAX_LATTICE is None:
+        return False
+    try:
+        from pymatgen.core.structure import Structure
+
+        for cand in (Path(src_dir) / "CONTCAR", Path(src_dir) / "POSCAR"):
+            if cand.is_file():
+                a, b, c = Structure.from_file(str(cand)).lattice.abc
+                return max(a, b, c) > MAX_LATTICE
+    except Exception:
+        return False
+    return False
+
 
 def crisp_active_dirs(*, skip: bool = False) -> set[str]:
     """Return work dirs of crisp jobs currently in a live status.
@@ -182,7 +202,6 @@ def submit_vasp(
     if not _vasp_input_ready(work_dir):
         raise RuntimeError(f"VASP input files not complete in {work_dir}.")
 
-    from vasp_sop.core.cache import MAX_LATTICE, lattice_too_large
     if lattice_too_large(work_dir):
         raise RuntimeError(
             f"Lattice too large in {work_dir} "

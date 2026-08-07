@@ -157,21 +157,14 @@ def has_vasprun(path: Path) -> bool:
 
 
 def recover_vasprun_artifacts(path: Path) -> bool:
-    """Surface vasprun.xml: legacy ``output/`` promote + cache. Return if present.
+    """Surface vasprun.xml: legacy ``output/`` promote. Return if present.
 
     Current crisp writes into *path* directly; ``move_crisp_outputs`` is a no-op
     unless a legacy ``output/`` tree still exists.
     """
     from vasp_sop.core.jobs import move_crisp_outputs
-    from vasp_sop.core.cache import restore_from_cache
 
     move_crisp_outputs(path)
-    if has_vasprun(path):
-        return True
-    try:
-        restore_from_cache(path)
-    except Exception:
-        pass
     return has_vasprun(path)
 
 

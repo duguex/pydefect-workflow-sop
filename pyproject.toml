@@ -16,7 +16,6 @@ dependencies = [
     "pandas>=2.0",
     "emmet-core>=0.60",
     "maggma>=0.60",
-    "vasp-cache>=0.1.0",
 ]
 
 [project.scripts]

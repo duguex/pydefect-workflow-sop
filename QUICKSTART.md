@@ -40,10 +40,10 @@ export MP_API_KEY="your-api-key-here"
 
 ### CRISP 集成的结果复用检查
 
-结果复用是 CRISP 的集成能力，`vasp-cache` 作为该能力的独立组件参考；`vasp-sop` 通过项目/计算流程使用它。确认 CRISP 集成的缓存目录可用：
+结果复用是 CRISP 的集成能力（`crisp cache` 子命令包装 `vasp-cache` 库）——vasp-sop 不直接读写结果缓存，只把结果当作磁盘上的文件。确认 CRISP 缓存可用：
 
 ```bash
-vasp-sop cache status
+crisp cache status
 ```
 
 首次使用时缓存为空，这是正常的。缓存数据存储在 `$VASP_CACHE_ROOT` 指定的目录（默认 `~/.cache/vasp_cache`）。
@@ -109,10 +109,10 @@ STRUCTURE_OPT → COMPETING → CHEM_POT_DIAGRAM → UNITCELL_DEFECT → COMPLET
 - 默认轮询间隔 60 秒，可用 `--poll 120` 调整
 - 可用 `--exclude` 排除特定系统
 
-### 步骤 5：查看缓存状态
+### 步骤 5：查看结果缓存状态（归 crisp 管）
 
 ```bash
-vasp-sop cache status --verbose
+crisp cache status --verbose
 ```
 
 ---
@@ -138,11 +138,10 @@ vasp-sop cache status --verbose
 | `vasp-sop materials poscar <mp-id>` | 按 MP-ID 下载单个 POSCAR |
 | `vasp-sop materials cache list` | 列出 MP 缓存 |
 | `vasp-sop materials cache clear` | 清除 MP 缓存 |
-| `vasp-sop cache status [--verbose]` | 缓存统计 |
-| `vasp-sop cache put <path>` | 缓存一个 VASP 计算目录 |
-| `vasp-sop cache put <path> -r` | 递归扫描目录树缓存 |
-| `vasp-sop cache query --formula <f>` | 语义化跨项目缓存查询 |
-| `vasp-sop cache verify` | 检查缓存一致性 |
+| `crisp cache status [--verbose]` | 结果缓存统计（归 crisp 管） |
+| `crisp cache put <path>` | 缓存一个 VASP 计算目录（crisp 侧） |
+| `crisp cache fetch <path>` | 从缓存恢复输出文件（crisp 侧） |
+| `crisp cache query --formula <f>` | 按化学式查询（crisp 侧） |
 | `vasp-sop vasp inputs <dir>` | 通过 vise 生成 VASP 输入 |
 | `vasp-sop vasp check <dir>` | 检查 VASP 是否收敛 |
 | `vasp-sop cpd energies <dir> -f <formula>` | 计算组分能量 |
@@ -186,9 +185,9 @@ vasp-sop defect init -f <化学式> -d <掺杂元素>
 
 ### 缓存查询无结果
 
-- 首次使用缓存为空属正常现象
+- 首次使用缓存为空属正常现象（缓存归 crisp 管）
 - 确认计算目录包含 OUTCAR 文件
-- 使用 `vasp-sop cache put <path> -r` 手动导入已有计算结果
+- 用 `crisp cache put <path> -r` 手动导入已有计算结果
 
 ### VASP 作业提交失败
 

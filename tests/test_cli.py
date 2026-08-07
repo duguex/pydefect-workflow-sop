@@ -138,10 +138,8 @@ class TestAdvanceOneSystem:
 
     @pytest.fixture(autouse=True)
     def _patch_heavy(self, monkeypatch, tmp_path: Path):
-        from vasp_sop.core.cache import override_cache_root
+        from vasp_sop.core.paths import override_cache_root
         override_cache_root(tmp_path / ".vasp_sop")
-        monkeypatch.setattr("vasp_sop.core.cache.cache_lookup",
-                            lambda p: {"total_energy": 0.0} if "NaCl_mp-12345" in str(p) else None)
         monkeypatch.setattr("vasp_sop.defect.builder.build_all", lambda *a, **kw: None)
         monkeypatch.setattr("vasp_sop.vasp.convergence.convergence_verdict",
                             lambda p: SimpleNamespace(converged="NaCl_mp-12345" in str(p), max_f=None))
@@ -177,7 +175,7 @@ class TestAdvanceOneSystem:
 class TestCompetingFailureGate:
     def test_failed_competing_phase_blocks_cpd(self, competing_system, tmp_path):
         """A failed competing phase must not silently advance to CPD."""
-        from vasp_sop.core.cache import override_cache_root
+        from vasp_sop.core.paths import override_cache_root
         from vasp_sop.core.job_store import JobStore
         
 
@@ -193,7 +191,7 @@ class TestCompetingFailureGate:
 
     def test_missing_competing_inputs_blocks_cpd(self, competing_system, tmp_path):
         """A POSCAR-only competing phase must keep the system in COMPETING."""
-        from vasp_sop.core.cache import override_cache_root
+        from vasp_sop.core.paths import override_cache_root
         from vasp_sop.core.job_store import JobStore
         
 
@@ -216,7 +214,7 @@ class TestCompetingFailureGate:
 
     def test_failed_marker_overrides_old_converged_output(self, competing_system, tmp_path):
         """A failed latest attempt cannot validate an older converged OUTCAR."""
-        from vasp_sop.core.cache import override_cache_root
+        from vasp_sop.core.paths import override_cache_root
         from vasp_sop.core.job_store import JobStore
         
 
@@ -239,7 +237,7 @@ class TestCompetingFailureGate:
         self, competing_system, tmp_path
     ):
         """After CPD artifacts exist, later failed phase records do not regress phase."""
-        from vasp_sop.core.cache import override_cache_root
+        from vasp_sop.core.paths import override_cache_root
         from vasp_sop.core.job_store import JobStore
         
 
@@ -255,115 +253,51 @@ class TestCompetingFailureGate:
 
 
 class TestBatchCpdTargetHandoff:
-    def test_cpd_stage_restores_structure_opt_from_cache(self, competing_system, tmp_path, monkeypatch):
-        """CPD phase: put target → fetch structure_opt from cache."""
-        from vasp_sop.core.cache import override_cache_root
+    def test_cpd_stage_handoffs_structure_opt_from_target(self, competing_system, tmp_path, monkeypatch):
+        """CHEM_POT_DIAGRAM: wave3 stages structure_opt by direct copy of the
+        canonical target results (result reuse lives in crisp, not here)."""
+        from vasp_sop.core.paths import override_cache_root
         from vasp_sop.core.job_store import JobStore
         from vasp_sop.core.orchestrator import advance_one_system
+        from pymatgen.core import Composition
 
         override_cache_root(tmp_path / ".vasp_sop")
         root = competing_system
         target = root / "cpd" / "NaCl_mp-12345"
         (root / "defect" / "defect_in.yaml").parent.mkdir(parents=True, exist_ok=True)
         (root / "defect" / "defect_in.yaml").write_text("formula: NaCl\n")
-        for f, content in [("OUTCAR", "t\n"), ("CONTCAR", "t\n"), ("vasprun.xml", "t\n"),
-                           ("INCAR", "ENCUT=400\n"), ("KPOINTS", "4 4 4\n"), ("POTCAR", "PAW\n")]:
-            (target / f).write_text(content)
+
+        # Canonical target result set: fixture already wrote
+        # POSCAR/INCAR/KPOINTS/POTCAR + a converged OUTCAR; add the
+        # remaining files the handoff validates (X-structure — matches the
+        # mocked target composition below).
+        poscar = (target / "POSCAR").read_text()
+        (target / "CONTCAR").write_text(poscar)
+        (target / "vasprun.xml").write_text("<mock/>\n")
+
+        # Competing phase must also be converged on disk (crisp-materialized)
+        # so the competing block is empty → CHEM_POT_DIAGRAM.
         competing = root / "cpd" / "Other_mp-99999"
+        self_converged_outcar = (
+            " General timing and accounting\n"
+            " TOTAL-FORCE (eV/Angst)\n ---\n"
+            " 0.0 0.0 0.0 0.0 0.0 0.0\n"
+        )
+        (competing / "OUTCAR").write_text(self_converged_outcar)
         store = JobStore()
         store.record(str(target.resolve()), "converged")
         store.record(str(competing.resolve()), "converged")
 
         source = root / "unitcell" / "structure_opt"
-        put_calls = []
-        fetch_calls = []
-        monkeypatch.setattr("vasp_sop.core.cache.vasp_results_put",
-                           lambda p, **kw: (put_calls.append(p) or "fake-key"))
-        monkeypatch.setattr("vasp_sop.core.cache._vc_fetch",
-                           lambda key, target_dir, **kw: (
-                               fetch_calls.append((key, target_dir)),
-                               Path(target_dir).mkdir(parents=True, exist_ok=True),
-                               True)[-1])
         monkeypatch.setattr("vasp_sop.defect.cpd.compute_chemical_potentials",
                            lambda *args, **kwargs: None)
+        monkeypatch.setattr("vasp_sop.defect.cpd._get_target_composition",
+                           lambda formula: Composition("X"))
 
         advance_one_system(_make_system_dict(root), dry_run=False)
 
-        assert len(put_calls) == 1 and put_calls[0] == target, "should put target"
-        assert len(fetch_calls) == 1, "should fetch to staging"
-        assert fetch_calls[0][0] == "fake-key"
-        assert str(fetch_calls[0][1]).startswith(str(source.parent))
-
-def _write_si_inputs(d: Path, *, energy: float = -10.0) -> None:
-    """Write all 7 VASP input files required by vasp-cache v0.3.0."""
-    poscar = """Si
-1.0
-5.43 0 0
-0 5.43 0
-0 0 5.43
-Si
-2
-Direct
-0 0 0
-0.25 0.25 0.25
-"""
-    (d / "POSCAR").write_text(poscar)
-    (d / "CONTCAR").write_text(poscar)
-    (d / "INCAR").write_text("ENCUT = 520\nGGA = PE\n")
-    (d / "KPOINTS").write_text("A\n0\nGamma\n4 4 4\n0 0 0\n")
-    (d / "POTCAR").write_text(
-        "  PAW_PBE Si 05Jan2001\n  TITEL  = PAW_PBE Si 05Jan2001\n   4.00000000000000\n"
-    )
-    (d / "vasprun.xml").write_text(
-        "<modeling><calculation><scstep><energy>"
-        f'<i name="e_fr_energy">{energy}</i>'
-        "</energy></scstep></calculation></modeling>\n"
-    )
-    (d / "OUTCAR").write_text(
-        f" free  energy    TOTEN  =    {energy} eV\n"
-        " General timing and accounting\n"
-    )
-
-
-class TestCachePutGet:
-    _cr: Path | None = None
-
-    @pytest.fixture(autouse=True)
-    def _isolate_cache(self, tmp_path: Path) -> None:
-        from vasp_sop.core.cache import override_cache_root
-        override_cache_root(tmp_path / ".vasp_sop")
-
-    def test_put_and_lookup(self, tmp_path: Path):
-        from vasp_sop.core.cache import vasp_results_put, cache_lookup
-        src = tmp_path / "src"
-        src.mkdir()
-        _write_si_inputs(src, energy=-10.0)
-        key = vasp_results_put(src)
-        assert key is not None
-        result = cache_lookup(src)
-        assert result is not None
-        assert result["formula"] == "Si"
-
-    def test_get_missing_returns_none(self):
-        from vasp_sop.core.cache import vasp_results_get
-        assert vasp_results_get("Never", "no_such_key") is None
-
-    def test_identical_inputs_share_key(self, tmp_path: Path):
-        from vasp_sop.core.cache import vasp_results_put, cache_lookup, vasp_results_get
-        src1 = tmp_path / "src1"
-        src1.mkdir()
-        _write_si_inputs(src1, energy=-10.0)
-        key1 = vasp_results_put(src1)
-        assert key1 is not None
-        src2 = tmp_path / "src2"
-        src2.mkdir()
-        _write_si_inputs(src2, energy=-10.0)
-        key2 = vasp_results_put(src2)
-        assert key2 is not None
-        # Identity-based cache: identical inputs → same key (dedup)
-        assert key1 == key2
-        assert vasp_results_get("Si", key1) is not None
-
+        for f in ("POSCAR", "INCAR", "KPOINTS", "POTCAR", "OUTCAR", "CONTCAR", "vasprun.xml"):
+            assert (source / f).is_file(), f"structure_opt/{f} should be staged from target"
 
 class TestCrispActiveDirs:
     """Issue #17: _crisp_active_dirs must skip subprocess when skip=True."""
@@ -483,10 +417,8 @@ class TestAdvanceDryRunPostprocess:
 
     @pytest.fixture(autouse=True)
     def _patch_heavy(self, monkeypatch, tmp_path: Path):
-        from vasp_sop.core.cache import override_cache_root
+        from vasp_sop.core.paths import override_cache_root
         override_cache_root(tmp_path / ".vasp_sop")
-        monkeypatch.setattr("vasp_sop.core.cache.cache_lookup",
-                            lambda p: {"total_energy": 0.0} if "NaCl_mp-12345" in str(p) else None)
         monkeypatch.setattr("vasp_sop.defect.builder.build_all", lambda *a, **kw: None)
         monkeypatch.setattr("vasp_sop.vasp.convergence.convergence_verdict",
                             lambda p: SimpleNamespace(converged="NaCl_mp-12345" in str(p), max_f=None))
@@ -587,11 +519,9 @@ class TestBatchNoDuplicateSubmission:
 
     @pytest.fixture(autouse=True)
     def _patch_common(self, monkeypatch, tmp_path: Path):
-        from vasp_sop.core.cache import override_cache_root
+        from pymatgen.core import Composition
+        from vasp_sop.core.paths import override_cache_root
         override_cache_root(tmp_path / ".vasp_sop")
-        monkeypatch.setattr("vasp_sop.core.cache.cache_lookup",
-                           lambda p: {"total_energy": 0.0}
-                           if "NaCl_mp-12345" in str(p) else None)
         monkeypatch.setattr("vasp_sop.defect.builder.build_all",
                            lambda *a, **kw: None)
         monkeypatch.setattr("vasp_sop.defect.builder._generate_vasp_inputs",
@@ -603,11 +533,9 @@ class TestBatchNoDuplicateSubmission:
         monkeypatch.setattr("vasp_sop.defect.cpd.compute_chemical_potentials",
                            lambda *a, **kw: None)
         monkeypatch.setattr("vasp_sop.defect.cpd._get_target_composition",
-                           lambda *a: {})
+                           lambda *a: Composition("X"))
         monkeypatch.setattr("vasp_sop.defect.analysis.analyze",
                            lambda *a, **kw: None)
-        monkeypatch.setattr("vasp_sop.core.cache.vasp_results_put", lambda *a, **kw: "mock-key")
-        monkeypatch.setattr("vasp_sop.core.cache.restore_from_key", lambda key, target_dir, **kw: True)
     def test_competing_not_resubmitted(self, competing_system, monkeypatch):
         """Competing dir submitted once across two cycles.
 
@@ -619,6 +547,13 @@ class TestBatchNoDuplicateSubmission:
                                       type("J", (), {"task_name": "t"})()))
         from vasp_sop.core.orchestrator import advance_one_system
         s = _make_system_dict(competing_system)
+
+        # Materialize the full target set (crisp's job) so the CPD handoff
+        # can stage structure_opt when the system reaches CHEM_POT_DIAGRAM.
+        td = competing_system / "cpd" / "NaCl_mp-12345"
+        poscar = (td / "POSCAR").read_text()
+        (td / "CONTCAR").write_text(poscar)
+        (td / "vasprun.xml").write_text("<mock/>\n")
 
         advance_one_system(s, dry_run=False)  # cycle 1
         cycle1_count = len(calls)
@@ -711,59 +646,6 @@ class TestBatchNoDuplicateSubmission:
             f"defect dir submitted {calls.count(defect_dir)} times, expected 1"
 
 
-class TestCachePut:
-    """Tests for cache put CLI command (v0.3.0 identity-based)."""
-
-    @pytest.fixture(autouse=True)
-    def _isolate_cache(self, tmp_path: Path) -> None:
-        from vasp_sop.core.cache import override_cache_root
-        override_cache_root(tmp_path / ".vasp_sop")
-
-    def test_cache_put_full_inputs(self, tmp_path, capsys):
-        """cache put with complete VASP inputs → key returned."""
-        d = tmp_path / "GaN_mp-804"
-        d.mkdir()
-        _write_si_inputs(d, energy=-12.0)
-        from vasp_sop.cli.main import _handle_cache
-        import argparse
-        args = argparse.Namespace(cache_action="put", cache_root=None, path=d,
-                                   formula=None, task_name=None, recursive=False)
-        _handle_cache(args)
-        captured = capsys.readouterr().out
-        assert "key=" in captured
-
-    def test_cache_put_missing_inputs(self, tmp_path, capsys):
-        """cache put with only OUTCAR → identity fails, key is None."""
-        d = tmp_path / "bare"
-        d.mkdir()
-        (d / "OUTCAR").write_text(
-            " free  energy    TOTEN  =    -10.0 eV\n"
-            " General timing and accounting\n"
-        )
-        from vasp_sop.cli.main import _handle_cache
-        import argparse
-        args = argparse.Namespace(cache_action="put", cache_root=None, path=d,
-                                   formula=None, task_name=None, recursive=False)
-        _handle_cache(args)
-        captured = capsys.readouterr().out
-        assert "converged" in captured  # OUTCAR was converged
-
-    def test_cache_put_recursive(self, tmp_path, capsys):
-        """cache put -r with full inputs in each dir."""
-        dirs = ["sys_A/cpd/GaN_mp-804", "sys_A/cpd/Other_mp-101"]
-        for rel in dirs:
-            p = tmp_path / rel
-            p.mkdir(parents=True)
-            _write_si_inputs(p, energy=-5.0)
-        from vasp_sop.cli.main import _handle_cache
-        import argparse
-        args = argparse.Namespace(cache_action="put", cache_root=None, path=tmp_path,
-                                   formula=None, task_name=None, recursive=True)
-        _handle_cache(args)
-        captured = capsys.readouterr().out
-        assert "Cached 2 directories" in captured
-
-
 class TestFullPipelineWalkthrough:
     """Drive a system through all 5 phases: STRUCTURE_OPT → COMPETING → CHEM_POT_DIAGRAM → UNITCELL_DEFECT → COMPLETE.
 
@@ -789,19 +671,18 @@ class TestFullPipelineWalkthrough:
 
     @pytest.fixture(autouse=True)
     def _patch_common(self, monkeypatch, tmp_path: Path):
-        from vasp_sop.core.cache import override_cache_root
+        from pymatgen.core import Composition
+        from vasp_sop.core.paths import override_cache_root
         override_cache_root(tmp_path / ".vasp_sop")
         monkeypatch.setattr("vasp_sop.defect.builder.build_all", lambda *a, **kw: None)
         monkeypatch.setattr("vasp_sop.defect.builder._generate_vasp_inputs", lambda *a, **kw: None)
         monkeypatch.setattr("vasp_sop.vasp.io.prepare_inputs", lambda *a, **kw: None)
         monkeypatch.setattr("vasp_sop.defect.cpd.compute_chemical_potentials", lambda *a, **kw: None)
-        monkeypatch.setattr("vasp_sop.defect.cpd._get_target_composition", lambda *a: {})
+        monkeypatch.setattr("vasp_sop.defect.cpd._get_target_composition", lambda *a: Composition("X"))
         monkeypatch.setattr("vasp_sop.defect.unitcell._prepare_all_inputs", lambda *a, **kw: None)
         monkeypatch.setattr("vasp_sop.defect.unitcell.build_unitcell_yaml", lambda *a, **kw: None)
         monkeypatch.setattr("vasp_sop.defect.analysis.analyze", lambda *a, **kw: None)
         monkeypatch.setattr("vasp_sop.core.jobs.move_crisp_outputs", lambda *a, **kw: None)
-        monkeypatch.setattr("vasp_sop.core.cache.vasp_results_put", lambda *a, **kw: "mock-key-0000")
-        monkeypatch.setattr("vasp_sop.core.cache.restore_from_key", lambda key, target_dir, **kw: True)
 
     def _make_system(self, tmp_path: Path, formula: str = "GaN", mpid: str = "804") -> Path:
         """Create a minimal system with plan.yaml and target dir (no OUTCAR)."""
@@ -842,17 +723,11 @@ class TestFullPipelineWalkthrough:
         mpid = "804"
         root = self._make_system(tmp_path, formula, mpid)
 
-        # Shared submit tracker + fake cache
+        # Shared submit tracker
         submit_calls: list[str] = []
         monkeypatch.setattr("vasp_sop.core.jobs.submit_vasp",
                            lambda p: (submit_calls.append(str(p.resolve())) or
                                       type("J", (), {"task_name": "t"})()))
-
-        cache_data: dict[str, dict] = {}
-        monkeypatch.setattr("vasp_sop.core.cache.cache_lookup",
-                           lambda p: cache_data.get(str(p.resolve())))
-        monkeypatch.setattr("vasp_sop.core.cache.vasp_results_get",
-                           lambda f, k: cache_data.get(f"{f}_{k}"))
 
         s = _make_system_dict(root)
 
@@ -866,12 +741,13 @@ class TestFullPipelineWalkthrough:
         JobStore().untrack(str(td.resolve()))
 
         # ── Phase 2: COMPETING ─────────────────────────────────────
-        # Cache target result + disk OUTCAR so JobStore may record converged
-        # only when check_converged is true (no false converged).
-        cache_data[f"{formula}_{mpid}"] = {"total_energy": -12.0}
+        # Materialize the full converged target set on disk (crisp's job)
+        # so JobStore records converged and the CPD handoff can stage it.
         td = root / "cpd" / f"{formula}_mp-{mpid}"
-        cache_data[str(td.resolve())] = {"total_energy": -12.0}
         self._write_converged_outcar(td)
+        poscar = (td / "POSCAR").read_text()
+        (td / "CONTCAR").write_text(poscar)
+        (td / "vasprun.xml").write_text("<mock/>\n")
 
         # Add unconverged competing dir so _competing_dirs returns it
         comp = root / "cpd" / "Ga_mp-142"
@@ -890,8 +766,6 @@ class TestFullPipelineWalkthrough:
         self._assert_job_state(comp)
         # ── Phase 3: CHEM_POT_DIAGRAM ──────────────────────────────────────
         # Cache + converge competing dir so _competing_dirs returns empty
-        cache_data[str(comp.resolve())] = {"total_energy": -5.0}
-        cache_data["Ga_142"] = {"total_energy": -5.0}
         self._write_converged_outcar(comp)
 
         assert _system_phase(s) == "CHEM_POT_DIAGRAM", "no pending competing dirs → CHEM_POT_DIAGRAM"
@@ -907,9 +781,10 @@ class TestFullPipelineWalkthrough:
         advance_one_system(s, dry_run=False)
         assert _system_phase(s) == "UNITCELL_DEFECT", "CPD artifacts present → UNITCELL_DEFECT"
 
-        # Create UC and defect directories
+        # Create UC and defect directories (structure_opt already exists from the
+        # CPD handoff, so mkdir must be idempotent).
         uc = root / "unitcell"
-        uc.mkdir()
+        uc.mkdir(exist_ok=True)
         for t in ("band", "dos", "dielectric"):
             td = uc / t
             td.mkdir()
@@ -941,10 +816,8 @@ class TestFullPipelineWalkthrough:
         # Cache all UC + defect results and add converged OUTCARs
         for t in ("band", "dos", "dielectric"):
             d = uc / t
-            cache_data[str(d.resolve())] = {"total_energy": -5.0}
             self._write_converged_outcar(d)
         for d in (perfect, defect_dir):
-            cache_data[str(d.resolve())] = {"total_energy": -5.0}
             self._write_converged_outcar(d)
         from vasp_sop.core.job_store import JobStore
         for d in (uc / "band", uc / "dos", uc / "dielectric", perfect, defect_dir):
@@ -965,8 +838,9 @@ class TestFullPipelineWalkthrough:
         # Drive the final cycle so the machine re-derives and persists COMPLETE
         advance_one_system(s, dry_run=False)
         assert _system_phase(s) == "COMPLETE", "all artifacts present → COMPLETE"
-    def test_structure_opt_cache_hit_skips_vasp_submission(self, tmp_path, monkeypatch):
-        """STRUCTURE_OPT with cache hit restores from cache, never submits VASP."""
+    def test_structure_opt_materialized_skips_vasp_submission(self, tmp_path, monkeypatch):
+        """STRUCTURE_OPT with a converged target on disk (materialized by
+        crisp's result reuse) records converged, never submits VASP."""
         from vasp_sop.core.orchestrator import advance_one_system
         from vasp_sop.core.job_store import JobStore
 
@@ -976,35 +850,25 @@ class TestFullPipelineWalkthrough:
         submit_calls = []
         monkeypatch.setattr("vasp_sop.core.jobs.submit_vasp",
                            lambda p: (_ for _ in ()).throw(AssertionError("submit_vasp called")))
-        restore_calls = []
-        def _mock_restore(p, **kw):
-            restore_calls.append(str(p))
-            td_path = Path(p)
-            (td_path / "OUTCAR").write_text(
-                " General timing and accounting\n"
-                " TOTAL-FORCE (eV/Angst)\n ---\n"
-                " 0.0 0.0 0.0 0.0 0.0 0.0\n"
-            )
-            (td_path / "CONTCAR").write_text("mock\n")
-            (td_path / "vasprun.xml").write_text("<mock/>\n")
-            return True
-        monkeypatch.setattr("vasp_sop.core.cache.restore_from_cache", _mock_restore)
-
-        td = root / "cpd" / f"{formula}_mp-{mpid}"
-        monkeypatch.setattr("vasp_sop.core.cache.cache_lookup",
-                           lambda p, **kw: ({"formula": formula, "final_energy": -12.0}
-                                            if str(p.resolve()) == str(td.resolve()) else None))
 
         s = _make_system_dict(root)
         assert _system_phase(s) == "STRUCTURE_OPT"
 
+        # crisp materializes the converged result into the worktree
+        td = root / "cpd" / f"{formula}_mp-{mpid}"
+        self._write_converged_outcar(td)
+        poscar = (td / "POSCAR").read_text()
+        (td / "CONTCAR").write_text(poscar)
+        (td / "vasprun.xml").write_text("<mock/>\n")
+
         advance_one_system(s, dry_run=False)
 
-        assert restore_calls == [str(td.resolve())], "restore_from_cache should be called for target"
+        assert submit_calls == []
         assert JobStore().latest(str(td.resolve())) == "converged", "target should be marked converged"
 
-    def test_cache_only_full_pipeline_zero_vasp_submit(self, tmp_path, monkeypatch):
-        """STRUCTURE_OPT → CPD without any VASP when target + competing are cached."""
+    def test_materialized_full_pipeline_zero_vasp_submit(self, tmp_path, monkeypatch):
+        """STRUCTURE_OPT → CPD without any VASP once crisp has materialized
+        converged results (target + competing) into the worktree."""
         from vasp_sop.core.orchestrator import advance_one_system
         from vasp_sop.core.job_store import JobStore
         from pymatgen.core import Composition
@@ -1018,38 +882,18 @@ class TestFullPipelineWalkthrough:
                            lambda p: (submit_calls.append(str(p)) or
                                       type("J", (), {"task_name": "t"})()))
 
-        # ── Mock cache: target + competing dirs all hit ───────────────
+        # ── Materialize converged results on disk (crisp's job) ───────
         td = root / "cpd" / f"{formula}_mp-{mpid}"
         comp = root / "cpd" / "Ga_mp-142"
         comp.mkdir()
         _write_poscar(comp, 1); _write_incar(comp); _write_potcar(comp); _write_kpoints(comp)
-
-        cache_dirs = {str(td.resolve()): {"formula": formula, "final_energy": -12.0},
-                      str(comp.resolve()): {"formula": "Ga", "final_energy": -5.0}}
-        monkeypatch.setattr("vasp_sop.core.cache.cache_lookup",
-                           lambda p, **kw: cache_dirs.get(str(p.resolve())))
-        def _mock_restore(p, **kw):
-            d = Path(p)
-            poscar = (d / "POSCAR").read_text()
-            (d / "CONTCAR").write_text(poscar)
-            (d / "OUTCAR").write_text(" General timing and accounting\n"
-                " TOTAL-FORCE (eV/Angst)\n ---\n 0.0 0.0 0.0 0.0 0.0 0.0\n")
-            (d / "vasprun.xml").write_text("<mock/>\n")
-            return True
-        monkeypatch.setattr("vasp_sop.core.cache.restore_from_cache", _mock_restore)
-        # ── Mock cache put + structure_opt restore ──────────────────
-        monkeypatch.setattr("vasp_sop.core.cache.vasp_results_put",
-                           lambda p, **kw: "fake-key-1234")
-        def _mock_restore_key(key, target_dir, **kw):
-            d = Path(target_dir)
-            d.mkdir(parents=True, exist_ok=True)
-            poscar = (td / "POSCAR").read_text()
-            for f, content in [("POSCAR", poscar), ("CONTCAR", poscar),
-                               ("INCAR", "x\n"), ("KPOINTS", "x\n"), ("POTCAR", "x\n"),
-                               ("OUTCAR", "x\n"), ("vasprun.xml", "x\n")]:
-                (d / f).write_text(content)
-            return True
-        monkeypatch.setattr("vasp_sop.core.cache.restore_from_key", _mock_restore_key)
+        for d in (td, comp):
+            self._write_converged_outcar(d)
+        # Target needs the full canonical set so the CPD → structure_opt
+        # handoff (direct copy) can stage it.
+        poscar = (td / "POSCAR").read_text()
+        (td / "CONTCAR").write_text(poscar)
+        (td / "vasprun.xml").write_text("<mock/>\n")
 
         # ── Mock CPD computation + composition ─────────────────────
         cpd_done = []
@@ -1073,7 +917,7 @@ class TestFullPipelineWalkthrough:
         assert submit_calls == [], f"VASP submitted: {submit_calls}"
         assert cpd_done, "CPD computation should have run"
         so = root / "unitcell" / "structure_opt"
-        assert (so / "OUTCAR").is_file(), "structure_opt should be restored from cache"
+        assert (so / "OUTCAR").is_file(), "structure_opt should be staged from target"
 
     def test_uc_resubmit_when_vasprxml_missing(self, tmp_path, monkeypatch):
         """UC task with converged OUTCAR but missing vasprun.xml → re-submitted."""
@@ -1096,13 +940,10 @@ class TestFullPipelineWalkthrough:
         monkeypatch.setattr("vasp_sop.core.jobs.submit_vasp",
                            lambda p: (submit_calls.append(str(p.resolve())) or
                                       type("J", (), {"task_name": "t"})()))
-        cache_data: dict[str, dict] = {}
-        # Cache only the target (so phase advances past COMPETING)
+        # Materialize the converged target on disk (result reuse is crisp's
+        # job now) so the phase advances past STRUCTURE_OPT toward UC.
         td = root / "cpd" / "GaN_mp-804"
-        cache_data[str(td.resolve())] = {"total_energy": -12.0}
-        cache_data["GaN_804"] = {"total_energy": -12.0}
-        monkeypatch.setattr("vasp_sop.core.cache.cache_lookup",
-                           lambda p: cache_data.get(str(p.resolve())))
+        self._write_converged_outcar(td)
 
         s = _make_system_dict(root)
         advance_one_system(s, dry_run=False)
@@ -1124,7 +965,7 @@ class TestPhaseFailedSkip:
 
     @pytest.fixture(autouse=True)
     def _isolate(self, tmp_path: Path):
-        from vasp_sop.core.cache import override_cache_root
+        from vasp_sop.core.paths import override_cache_root
         override_cache_root(tmp_path / ".vasp_sop")
 
     def _complete_ready_system(self, tmp_path: Path) -> tuple[dict, Path, Path]:
@@ -1229,7 +1070,7 @@ class TestUcFalseConvergedResubmit:
 
     @pytest.fixture(autouse=True)
     def _isolate(self, tmp_path: Path, monkeypatch):
-        from vasp_sop.core.cache import override_cache_root
+        from vasp_sop.core.paths import override_cache_root
         override_cache_root(tmp_path / ".vasp_sop")
         monkeypatch.setattr("vasp_sop.defect.builder.build_all", lambda *a, **kw: None)
         monkeypatch.setattr("vasp_sop.defect.builder._generate_vasp_inputs", lambda *a, **kw: None)
@@ -1302,7 +1143,7 @@ class TestAdvanceAnalyzeStatusPrint:
 
     @pytest.fixture(autouse=True)
     def _isolate(self, tmp_path: Path, monkeypatch):
-        from vasp_sop.core.cache import override_cache_root
+        from vasp_sop.core.paths import override_cache_root
         override_cache_root(tmp_path / ".vasp_sop")
         monkeypatch.setattr(
             "vasp_sop.defect.builder.build_all", lambda *a, **kw: None,
@@ -1476,7 +1317,7 @@ class TestAdvanceAnalyzeStatusPrint:
 class TestDefectAnalyzeCLI:
     def test_analyze_invokes_pipeline(self, tmp_path: Path, monkeypatch, capsys):
         """vasp-sop defect analyze runs analyze() and prints status (#0014)."""
-        from vasp_sop.core.cache import override_cache_root
+        from vasp_sop.core.paths import override_cache_root
         override_cache_root(tmp_path / ".vasp_sop")
         root = tmp_path / "GaN"
         root.mkdir()
@@ -1726,7 +1567,7 @@ class TestBatchRunLoopObservability:
     def test_loop_writes_batch_log_file(self, tmp_path: Path, monkeypatch):
         """Loop mode creates batch_run.log via FileHandler."""
         root = self._campaign(tmp_path)
-        from vasp_sop.core.cache import override_cache_root
+        from vasp_sop.core.paths import override_cache_root
         override_cache_root(tmp_path / ".vasp_sop")
         monkeypatch.setattr("vasp_sop.core.jobs.submit_vasp",
             lambda path: type("J",(),{"task_name":"T"}))
@@ -1748,7 +1589,7 @@ class TestHandleUnconvergedPoll:
     def test_nsw_ibrion_preserved_on_restart(self, tmp_path: Path, monkeypatch):
         """CONTCAR→POSCAR must NOT rewrite NSW or IBRION (user policy)."""
         from vasp_sop.core.job_store import JobStore
-        from vasp_sop.core.cache import override_cache_root
+        from vasp_sop.core.paths import override_cache_root
 
         override_cache_root(tmp_path / ".vasp_sop")
 
@@ -1846,7 +1687,7 @@ class TestRunPipelineStartup:
     """_run_pipeline generates VASP inputs for canonical target directory."""
 
     def test_target_dir_gets_inputs_generated(self, tmp_path, monkeypatch):
-        from vasp_sop.core.cache import override_cache_root
+        from vasp_sop.core.paths import override_cache_root
         override_cache_root(tmp_path / ".vasp_sop")
 
         root = tmp_path / "GaN"

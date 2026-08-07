@@ -89,7 +89,7 @@ sub-tasks + defect calculations). Wave 3 runs after all Wave 2 jobs complete.
 | Config | `vasp_sop/core/config.py` | `PipelineConfig` dataclass, `plan.yaml` I/O, `generate_config()` |
 | Jobs | `vasp_sop/core/jobs.py` | VASP submission (crisp/local), `VaspJob` hierarchy, `run_local()` |
 | State | `vasp_sop/core/job_store.py` | JobStore (SQLite) — per-calculation VASP job states (`submitted`/`converged`/`failed`), plus `tracked` table for active submissions |
-| Cache | `vasp_sop/core/cache.py` | vasp-cache adapter (SQLite identity + BLOB) |
+| Paths | `vasp_sop/core/paths.py` | vasp-sop-owned path roots — `SOP_ROOT`, MP caches, JobStore location (result reuse itself is crisp's capability) |
 | Builder | `vasp_sop/defect/builder.py` | Supercell (doped/pydefect) + defect enumeration + VASP inputs |
 | CPD | `vasp_sop/defect/cpd.py` | Competing phase diagram pipeline |
 | Unitcell | `vasp_sop/defect/unitcell.py` | Perfect-cell band/DOS/dielectric |
@@ -176,8 +176,8 @@ vasp-sop batch run /path/to/project --dry-run
 # Run batch for real
 vasp-sop batch run /path/to/project
 
-# Check cache status
-vasp-sop cache status --verbose
+# Result reuse (crisp owns the cache)
+crisp cache status
 ```
 
 ### CLI Subcommands
@@ -187,7 +187,6 @@ vasp-sop cache status --verbose
 | `batch run` | Multi-system pipeline orchestrator (main workflow) |
 | `pipeline` | Single-system pipeline |
 | `defect build` | Standalone defect structure generation |
-| `cache status/query/verify` | vasp-cache SQLite inspection & query |
 | `materials fetch` | Materials Project query + download |
 | `vasp` | VASP operations |
 | `cpd` | CPD stage standalone |
@@ -206,20 +205,18 @@ vasp-sop cache status --verbose
 - All three supercell keys (`min_atoms`, `max_atoms`, `min_distance`) are emitted unconditionally
   so round-trip never silently drops data — downstream code reads only what it cares about
 
-### Cache
+### Result Reuse
 
-- vasp-cache v0.3.0 — SQLite identity cache at ``$VASP_CACHE_ROOT``:
-  - 6-layer SHA-256 identity: formula, INCAR, structure, KPOINTS, POTCAR, lattice
-  - zlib-compressed BLOBs: OUTCAR, vasprun.xml, CONTCAR
-  - Structured extracts: final_energy, converged_ionic, total_mag, n_ionic_steps
-- ``vasp_results_put(src_dir, *, cache_root=None, overwrite=False)`` — stores
-  VASP results via vasp-cache identity; returns key or None
-- ``vasp_results_get(formula, key)`` — retrieves cached metadata
-- ``cache_lookup(src_dir)`` — directory-based cache check
-- ``restore_from_cache(src_dir)`` — fetches OUTCAR/CONTCAR/vasprun from cache
-- ``restore_from_key(key, target_dir)`` — fetches via explicit key (atomic)
-- ``query(formula=..., limit=...)`` — cross-project query (formula + limit only)
-- ``list_cache()`` / ``cache_stats()`` — listing and aggregate statistics
+- **Owned by crisp** — vasp-sop never reads or writes the result cache.
+  crisp's `cache` subcommand wraps the `vasp-cache` library
+  (`crisp cache put|has|fetch|query|status|rebuild`); it caches completed
+  results and materializes cached outputs back into the worktree.
+- vasp-sop always sees results as **files on disk** (converged OUTCAR /
+  CONTCAR / vasprun.xml) — no cache calls in the pipeline.
+- vasp-sop's own path roots live in `vasp_sop/core/paths.py`:
+  `SOP_ROOT`, `MP_CACHE`, `POSCAR_CACHE` (JobStore DB + MP downloads).
+- `MAX_LATTICE` + `lattice_too_large()` (submit gate) live in
+  `vasp_sop/core/jobs.py`.
 - ``override_cache_root(path)`` — isolates both vasp-cache and SOP paths for testing
 
 ### Error Handling
@@ -367,7 +364,7 @@ Notable gaps:
 |------|---------|
 | `vasp_sop/cli/main.py` | CLI entry; thin wrapper calling `BatchOrchestrator.run` and `advance_one_system` |
 | `vasp_sop/core/config.py` | `PipelineConfig`, `plan.yaml` generation |
-| `vasp_sop/core/cache.py` | vasp-cache v0.3.0 adapter |
+| `vasp_sop/core/paths.py` | vasp-sop-owned path roots (`SOP_ROOT`, MP caches) |
 | `vasp_sop/core/job_store.py` | JobStore, per-calculation state tracking |
 | `vasp_sop/defect/builder.py` | Supercell + defect generation |
 | `vasp_sop/defect/cpd.py` | Chemical potential diagram |
@@ -415,14 +412,14 @@ vasp-sop batch run .
 # 干运行预览
 vasp-sop batch run . --dry-run
 
-# 查看批处理状态
-vasp-sop cache status --verbose
+# 结果复用归 crisp 管
+crisp cache status
 ```
 ## Known Issues
 
-- `cache_target_results` in CHEM_POT_DIAGRAM calls `calc_results_put` then `calc_cpd_put`;
-  if the target dir lacks OUTCAR (e.g. cached result restored without files),
-  the put silently skips. Verify converged flag before calling.
+- CPD 后处理的 structure_opt 由 `handoff_target_results` 直接复制目标
+  canonical 结果（不再走缓存往返）；目标缺 CONTCAR/vasprun.xml 时会报错，
+  需 crisp 完整物化后再进入 CHEM_POT_DIAGRAM。
 - CPD target composition lookup in `relative_energies.yaml` can fail
   intermittently (pydefect key format instability). See `issues/0001-srte-cpd-target-lookup-false-positive-failure.md`.
 - 4-element CPD diagrams fail in pydefect (halfspace >3D). Handled via

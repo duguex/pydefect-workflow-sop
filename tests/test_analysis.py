@@ -122,10 +122,6 @@ class TestAnalyze:
             "vasp_sop.defect.pydefect_adapter.run_local",
             lambda cmd, cwd=None, **kw: recorded.append(cmd),
         )
-        monkeypatch.setattr(
-            "vasp_sop.core.cache.restore_from_cache",
-            lambda p: False,
-        )
         _force_converged(monkeypatch)
         from vasp_sop.defect.analysis import analyze
 
@@ -152,9 +148,6 @@ class TestAnalyze:
             (tmp_path / name).write_text("x: 1\n")
         monkeypatch.setattr(
             "vasp_sop.defect.pydefect_adapter.run_local", lambda *a, **kw: None,
-        )
-        monkeypatch.setattr(
-            "vasp_sop.core.cache.restore_from_cache", lambda p: False,
         )
         _force_converged(monkeypatch)
         from vasp_sop.defect.analysis import analyze
@@ -192,9 +185,6 @@ class TestAnalyze:
                 (good / "defect_energy_info.json").write_text("{}\n")
 
         monkeypatch.setattr("vasp_sop.defect.pydefect_adapter.run_local", fake_run)
-        monkeypatch.setattr(
-            "vasp_sop.core.cache.restore_from_cache", lambda p: False,
-        )
         _force_converged(monkeypatch)
         from vasp_sop.defect.analysis import analyze
 
@@ -246,9 +236,6 @@ class TestAnalyze:
                 return
 
         monkeypatch.setattr("vasp_sop.defect.pydefect_adapter.run_local", fake_run)
-        monkeypatch.setattr(
-            "vasp_sop.core.cache.restore_from_cache", lambda p: False,
-        )
         _force_converged(monkeypatch)
 
         from vasp_sop.defect.analysis import analyze
@@ -291,9 +278,6 @@ class TestAnalyze:
                 (good / "correction.json").write_text("{}\n")
 
         monkeypatch.setattr("vasp_sop.defect.pydefect_adapter.run_local", fake_run)
-        monkeypatch.setattr(
-            "vasp_sop.core.cache.restore_from_cache", lambda p: False,
-        )
         _force_converged(monkeypatch, dirs=[good])
 
         from vasp_sop.defect.analysis import analyze
@@ -348,9 +332,6 @@ class TestAnalyze:
                 return
 
         monkeypatch.setattr("vasp_sop.defect.pydefect_adapter.run_local", fake_run)
-        monkeypatch.setattr(
-            "vasp_sop.core.cache.restore_from_cache", lambda p: False,
-        )
         _force_converged(monkeypatch)
 
         from vasp_sop.defect.analysis import analyze

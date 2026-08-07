@@ -3,7 +3,10 @@
 ## STRUCTURE_OPT 阶段
 
 ```python
-if 缓存命中: restore_from_cache(target_dir)
+if convergence_verdict(target_dir).converged:   # crisp 已物化结果到磁盘
+    JobStore record("converged")
+elif input_ready(target_dir):
+    _submit_or_skip(target_dir) → crisp submit
 ```
 
 ## COMPETING 阶段

@@ -25,7 +25,7 @@ def _db_path(given: Path | None) -> Path:
     if given is not None:
         return given
     # Job lifecycle state lives under ~/.vasp_sop (not vasp-cache results root).
-    from vasp_sop.core.cache import SOP_ROOT
+    from vasp_sop.core.paths import SOP_ROOT
     return SOP_ROOT / _DEFAULT_DB
 
 

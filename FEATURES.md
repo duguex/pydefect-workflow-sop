@@ -10,7 +10,7 @@
 
 ## 1. CLI Commands
 
-`vasp-sop` exposes 9 top-level subcommands with 25 total sub-actions:
+`vasp-sop` exposes 8 top-level subcommands with 20 total sub-actions:
 
 | Subcommand | Actions | Description |
 |---|---|---|
@@ -37,11 +37,6 @@
 | | `diagram` | Solve and plot the chemical-potential phase diagram |
 | `report` | — | Generate an evidence-based Markdown calculation report from a system directory; read-only except for the report output |
 | `unitcell` | `yaml` | Generate `unitcell.yaml` from completed VASP outputs |
-| `cache` | `put` | Cache a VASP calculation directory (auto-detects formula/task) |
-| | `query` | Cross-project cache search (formula + limit) |
-| | `status` | Show cache statistics and list entries |
-| | `verify` | Check cache integrity |
-| | `migrate` | Migrate from old SQLite cache (`cache.db`) to vasp-cache |
 
 **Global flags:**
 
@@ -83,7 +78,7 @@ status, presence of `target_vertices.yaml`, etc. — not from a database.
 
 - **Per-system isolation** — a failure in one system does not block others
 - **Serial batch loop** — systems are advanced sequentially in a polling loop
-- **Cache-aware skip** — saves `.target_submit.json` with `"cached"` when STRUCTURE_OPT or COMPETING phase results are found in the global cache
+- **Result reuse is crisp's** — vasp-sop is result-cache-blind; crisp caches completed results (`crisp cache put`) and materializes cached outputs into the worktree before a cycle runs
 - **Dry-run mode** — `--dry-run` processes all pipeline stages without submitting any VASP jobs
 - **Orphaned-output cleanup** — stale crisp output directories (`output/`) are detected and consolidated during system advancement
 - **Infinite-loop protection** — `_MAX_ITERATIONS` gate prevents unbounded polling
@@ -423,61 +418,18 @@ and `target_vertices.yaml`.
 
 ---
 
-## 8. Results Cache
+## 8. Result Reuse (crisp-owned)
 
-The cache layer (`vasp_sop/core/cache.py`) stores VASP calculation results for
-cross-project reuse. Backed by **vasp-cache v0.3.0**.  Cache root is
-controlled by ``$VASP_CACHE_ROOT`` (default: vasp-cache built-in).
+vasp-sop is **result-cache-blind**: it never reads or writes the VASP result
+cache. Result reuse is a capability of **crisp** (its `cache` subcommand
+wraps the `vasp-cache` library). vasp-sop interacts with results only as
+files on disk:
 
-### Architecture
-
-vasp-cache v0.3.0 — a SQLite identity cache keyed by 6-layer hash
-(formula, INCAR, structure, KPOINTS, POTCAR, lattice).
-
-| Record Type | Content |
-|---|---|
-| **Identity** | 6-layer SHA-256: formula + incar + structure + kpoints + potcar + lattice |
-| **Extracts** | final_energy, total_mag, converged_ionic, n_ionic_steps, electrostatic_potentials |
-| **BLOBs** | zlib-compressed: OUTCAR, vasprun.xml, CONTCAR |
-
-### Core Operations
-
-**`vasp_results_put(src_dir, formula, content_hash, task_name)`**
-- Parses VASP outputs via `TaskDoc.from_directory()` (primary) with regex
-  fallback for minimal OUTCARs
-- Writes metadata and blob records to the identity cache
-- Best-effort: parsing exceptions are caught and logged
-
-**`vasp_results_get(formula, key)`**
-- Returns merged metadata+blob dict for exact (formula, key) match
-- `key` may be `content_hash`, `task_name`, or `mp_id`
-
-**`cache_lookup(src_dir)`**
-- Convenience: auto-detects formula + content_hash, delegates to `get`
-
-### Query API (formula + limit)
-
-`query(formula, limit)` — cross-project cache lookup by formula with a
-result-count limit:
-
-| Parameter | Type | Description |
-|---|---|---|
-| `formula` | string | Chemical formula (exact match) |
-| `limit` | int | Maximum number of results to return (default: 100) |
-
-Additional optional filters (`functional`, `calc_type`, `tags_contains`,
-`bandgap_min`, `lattice_max`, `converged_only`) are accepted for
-backward compatibility but the primary query path is formula + limit.
-
-### Auto-Fingerprinting
-
-`_content_hash(src_dir)` produces a deterministic hash from:
-
-- Formula (from POSCAR)
-- K-point grid specification
-- INCAR fingerprint keys (14: ENCUT, PREC, ISMEAR, SIGMA, ISIF, LDAU,
-  LDAUTYPE, LDAUU, LDAUJ, LDAUL, GGA, IVDW, LASPH, METAGGA)
-- POTCAR species + functional combination
+- crisp caches completed results and materializes cached outputs back into
+  the worktree before a batch cycle runs — vasp-sop then sees a converged
+  `OUTCAR`/`CONTCAR`/`vasprun.xml` like any fresh calculation.
+- `vasp-sop`'s former cache adapter, cache worker, and `vasp-sop cache` CLI
+  were deleted; users run `crisp cache status|query` instead.
 
 ### Job State Tracking
 
@@ -490,11 +442,18 @@ Unified SQLite database at `~/.vasp_sop/jobs.db` (WAL mode) with two tables:
 
 Legacy `submissions.db` was merged into `jobs.db`.
 
-- **`list_cache(limit=50)`** — most recent cache entries
-- **`cache_stats()`** — aggregate totals: formulas, entries, per-functional breakdown
-- **`migrate_from_sqlite()`** — one-shot migration from old `cache.db`
-- **`MAX_LATTICE`** — size guard (default 25.0 Å, tunable) to keep large
-  surfaces/2D systems out of the cache
+### Local Path Roots (`vasp_sop/core/paths.py`)
+
+vasp-sop-owned paths (distinct from the crisp result cache):
+
+| Constant | Path | Purpose |
+|---|---|---|
+| `SOP_ROOT` | `~/.vasp_sop` | JobStore DB + all local caches |
+| `MP_CACHE` | `~/.vasp_sop/mp_cache` | MP duel-cache root |
+| `POSCAR_CACHE` | `~/.vasp_sop/mp_cache/poscars` | Per-MP-ID POSCAR/POTCAR |
+
+Lattice size guard `MAX_LATTICE` (default 25.0 Å, tunable) lives in
+`core/jobs.py` — large surface/2D systems are not submitted.
 
 ---
 
@@ -628,7 +587,7 @@ When a defect is detected as stalled:
 | 3 Configuration | `vasp_sop/core/config.py` | `PipelineConfig`, `generate_config()`, `DEFAULT_PLAN` |
 | 4 CPD | `vasp_sop/defect/cpd.py` | `run_cpd()`, `compute_chemical_potentials()`, `apply_molecule_corrections()`, `adjust_unstable_phase()` |
 | 5 Supercell & Defect Gen | `vasp_sop/defect/builder.py` | `build_all()`, `_build_supercell_doped()`, `_build_supercell_pydefect()`, `construct_complex_defects()` |
-| 8 Results Cache | `vasp_sop/core/cache.py` | `vasp_results_put()`, `vasp_results_get()`, `query()`, `_content_hash()` |
+| 8 Result Reuse | crisp `cache` subcommand (wraps `vasp-cache`); local paths in `vasp_sop/core/paths.py` | `crisp cache put/has/fetch/status/query` |
 | 9 MP Integration | `vasp_sop/materials/mp.py` | `fetch_candidate_phases()`, `list_phases()`, `list_potcar_variants()`, `detect_encut()`, `needs_hubbard_u()` |
 | 10 Pipeline State | `vasp_sop/core/job_store.py` | `JobStore` (SQLite — `converged`/`failed` + `tracked` table) |
 | 11 Defect Compute Loop | `vasp_sop/defect/compute.py` | `run_vasp()`, `_collect_jobs()`, `_max_f()`, stall detection, POTIM auto-recovery |

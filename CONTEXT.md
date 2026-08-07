@@ -35,3 +35,7 @@ _Avoid_: competitor list
 **calc_results**:
 pydefect's per-calculation result record, including whether the calculation ionically converged; the currency of defect post-processing.
 _Avoid_: results json
+
+**Result reuse**:
+The capability of answering "has this calculation been run, what was its result" for previously-computed calculations. Owned by crisp (`crisp cache`, wrapping the `vasp-cache` library); vasp-sop never touches the result store — crisp caches completed results and materializes cached outputs back into the worktree.
+_Avoid_: vasp-cache (as a vasp-sop concept), results cache, cache lookup

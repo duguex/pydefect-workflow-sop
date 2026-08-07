@@ -17,7 +17,7 @@ from typing import Optional
 
 from pymatgen.core import Composition
 
-from vasp_sop.core.cache import MP_CACHE, POSCAR_CACHE
+from vasp_sop.core.paths import MP_CACHE, POSCAR_CACHE
 from vasp_sop.core.jobs import run_local
 
 logger = logging.getLogger(__name__)

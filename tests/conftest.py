@@ -19,7 +19,7 @@ def isolated_cache(tmp_path: Path):
     This prevents tests from reading/writing the real ~/.vasp_sop cache.
     Returns the cache root path for assertions.
     """
-    from vasp_sop.core.cache import override_cache_root
+    from vasp_sop.core.paths import override_cache_root
 
     cache_root = tmp_path / ".vasp_sop"
     override_cache_root(cache_root)

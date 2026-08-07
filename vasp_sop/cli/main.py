@@ -137,7 +137,7 @@ def _handle_materials(args: argparse.Namespace) -> None:
 
     elif args.action == "cache":
         if args.cache_action == "list":
-            from vasp_sop.core.cache import MP_CACHE
+            from vasp_sop.core.paths import MP_CACHE
             if MP_CACHE.is_dir():
                 for child in sorted(MP_CACHE.iterdir()):
                     if child.is_dir():
@@ -146,7 +146,7 @@ def _handle_materials(args: argparse.Namespace) -> None:
                 print("MP cache is empty.")
         elif args.cache_action == "clear":
             import shutil
-            from vasp_sop.core.cache import MP_CACHE
+            from vasp_sop.core.paths import MP_CACHE
             if MP_CACHE.is_dir():
                 shutil.rmtree(str(MP_CACHE))
                 print("MP cache cleared.")
@@ -289,7 +289,6 @@ def main() -> None:
     _add_defect_parser(subparsers)
     _add_report_parser(subparsers)
     _add_batch_parser(subparsers)
-    _add_cache_parser(subparsers)
 
     args = parser.parse_args()
 
@@ -324,8 +323,6 @@ def main() -> None:
         _run_pipeline(config)
     elif args.command == "batch":
         _handle_batch(args)
-    elif args.command == "cache":
-        _handle_cache(args)
 
 
 def _add_defect_parser(subparsers) -> None:
@@ -602,186 +599,6 @@ _PRIORITY_MAP: dict[str, str] = {
 }
 
 
-def _add_cache_parser(subparsers) -> None:
-    """Add ``cache`` subcommand with actions."""
-    p = subparsers.add_parser("cache", help="Manage VASP calculation results cache")
-    p.add_argument("--cache-root", type=Path, default=None,
-                   help="vasp-cache root directory (default: $VASP_CACHE_ROOT or ~/.cache/vasp_cache)")
-    sub = p.add_subparsers(dest="cache_action", required=True)
-
-    # status
-    sp = sub.add_parser("status", help="Show cache statistics")
-    sp.add_argument("--verbose", action="store_true", help="List all entries")
-
-    # put
-    sp = sub.add_parser("put", help="Cache a VASP calculation directory")
-    sp.add_argument("path", type=Path, help="Path to calculation directory")
-    sp.add_argument("--formula", help="Chemical formula (auto-detected if omitted)")
-    sp.add_argument("--task-name", help="Task name (auto-detected if omitted)")
-    sp.add_argument("--recursive", "-r", action="store_true",
-                    help="Recursively scan directory tree for OUTCARs")
-
-    # query
-    sp = sub.add_parser("query", help="Cross-project cache query")
-    sp.add_argument("--formula", "-f", help="Filter by chemical formula")
-    sp.add_argument("--limit", type=int, default=50, help="Max results")
-
-    # migrate
-    sp = sub.add_parser("migrate", help="Migrate from old SQLite cache to vasp-cache")
-    sp.add_argument("--force", action="store_true",
-                    help="Force migration even if vasp-cache already has data")
-
-    # verify
-    sub.add_parser("verify", help="Check store consistency")
-
-def _handle_cache(args: argparse.Namespace) -> None:
-    from vasp_sop.core.cache import (
-        cache_lookup, vasp_results_put, query, list_cache,
-        cache_stats, migrate_from_sqlite,
-    )
-    from pathlib import Path
-    cr = args.cache_root
-
-    if args.cache_action == "put":
-        if args.recursive:
-            root = args.path.resolve()
-            if not root.is_dir():
-                print(f"Not a directory: {root}")
-                return
-
-            from tqdm import tqdm
-
-            all_dirs: list[Path] = []
-            for outcar in sorted(root.rglob("OUTCAR")):
-                d = outcar.parent
-                if d.name == "output" and (d.parent / "OUTCAR").is_file():
-                    continue
-                all_dirs.append(d)
-
-            if not all_dirs:
-                print("No OUTCARs found.")
-                return
-
-            to_cache: list[Path] = []
-            unconverged: list[Path] = []
-
-            for d in tqdm(all_dirs, desc="Scanning", unit=" dirs"):
-                if cache_lookup(d, cache_root=cr) is not None:
-                    continue
-                outcar = d / "OUTCAR"
-                if not outcar.is_file():
-                    unconverged.append(d)
-                    continue
-                size = outcar.stat().st_size
-                n = 4096
-                if size <= n:
-                    tail = outcar.read_text()
-                else:
-                    with outcar.open("rb") as f:
-                        f.seek(size - n)
-                        tail = f.read().decode("utf-8", errors="replace")
-                if "General timing and accounting" in tail:
-                    to_cache.append(d)
-                else:
-                    unconverged.append(d)
-
-            cached_count = len(all_dirs) - len(to_cache) - len(unconverged)
-            if cached_count:
-                print(f"  {cached_count} directories already cached, skipped.")
-            for d in unconverged:
-                print(f"  ! {d} (not converged)")
-
-            if to_cache:
-                total_cached = 0
-                for d in tqdm(to_cache, desc="Caching", unit=" dirs"):
-                    try:
-                        key = vasp_results_put(d, cache_root=cr)
-                        if key:
-                            total_cached += 1
-                        else:
-                            logger.warning(
-                                "%s: cache put returned None (missing output files?)",
-                                d.name,
-                            )
-                            print(f"\n  ! {d} (identity failed)")
-                    except Exception as exc:
-                        print(f"\n  ! {d} (put failed: {exc})")
-                print(f"Cached {total_cached} directories under {root}")
-
-            if unconverged:
-                print(f"Skipped {len(unconverged)} unconverged directories")
-            return
-
-        path = args.path.resolve()
-        outcar = path / "OUTCAR"
-        if not outcar.is_file():
-            print(f"No OUTCAR in {path}, skipping.")
-            return
-        text = outcar.read_text()
-        converged = "General timing and accounting" in text[-4096:]
-        key = vasp_results_put(path, cache_root=cr)
-        if key is None:
-            logger.warning(
-                "%s: cache put returned None (missing output files?)",
-                path.name,
-            )
-        status = "converged" if converged else "not converged"
-        print(f"Cached {path} ({status})" + (f"  key={key}" if key else ""))
-        return
-
-    if args.cache_action == "status":
-        stats = cache_stats(cache_root=cr)
-        n_entries = stats.get("entries", 0)
-        n_formulas = stats.get("formulas", 0)
-        blob_bytes = stats.get("total_blob_bytes", 0)
-        print(f"vasp_results: {n_entries} entries  "
-              f"({n_formulas} unique formulas)  "
-              f"{blob_bytes:,} B blob storage")
-
-        if args.verbose:
-            print()
-            for entry in list_cache(limit=200, cache_root=cr):
-                c = "✓" if entry.get("converged_ionic") else " "
-                e_val = entry.get("final_energy")
-                e = f"{e_val:.4f}" if e_val is not None else "?"
-                src = entry.get("source_path") or "?"
-                ts = entry.get("created_at") or "?"
-                ident = entry.get("identity_key", "")[:12]
-                print(f"  {c} {entry['formula']:12s} {ident:12s}"
-                      f"  E={e}  {ts}  {src}")
-
-    elif args.cache_action == "query":
-        results = query(formula=args.formula, limit=args.limit, cache_root=cr)
-        print(f"{len(results)} results:")
-        for r in results:
-            e_val = r.get("final_energy")
-            e = f"{e_val:.4f}" if e_val is not None else "?"
-            print(f"  {r['formula']:12s}  E={e}"
-                  f"  ionic={r.get('converged_ionic', 0)}")
-
-    elif args.cache_action == "migrate":
-        stats = cache_stats(cache_root=cr)
-        if stats.get("entries", 0) > 0 and not args.force:
-            print(f"Cache already has {stats['entries']} entries. "
-                  f"Use --force to overwrite.")
-            return
-        n = migrate_from_sqlite()
-        print(f"Migrated {n} records from SQLite cache.db.")
-
-    elif args.cache_action == "verify":
-        stats = cache_stats(cache_root=cr)
-        entries = list_cache(limit=10000, cache_root=cr)
-        from collections import defaultdict
-        by_formula: dict[str, list] = defaultdict(list)
-        for e in entries:
-            by_formula[e.get("formula", "UNKNOWN")].append(e)
-        print(f"Total entries: {stats.get('entries', 0)}")
-        print(f"Unique formulas: {len(by_formula)}")
-        for formula in sorted(by_formula):
-            group = by_formula[formula]
-            has_energy = any(e.get("final_energy") for e in group)
-            ok = "OK" if has_energy else "NO_ENERGY"
-            print(f"  {formula:12s}  {ok}  ({len(group)} entries)")
 def _add_batch_parser(subparsers) -> None:
     """Add ``batch`` subcommand with actions."""
     p = subparsers.add_parser("batch", help="Multi-system batch operations")
@@ -963,9 +780,9 @@ def _batch_progress(root: Path) -> None:
     """Print per-system completion percentage (completed / total pipeline dirs)."""
     import subprocess, json
 
-    from vasp_sop.core.cache import cache_lookup
+    from vasp_sop.vasp.convergence import convergence_verdict
     def is_done(p: Path) -> bool:
-        return cache_lookup(p) is not None
+        return convergence_verdict(p).converged
 
     rows: list[tuple[int, str, int, int, int, int, int, int]] = []
     for d in sorted(root.iterdir()):

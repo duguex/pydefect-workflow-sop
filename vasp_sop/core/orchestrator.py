@@ -111,8 +111,6 @@ def wave1_optimize(
     """
     from vasp_sop.vasp.convergence import convergence_verdict
     from vasp_sop.vasp.io import input_ready
-    from vasp_sop.core.cache import cache_lookup
-    from vasp_sop.core.job_store import record_if_done
 
     info = _make_info_fn(log_to_logger)
     td = sys.target_dir
@@ -122,23 +120,8 @@ def wave1_optimize(
     if js.latest(str(td.resolve())) != "submitted":
         if convergence_verdict(td).converged:
             js.record(str(td.resolve()), "converged")
-        else:
-            cached = cache_lookup(td)
-            if cached:
-                logger.info("%s target restored from calc cache", sys.name)
-                from vasp_sop.core.cache import restore_from_cache
-
-                restored = restore_from_cache(td)
-                if restored:
-                    submit_info = {
-                        "task_name": "cached",
-                        "work_dir": str(td.resolve()),
-                    }
-                    with open(sys.cpd_dir / ".target_submit.json", "w") as _f:
-                        json.dump(submit_info, _f)
-                    record_if_done(js, td, source="cache_restore")
-            elif input_ready(td):
-                _submit_or_skip(td, "target", sys.name, dry_run, info, js=js)
+        elif input_ready(td):
+            _submit_or_skip(td, "target", sys.name, dry_run, info, js=js)
 
 
 # ── Wave 2 ─────────────────────────────────────────────────────────────────
@@ -164,7 +147,6 @@ def wave2_submit(
     """
     from vasp_sop.vasp.convergence import convergence_verdict
     from vasp_sop.vasp.io import input_ready, prepare_inputs
-    from vasp_sop.core.cache import cache_lookup
     from vasp_sop.core.job_store import JobStore
     from vasp_sop.defect.builder import build_all as _build_defects
 
@@ -237,14 +219,6 @@ def wave2_submit(
         for cd in sys.competing_dirs(js):
             if js.latest(str(cd.resolve())) == "submitted":
                 continue
-            if "_mp-" in cd.name:
-                _cached = cache_lookup(cd)
-                if _cached:
-                    logger.info("%s restored from calc cache", cd.name)
-                    from vasp_sop.core.cache import restore_from_cache
-
-                    restore_from_cache(cd)
-                    continue
             _submit_or_skip(cd, f"phase:{cd.name}", sys.name, dry_run, info, js=js)
         return
 
@@ -369,7 +343,6 @@ def wave3_postprocess(
     from vasp_sop.vasp.convergence import convergence_verdict
     from vasp_sop.vasp.io import input_ready
     from vasp_sop.core.jobs import move_crisp_outputs
-    from vasp_sop.core.cache import vasp_results_put
     from vasp_sop.defect import cpd as _cpd
     from vasp_sop.defect import unitcell as _uc
     from vasp_sop.defect.analysis import analyze as _analyze_defects
@@ -401,18 +374,8 @@ def wave3_postprocess(
                 if f and m:
                     td = sys.target_dir
                     so = uc_root / "structure_opt"
-                    key = vasp_results_put(td)
-                    if not key:
-                        raise RuntimeError(
-                            f"vasp_results_put failed for {sys.name} target"
-                        )
-                    from vasp_sop.core.cache import restore_from_key
-
-                    if not restore_from_key(key, so):
-                        raise RuntimeError(
-                            f"structure_opt cache restore failed for {sys.name}"
-                        )
-                    logger.info("%s structure_opt restored from cache", sys.name)
+                    _cpd.handoff_target_results(td, so, target_composition)
+                    logger.info("%s structure_opt staged from target", sys.name)
             except Exception as exc:
                 logger.error("%s CPD failed: %s", sys.name, exc)
                 if not log_to_logger:
@@ -704,11 +667,11 @@ def advance_one_system(
 
 
 class BatchOrchestrator:
-    """Owns the JobStore handle, cache worker, and the batch poll loop.
+    """Owns the JobStore handle and the batch poll loop.
 
     The CLI constructs one and calls :meth:`run`.  Every transition
-    invariant — crisp restore, backfill, orphan sweep, converged finalize,
-    restart policy, snapshots, system advance — lives behind this object.
+    invariant — backfill, orphan sweep, converged finalize, restart
+    policy, snapshots, system advance — lives behind this object.
     """
 
     def __init__(
@@ -722,7 +685,6 @@ class BatchOrchestrator:
     ) -> None:
         from vasp_sop.core.job_store import JobStore
         from vasp_sop.core.config import PipelineConfig
-        from vasp_sop.core.cache import CacheWorker
 
         self.root = Path(root)
         self.dry_run = dry_run
@@ -730,7 +692,6 @@ class BatchOrchestrator:
         self.poll_interval = poll_interval
         self.loop = loop
         self.js = JobStore()
-        self.cache = CacheWorker()
         self.sw = None
         if loop:
             from vasp_sop.core.logging import setup_file_logging
@@ -783,12 +744,11 @@ class BatchOrchestrator:
     # ── transitions ─────────────────────────────────────────────────
 
     def finalize_converged(self, wd: Path) -> None:
-        """The one converged transition: move outputs, cache, record, untrack."""
+        """The one converged transition: move outputs, record, untrack."""
         from vasp_sop.core.jobs import move_crisp_outputs
 
         wd_str = str(wd.resolve())
         move_crisp_outputs(wd)
-        self.cache.put(wd)
         self.js.record(wd_str, "converged")
         self.js.untrack(wd_str)
 
@@ -877,7 +837,6 @@ class BatchOrchestrator:
         """Record already-converged CPD phases that never reached the store."""
         from vasp_sop.core.jobs import move_crisp_outputs
         from vasp_sop.vasp.convergence import convergence_verdict
-        from vasp_sop.core.cache import vasp_results_put
 
         backfilled = 0
         for s in self.systems:
@@ -892,13 +851,6 @@ class BatchOrchestrator:
                 if not convergence_verdict(pd).converged:
                     continue
                 move_crisp_outputs(pd)
-                formula, mpid = pd.name.split("_mp-", 1)
-                key = vasp_results_put(pd, formula=formula, task_name=f"{formula}_mp-{mpid}")
-                if key is None:
-                    logger.warning(
-                        "%s: cache put returned None (missing output files?)",
-                        pd.name,
-                    )
                 backfilled += 1
                 self.js.record(str(pd.resolve()), "converged", source="backfill")
         if backfilled:
@@ -908,8 +860,6 @@ class BatchOrchestrator:
     def _orphan_sweep(self) -> int:
         """Promote legacy ``output/`` results from tracked subtrees."""
         from vasp_sop.core.jobs import move_crisp_outputs
-        from vasp_sop.core.cache import cache_lookup
-        from vasp_sop.vasp.convergence import convergence_verdict
 
         orphaned = 0
         for s in self.systems:
@@ -925,8 +875,6 @@ class BatchOrchestrator:
                     if not (out_dir / "OUTCAR").is_file():
                         continue
                     move_crisp_outputs(child)
-                    if convergence_verdict(child).converged and cache_lookup(child) is None:
-                        self.cache.put(child)
                     orphaned += 1
         if orphaned:
             logger.info("Processed %d orphaned crisp outputs.", orphaned)
@@ -1137,7 +1085,7 @@ class BatchOrchestrator:
                     completed = self._poll_tracked()
                     if completed:
                         self._print_info(
-                            f"  Cached {completed} completed calculation(s)."
+                            f"  Finalized {completed} completed calculation(s)."
                         )
 
                 n_skipped, errors = self._advance_systems()
@@ -1179,7 +1127,6 @@ class BatchOrchestrator:
                 self._print_info(
                     f"\n  Sleeping {self.poll_interval}s … (Ctrl+C to interrupt)"
                 )
-                self.cache.flush()
                 import time as _time
 
                 _time.sleep(self.poll_interval)
@@ -1187,5 +1134,4 @@ class BatchOrchestrator:
         except KeyboardInterrupt:
             self._print_info("\nInterrupted.")
         finally:
-            self.cache.join()
             self.js.close()

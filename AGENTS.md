@@ -31,7 +31,7 @@ python3 -m pytest tests/test_cache.py -v
 
 vasp-sop batch run /path/to/project --dry-run
 vasp-sop batch run /path/to/project
-vasp-sop cache status --verbose
+crisp cache status   # result reuse lives in crisp, not vasp-sop
 ```
 
 ## Read on demand
