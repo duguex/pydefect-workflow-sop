@@ -1910,3 +1910,89 @@ class TestBatchStartStopDispatch:
         main._batch_stop(tmp_path)
 
         assert stop_calls == [tmp_path.resolve()]
+
+class TestChemicalEnvironmentAdvance:
+    """Scope=chemical-environment: batch advances CPD work but never builds
+    or submits the unit-cell/defect legs (ADR 0005)."""
+
+    def _ce_system_root(self, tmp_path: Path, *, with_competing: bool = True,
+                        with_target_vertices: bool = True) -> Path:
+        formula, mpid = "GaN", "804"
+        root = tmp_path / "GaN"
+        root.mkdir()
+        plan = {
+            "project": {"formula": formula, "dopant_elements": [],
+                        "poscar_src": f"MP mp-{mpid}",
+                        "scope": "chemical-environment"},
+            "parameters": {"functional": "pbesol"},
+            "supercell": {"tool": "doped", "min_distance": 10.0},
+        }
+        (root / "plan.yaml").write_text(yaml.dump(plan))
+        cpd = root / "cpd"
+        cpd.mkdir()
+        target = cpd / f"{formula}_mp-{mpid}"
+        target.mkdir()
+        _write_poscar(target, 2)
+        _write_incar(target)
+        (target / "OUTCAR").write_text(
+            " General timing and accounting\n"
+            " TOTAL-FORCE (eV/Angst)\n ---\n"
+            " 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000\n"
+        )
+        if with_competing:
+            comp = cpd / "Ga_mp-142"
+            comp.mkdir()
+            _write_poscar(comp, 1)
+            _write_incar(comp)
+            _write_kpoints(comp)
+            _write_potcar(comp)
+        if with_target_vertices:
+            (cpd / "target_vertices.yaml").write_text("tv: 1\n")
+            (cpd / "composition_energies.yaml").write_text("ce: 1\n")
+            (cpd / "standard_energies.yaml").write_text("se: 1\n")
+            (cpd / "chem_pot_diag.json").write_text("{}\n")
+        return root
+
+    def test_advance_submits_competing_but_never_defect_leg(self, tmp_path, monkeypatch):
+        """CE system in COMPETING submits the competing phase, never
+        builds defect structures or submits UC/defect jobs."""
+        root = self._ce_system_root(tmp_path, with_competing=True,
+                                    with_target_vertices=False)
+        from vasp_sop.core.orchestrator import advance_one_system
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "vasp_sop.core.jobs.submit_vasp",
+            lambda p: (calls.append(str(p)) or
+                       type("J", (), {"task_name": "t"})()),
+        )
+        s = _make_system_dict(root)
+        from vasp_sop.core.job_store import JobStore
+        JobStore().record(str((root / "cpd" / "GaN_mp-804").resolve()),
+                          "converged", source="backfill")
+        assert _system_phase(s) == "COMPETING", "unconverged competing phase"
+        advance_one_system(s, dry_run=False)
+
+        comp = str((root / "cpd" / "Ga_mp-142").resolve())
+        assert comp in calls, "competing phase must still be submitted"
+        assert not (root / "defect").exists(), \
+            "defect leg must not be built for chemical-environment scope"
+        assert not (root / "unitcell" / "band").exists(), \
+            "unitcell leg must not be built for chemical-environment scope"
+
+    def test_advance_completes_ce_system_without_submission(self, tmp_path, monkeypatch):
+        """CE system with all CPD done advances to COMPLETE, submitting
+        nothing (no UC/defect legs to run)."""
+        root = self._ce_system_root(tmp_path, with_competing=False)
+        from vasp_sop.core.orchestrator import advance_one_system
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "vasp_sop.core.jobs.submit_vasp",
+            lambda p: (calls.append(str(p)) or
+                       type("J", (), {"task_name": "t"})()),
+        )
+        s = _make_system_dict(root)
+        assert _system_phase(s) == "COMPLETE"
+        advance_one_system(s, dry_run=False)
+        assert calls == [], "no VASP submission expected for completed CE system"

@@ -58,6 +58,16 @@ class System:
     # ── Directory properties ───────────────────────────────────────────
 
     @property
+    def is_chemical_environment(self) -> bool:
+        """True when the system's scope excludes unit-cell and defect work.
+
+        A chemical-environment system runs competing phases and the
+        chemical-potential diagram only; COMPLETE is reached when the CPD
+        is done (ADR 0005).
+        """
+        return getattr(self.config, "scope", "defects") == "chemical-environment"
+
+    @property
     def cpd_dir(self) -> Path:
         """Competing-phase directory (``{root}/cpd``)."""
         return self.root / "cpd"
@@ -236,6 +246,24 @@ class System:
                     self.name,
                 )
                 return CHEM_POT_DIAGRAM
+
+            # Chemical-environment scope (ADR 0005): COMPLETE is reached
+            # when the CPD is done — target_vertices + standard_energies
+            # (checked above) plus composition_energies, chem_pot_diag and
+            # every competing phase converged. No unit-cell/defect legs.
+            if self.is_chemical_environment:
+                if not (cpd_root / "composition_energies.yaml").is_file():
+                    return CHEM_POT_DIAGRAM
+                if not (cpd_root / "chem_pot_diag.json").is_file():
+                    return CHEM_POT_DIAGRAM
+                for pd in sorted(cpd_root.iterdir()):
+                    if not pd.is_dir() or pd.name == "combos":
+                        continue
+                    if self._is_excluded_phase(pd):
+                        continue
+                    if not convergence_verdict(pd).converged:
+                        return CHEM_POT_DIAGRAM
+                return COMPLETE
 
             uc_root = self.uc_dir
             uc_tasks = ("band", "dos", "dielectric")

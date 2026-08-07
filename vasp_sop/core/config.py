@@ -86,6 +86,11 @@ class PipelineConfig:
     dopant_elements: list[str] = field(default_factory=list)
     poscar_src: str = ""
 
+    # Scope of the system's pipeline: "defects" (default — full defect
+    # workflow) or "chemical-environment" (competing phases + chemical
+    # potentials only; no unit-cell or defect calculations).
+    scope: str = "defects"
+
     interstitial: bool = False
     interstitial_indices: list[int] = field(default_factory=list)
     complex_defect_order: int = 1
@@ -133,6 +138,10 @@ class PipelineConfig:
         self.formula = self.formula.strip()
         if not self.formula:
             raise ValueError("formula must be non-empty, e.g. 'GaN'.")
+        if self.scope not in ("defects", "chemical-environment"):
+            raise ValueError(
+                f"scope must be 'defects' or 'chemical-environment', got {self.scope!r}."
+            )
         if self.correction_policy != "custom_molecular_reference":
             raise ValueError(
                 "correction_policy must be 'custom_molecular_reference'; "
@@ -188,6 +197,7 @@ class PipelineConfig:
             formula=p.get("formula", ""),
             dopant_elements=p.get("dopant_elements", []),
             poscar_src=p.get("poscar_src", ""),
+            scope=p.get("scope", "defects"),
             functional=params.get("functional", "pbesol"),
             encut=params.get("encut"),
             soc=params.get("soc", False),

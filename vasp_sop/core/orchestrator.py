@@ -155,8 +155,9 @@ def wave2_submit(
     df_root = sys.defect_dir
 
     # ── Prepare: build defect structures ─────────────────────────────
+    # Chemical-environment systems (ADR 0005) have no defect leg.
     td = sys.target_dir
-    if td and (td / "POSCAR").is_file():
+    if td and (td / "POSCAR").is_file() and not sys.is_chemical_environment:
         if not (df_root / "defect_in.yaml").is_file():
             logger.info(
                 "%s: building defect structures (early, phase=%s) ...",
@@ -223,7 +224,8 @@ def wave2_submit(
         return
 
     # ── UNITCELL_DEFECT: submit UC tasks + defect dirs ───────────────
-    if p != "UNITCELL_DEFECT":
+    # Chemical-environment systems never run this leg (ADR 0005).
+    if p != "UNITCELL_DEFECT" or sys.is_chemical_environment:
         return
 
     from vasp_sop.defect import unitcell as _uc
@@ -385,7 +387,8 @@ def wave3_postprocess(
         return result
 
     # ── UNITCELL_DEFECT: post-processing ─────────────────────────────
-    if p != "UNITCELL_DEFECT":
+    # Chemical-environment systems never run this leg (ADR 0005).
+    if p != "UNITCELL_DEFECT" or sys.is_chemical_environment:
         result["status"] = "skipped"
         return result
 

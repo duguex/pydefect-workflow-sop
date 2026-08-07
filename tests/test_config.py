@@ -222,3 +222,23 @@ class TestPipelineConfig:
                 PipelineConfig.from_yaml(tmp)
         finally:
             tmp.unlink(missing_ok=True)
+
+
+class TestScope:
+    def test_default_scope_is_defects(self):
+        c = PipelineConfig(formula="GaN")
+        assert c.scope == "defects"
+
+    def test_scope_parsed_from_plan(self):
+        c = PipelineConfig.from_plan(
+            {"project": {"formula": "GaN", "scope": "chemical-environment"}}
+        )
+        assert c.scope == "chemical-environment"
+
+    def test_scope_missing_from_plan_defaults_to_defects(self):
+        c = PipelineConfig.from_plan({"project": {"formula": "GaN"}})
+        assert c.scope == "defects"
+
+    def test_invalid_scope_rejected(self):
+        with pytest.raises(ValueError, match="scope"):
+            PipelineConfig(formula="GaN", scope="just-cpd")

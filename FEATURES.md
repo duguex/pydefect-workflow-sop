@@ -92,13 +92,14 @@ status, presence of `target_vertices.yaml`, etc. — not from a database.
 Configuration lives in a `plan.yaml` file per system, managed by the
 `PipelineConfig` dataclass.
 
-### `plan.yaml` Schema (20 configurable keys)
+### `plan.yaml` Schema (21 configurable keys)
 
 ```yaml
 project:
   formula: ""               # Chemical formula (required)
   dopant_elements: []       # List of dopant elements
   poscar_src: ""            # POSCAR source path or MP-ID
+  scope: defects            # "defects" (default) or "chemical-environment" (CPD only, ADR 0005)
 parameters:
   functional: pbesol        # XC functional (pbesol, pbe, scan, hse, etc.)
   encut: ~                  # Plane-wave cutoff (auto-detected if null)

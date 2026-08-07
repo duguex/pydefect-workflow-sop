@@ -51,3 +51,7 @@ _Avoid_: progress report (the old `batch progress` command)
 **Excluded phase**:
 A competing phase deliberately removed from a system's calculation set via `cpd_excluded_phases.yaml` (issue #93), because it is not worth computing at all — out of project scope or known-irrelevant. An exclusion is a scope decision, never a record of convergence difficulties: a phase that ran and failed must be re-run or fixed, not excluded.
 _Avoid_: failed phase, skip list for failures
+
+**Chemical-environment system**:
+A system whose `plan.yaml` declares `scope: chemical-environment`: competing phases and the chemical-potential diagram only — no unit-cell or defect calculations. COMPLETE is reached when the CPD is done (ADR 0005); the batch loop never builds or submits UC/defect legs for it.
+_Avoid_: non-defect system, CPD-only flag

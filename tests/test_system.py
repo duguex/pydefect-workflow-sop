@@ -335,3 +335,71 @@ class TestPhaseInference:
 
         self._patch(monkeypatch, {}, input_ready=lambda d: True)
         assert s.phase() == UNITCELL_DEFECT
+
+
+class TestChemicalEnvironmentScope:
+    """Scope=chemical-environment: COMPLETE is reached at CPD completion
+    (ADR 0005) — no unit-cell or defect legs."""
+
+    def _patch(self, monkeypatch, job_states: dict[str, str] | None = None,
+               *, verdict_converged: bool | None = None, **io_overrides):
+        """Shared patch helper (same as TestPhaseInference._patch)."""
+        import vasp_sop.core.job_store as js_mod
+        import vasp_sop.core.jobs as jobs_mod
+        import vasp_sop.vasp.io as io_mod
+        import vasp_sop.vasp.convergence as conv_mod
+        from vasp_sop.vasp.convergence import ConvergenceVerdict
+
+        fake = FakeJobStore(job_states or {})
+        monkeypatch.setattr(js_mod, "JobStore", lambda: fake, raising=False)
+        monkeypatch.setattr(jobs_mod, "crisp_terminal_status", lambda d: None, raising=False)
+        monkeypatch.setattr(
+            conv_mod, "convergence_verdict",
+            lambda d, task_type="": ConvergenceVerdict(
+                verdict_converged if verdict_converged is not None else False,
+                "mock",
+            ),
+            raising=False,
+        )
+        monkeypatch.setattr(io_mod, "input_ready", lambda d: False, raising=False)
+        for attr, val in io_overrides.items():
+            monkeypatch.setattr(io_mod, attr, val, raising=False)
+
+    def _ce_system(self, tmp_path: Path, *, with_artifacts: bool = True,
+                   scope: str = "chemical-environment"):
+        from types import SimpleNamespace
+        s = _make_system(tmp_path)
+        s.config = SimpleNamespace(poscar_src="MP mp-830", formula="GaN",
+                                   scope=scope)
+        td = s.cpd_dir / "GaN_mp-830"
+        td.mkdir(parents=True)
+        (s.cpd_dir / "target_vertices.yaml").write_text("tv: {}")
+        (s.cpd_dir / "standard_energies.yaml").write_text("se: {}")
+        if with_artifacts:
+            (s.cpd_dir / "composition_energies.yaml").write_text("ce: {}")
+            (s.cpd_dir / "chem_pot_diag.json").write_text("{}")
+        return s
+
+    def test_complete_at_cpd_done(self, tmp_path, monkeypatch):
+        s = self._ce_system(tmp_path)
+        self._patch(monkeypatch, {}, verdict_converged=True)
+        assert s.phase() == COMPLETE
+
+    def test_missing_artifacts_keeps_cpd(self, tmp_path, monkeypatch):
+        s = self._ce_system(tmp_path, with_artifacts=False)
+        self._patch(monkeypatch, {}, verdict_converged=True)
+        assert s.phase() == CHEM_POT_DIAGRAM
+
+    def test_unconverged_phase_keeps_cpd(self, tmp_path, monkeypatch):
+        s = self._ce_system(tmp_path)
+        comp = s.cpd_dir / "Ga_mp-142"
+        comp.mkdir()
+        # verdict mock defaults to False -> competing phase not converged
+        self._patch(monkeypatch, {})
+        assert s.phase() == CHEM_POT_DIAGRAM
+
+    def test_defects_scope_unaffected(self, tmp_path, monkeypatch):
+        """Default scope still requires the full defect workflow."""
+        s = self._ce_system(tmp_path, scope="defects")  # no UC/defect dirs
+        self._patch(monkeypatch, {}, verdict_converged=True)
+        assert s.phase() == UNITCELL_DEFECT
