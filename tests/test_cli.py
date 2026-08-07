@@ -680,6 +680,7 @@ class TestBatchNoDuplicateSubmission:
             td = uc / t
             td.mkdir()
             _write_incar(td)
+            _write_poscar(td, 2)
             _write_kpoints(td)
 
         return root
@@ -853,6 +854,7 @@ class TestFullPipelineWalkthrough:
             td = uc / t
             td.mkdir()
             _write_incar(td)
+            _write_poscar(td, 2)
         df = root / "defect"
         df.mkdir()
         perfect = df / "perfect"
@@ -998,6 +1000,7 @@ class TestFullPipelineWalkthrough:
             td = uc / t
             td.mkdir()
             _write_incar(td)
+            _write_poscar(td, 2)
             self._write_converged_outcar(td)
 
         submit_calls: list[str] = []
@@ -1073,6 +1076,7 @@ class TestPhaseStrictComplete:
             td = uc / t
             td.mkdir()
             _write_incar(td)
+            _write_poscar(td, 2)
             self._verdict_outcar(td)
 
         df = root / "defect"
@@ -1216,6 +1220,7 @@ class TestUcFalseConvergedResubmit:
         band = uc / "band"
         band.mkdir()
         _write_incar(band)
+        _write_poscar(band, 2)
         # Converged OUTCAR but no vasprun.xml
         (band / "OUTCAR").write_text(
             " General timing and accounting\n"
@@ -1230,6 +1235,7 @@ class TestUcFalseConvergedResubmit:
             td = uc / t
             td.mkdir()
             _write_incar(td)
+            _write_poscar(td, 2)
 
         df = root / "defect"
         df.mkdir()
@@ -1313,6 +1319,7 @@ class TestAdvanceAnalyzeStatusPrint:
             td = uc / t
             td.mkdir()
             (td / "INCAR").write_text("NSW = 0\n")
+            _write_poscar(td, 2)
             # band/dos need vasprun for check_task_complete
             (td / "OUTCAR").write_text(
                 " General timing and accounting\n"
@@ -2412,3 +2419,90 @@ class TestUnitcellBuildFailureSelfHeal:
         assert failure is not None and failure["reason"] == "pydefect_vasp_u_failed"
         assert (uc / "unitcell_build_status.json").exists(), \
             "genuine failure must keep blocking"
+
+
+class TestUcEmptyPoscarGuard:
+    """UC leg refuses empty/missing POSCAR — crisp would reject the upload.
+
+    Regression: BaGe4O9/unitcell/dielectric carried a 0-byte POSCAR
+    (bulk_restart era); every `batch run` retried, submitted, and failed
+    with crisp "missing or empty: POSCAR" — an infinite noisy retry loop.
+    The leg now records failed(empty_poscar) once and stops; repairing the
+    data + `batch retry` re-arms it.
+    """
+
+    def _ucdf(self, tmp_path: Path) -> Path:
+        root = tmp_path / "sys"
+        root.mkdir()
+        (root / "plan.yaml").write_text(yaml.dump({
+            "project": {"formula": "NaCl", "dopant_elements": [],
+                        "poscar_src": "MP mp-12345"},
+            "parameters": {"functional": "pbesol"},
+            "supercell": {"tool": "doped", "min_distance": 10.0},
+        }))
+        cpd = root / "cpd"
+        cpd.mkdir()
+        td = cpd / "NaCl_mp-12345"
+        td.mkdir()
+        (td / "OUTCAR").write_text("converged\n")
+        (cpd / "target_vertices.yaml").write_text("tv: 1\n")
+        (cpd / "standard_energies.yaml").write_text("se: 1\n")
+        df = root / "defect"
+        df.mkdir()
+        perfect = df / "perfect"
+        perfect.mkdir()
+        _write_incar(perfect); _write_kpoints(perfect)
+        _write_potcar(perfect); _write_poscar(perfect, 2)
+        uc = root / "unitcell"
+        uc.mkdir()
+        for t in ("band", "dos", "dielectric"):
+            d = uc / t
+            d.mkdir()
+            _write_incar(d); _write_kpoints(d)
+        (uc / "dielectric" / "POSCAR").write_text("")  # 0-byte placeholder
+        return root
+
+    def test_empty_poscar_recorded_failed_once(self, tmp_path, monkeypatch):
+        from vasp_sop.core.job_store import JobStore
+        from vasp_sop.core.orchestrator import advance_one_system
+        from types import SimpleNamespace
+
+        root = self._ucdf(tmp_path)
+        monkeypatch.setattr("vasp_sop.defect.builder.build_all",
+                           lambda *a, **kw: None)
+        monkeypatch.setattr("vasp_sop.defect.builder._generate_vasp_inputs",
+                           lambda *a, **kw: None)
+        monkeypatch.setattr(
+            "vasp_sop.vasp.convergence.convergence_verdict",
+            lambda p: SimpleNamespace(
+                converged="NaCl_mp-12345" in str(p), max_f=None,
+                reason="force_gate_fail"),
+        )
+        monkeypatch.setattr("vasp_sop.vasp.io.prepare_inputs",
+                           lambda *a, **kw: None)
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "vasp_sop.core.jobs.submit_vasp",
+            lambda p: (calls.append(str(p)) or
+                       type("J", (), {"task_name": "t"})()),
+        )
+        dielectric = str((root / "unitcell" / "dielectric").resolve())
+
+        s = _make_system_dict(root)
+        advance_one_system(s, dry_run=False)
+        assert calls.count(dielectric) == 0, "empty POSCAR must not submit"
+        js = JobStore()
+        try:
+            assert js.latest(dielectric) == "failed"
+            assert js.history(dielectric)[-1]["reason"] == "empty_poscar"
+        finally:
+            js.close()
+
+        # second cycle: no retry of the empty-POSCAR dir (marker present)
+        advance_one_system(s, dry_run=False)
+        assert calls.count(dielectric) == 0
+        js = JobStore()
+        try:
+            assert js.history(dielectric)[-1]["reason"] == "empty_poscar"
+        finally:
+            js.close()

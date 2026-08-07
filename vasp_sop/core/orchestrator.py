@@ -294,6 +294,20 @@ def wave2_submit(
         # Stale JobStore "converged" without required outputs must resubmit.
         if js.latest(str(task_dir.resolve())) == "submitted":
             continue
+        # A runnable submission needs a real POSCAR.  An empty/missing one
+        # (0-byte placeholder, e.g. bulk_restart-era) makes crisp refuse the
+        # upload — record failed(empty_poscar) once and stop retrying every
+        # cycle; repair the data and `batch retry` to re-arm.
+        poscar = task_dir / "POSCAR"
+        if not poscar.is_file() or poscar.stat().st_size == 0:
+            cp = str(task_dir.resolve())
+            last = js.latest(cp)
+            if not (last == "failed" and js.history(cp)[-1].get("reason")
+                    == "empty_poscar"):
+                js.record(cp, "failed", reason="empty_poscar")
+                logger.warning("%s/%s: empty POSCAR, not submitting",
+                               sys.name, task)
+            continue
         prepare_inputs(task_dir, sys.config, task_type=task)
         _submit_or_skip(task_dir, f"uc-{task}", sys.name, dry_run, info, js=js)
 
