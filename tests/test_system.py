@@ -174,8 +174,13 @@ class TestStateJson:
 class TestPhaseInference:
     """Test _infer_phase via the public phase() method (no state.json)."""
 
-    def _patch(self, monkeypatch, job_states: dict[str, str] | None = None, **io_overrides):
-        """Patch JobStore and vasp.io helpers used by _infer_phase."""
+    def _patch(self, monkeypatch, job_states: dict[str, str] | None = None,
+               *, verdict_converged: bool | None = None, **io_overrides):
+        """Patch JobStore and vasp.io helpers used by _infer_phase.
+
+        *verdict_converged* overrides the mocked convergence verdict
+        (default False — the gate's checks then always block).
+        """
         import vasp_sop.core.job_store as js_mod
         import vasp_sop.core.jobs as jobs_mod
         import vasp_sop.vasp.io as io_mod
@@ -187,7 +192,11 @@ class TestPhaseInference:
         monkeypatch.setattr(jobs_mod, "crisp_terminal_status", lambda d: None, raising=False)
         monkeypatch.setattr(
             conv_mod, "convergence_verdict",
-            lambda d: ConvergenceVerdict(False, "mock"), raising=False,
+            lambda d, task_type="": ConvergenceVerdict(
+                verdict_converged if verdict_converged is not None else False,
+                "mock",
+            ),
+            raising=False,
         )
         monkeypatch.setattr(io_mod, "input_ready", lambda d: False, raising=False)
         for attr, val in io_overrides.items():
@@ -265,7 +274,7 @@ class TestPhaseInference:
         df.mkdir(parents=True)
         defect = df / "Va_Ga_0"
         defect.mkdir()
-        for f in ("INCAR", "POSCAR", "POTCAR", "KPOINTS", "OUTCAR"):
+        for f in ("INCAR", "POSCAR", "POTCAR", "KPOINTS"):
             (defect / f).write_text("x")
         (defect / "calc_results.json").write_text("{}")
         (defect / "correction.json").write_text("{}")
@@ -275,7 +284,24 @@ class TestPhaseInference:
         perfect.mkdir()
         (perfect / "perfect_band_edge_state.json").write_text("{}")
 
-        self._patch(monkeypatch, {}, input_ready=lambda d: True)
+        # Every calculation on disk must pass the convergence verdict
+        # (ADR 0004) — write verdict-converged OUTCARs everywhere.
+        def _converged(d: Path) -> None:
+            (d / "OUTCAR").write_text(
+                " General timing and accounting\n"
+                " TOTAL-FORCE (eV/Angst)\n ---\n"
+                " 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000\n"
+            )
+
+        _converged(td)
+        for task in ("band", "dos", "dielectric"):
+            _converged(uc / task)
+        _converged(defect)
+        _converged(perfect)
+        (df / "defect_energy_summary.json").write_text("{}")
+
+        self._patch(monkeypatch, {}, input_ready=lambda d: True,
+                    verdict_converged=True)
         assert s.phase() == COMPLETE
 
     def test_unitcell_defect_when_defect_missing_correction(self, tmp_path: Path, monkeypatch):

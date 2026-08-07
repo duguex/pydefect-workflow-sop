@@ -410,6 +410,70 @@ class TestBatchStatus:
         assert "System" in captured
         assert "Phase" in captured
 
+    def test_status_d_t_is_disk_truth(self, tmp_path, capsys):
+        """D/T counts every dir on disk (verdict), not JobStore records:
+        an unsubmitted dir still appears in the denominator."""
+        root = self._make_system(tmp_path)
+        cpd = root / "cpd"
+        cpd.mkdir()
+        done_dir = cpd / "GaN_mp-804"
+        done_dir.mkdir()
+        _write_incar(done_dir)
+        _write_kpoints(done_dir)
+        _write_poscar(done_dir, 2)
+        _write_potcar(done_dir)
+        (done_dir / "OUTCAR").write_text(
+            " General timing and accounting\n"
+            " TOTAL-FORCE (eV/Angst)\n ---\n"
+            " 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000\n"
+        )
+        pending_dir = cpd / "Ga_mp-142"  # on disk, no OUTCAR, never recorded
+        pending_dir.mkdir()
+        _write_incar(pending_dir)
+        _write_kpoints(pending_dir)
+        _write_poscar(pending_dir, 1)
+        _write_potcar(pending_dir)
+
+        from vasp_sop.cli.main import _batch_status
+        _batch_status(tmp_path)
+        captured = capsys.readouterr().out
+        row = next(l for l in captured.splitlines() if l.startswith("GaN"))
+        assert "1/2" in row, "CPD must show 1 converged / 2 dirs (disk truth)"
+
+    def test_status_run_filters_stale_records(self, tmp_path, capsys):
+        """Run counts only 'submitted' records whose dir still exists."""
+        root = self._make_system(tmp_path)
+        from vasp_sop.core.job_store import JobStore
+
+        store = JobStore()
+        ghost = str((root / "cpd" / "Ghost_mp-1").resolve())
+        store.record(ghost, "submitted", source="test")
+        store.close()
+
+        from vasp_sop.cli.main import _batch_status
+        _batch_status(tmp_path)
+        captured = capsys.readouterr().out
+        row = next(l for l in captured.splitlines() if l.startswith("GaN"))
+        assert row.split()[-2] == "·", \
+            "stale submitted record for deleted dir must not show as running"
+
+    def test_status_run_shows_live_submitted(self, tmp_path, capsys):
+        """A submitted record whose dir exists shows in the Run column."""
+        root = self._make_system(tmp_path)
+        live = root / "cpd" / "GaN_mp-804"
+        live.mkdir(parents=True)
+        from vasp_sop.core.job_store import JobStore
+
+        store = JobStore()
+        store.record(str(live.resolve()), "submitted", source="test")
+        store.close()
+
+        from vasp_sop.cli.main import _batch_status
+        _batch_status(tmp_path)
+        captured = capsys.readouterr().out
+        row = next(l for l in captured.splitlines() if l.startswith("GaN"))
+        assert row.split()[-2] == "1", "live submitted dir must show in Run"
+
 
 class TestAdvanceDryRunPostprocess:
     """Issue #20: dry-run in UNITCELL_DEFECT phase must preview post-processing
@@ -960,16 +1024,26 @@ class TestFullPipelineWalkthrough:
 
 
 
-class TestPhaseFailedSkip:
-    """JobStore 'failed' defects must not block COMPLETE (issue #0005 / failed-gate)."""
+class TestPhaseStrictComplete:
+    """COMPLETE requires every calculation on disk to have converged
+    (ADR 0004) — a dir that ran and failed, or was never prepared,
+    keeps the system in UNITCELL_DEFECT."""
 
     @pytest.fixture(autouse=True)
     def _isolate(self, tmp_path: Path):
         from vasp_sop.core.paths import override_cache_root
         override_cache_root(tmp_path / ".vasp_sop")
 
+    @staticmethod
+    def _verdict_outcar(d: Path) -> None:
+        (d / "OUTCAR").write_text(
+            " General timing and accounting\n"
+            " TOTAL-FORCE (eV/Angst)\n ---\n"
+            " 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000\n"
+        )
+
     def _complete_ready_system(self, tmp_path: Path) -> tuple[dict, Path, Path]:
-        """System with all COMPLETE gates except one optional second defect."""
+        """System with all COMPLETE gates satisfied (every calc converged)."""
         formula, mpid = "GaN", "804"
         root = tmp_path / formula
         root.mkdir()
@@ -986,6 +1060,7 @@ class TestPhaseFailedSkip:
         target.mkdir()
         _write_poscar(target, 2)
         _write_incar(target)
+        self._verdict_outcar(target)
         (cpd / "target_vertices.yaml").write_text("tv: 1\n")
         (cpd / "composition_energies.yaml").write_text("ce: 1\n")
         (cpd / "standard_energies.yaml").write_text("se: 1\n")
@@ -998,12 +1073,14 @@ class TestPhaseFailedSkip:
             td = uc / t
             td.mkdir()
             _write_incar(td)
+            self._verdict_outcar(td)
 
         df = root / "defect"
         df.mkdir()
         (df / "defect_energy_summary.json").write_text("{}\n")
         perfect = df / "perfect"
         perfect.mkdir()
+        self._verdict_outcar(perfect)
         (perfect / "perfect_band_edge_state.json").write_text("{}\n")
 
         good = df / "Va_Ga_0"
@@ -1012,6 +1089,7 @@ class TestPhaseFailedSkip:
         _write_poscar(good, 2)
         _write_potcar(good)
         _write_kpoints(good)
+        self._verdict_outcar(good)
         (good / "calc_results.json").write_text("{}\n")
         (good / "correction.json").write_text("{}\n")
         (good / "defect_structure_info.json").write_text("{}\n")
@@ -1022,9 +1100,9 @@ class TestPhaseFailedSkip:
             JobStore().record(str(d.resolve()), "converged")
         return s, root, df
 
-    def test_failed_defect_does_not_block_complete(self, tmp_path: Path):
-        """Failed defect without analysis intermediates must not block COMPLETE."""
-        
+    def test_failed_defect_blocks_complete(self, tmp_path: Path):
+        """A defect dir that ran but did not converge (truncated OUTCAR,
+        JobStore failed) keeps the system in UNITCELL_DEFECT."""
         from vasp_sop.core.job_store import JobStore
 
         s, _root, df = self._complete_ready_system(tmp_path)
@@ -1034,10 +1112,10 @@ class TestPhaseFailedSkip:
         _write_poscar(bad, 2)
         _write_potcar(bad)
         _write_kpoints(bad)
-        # No analysis intermediates — only JobStore failed
+        (bad / "OUTCAR").write_text("some header\n  reached required\n")  # ran, failed
         JobStore().record(str(bad.resolve()), "failed", reason="unconverged")
 
-        assert _system_phase(s) == "COMPLETE"
+        assert _system_phase(s) == "UNITCELL_DEFECT"
 
     def test_unfinished_defect_blocks_complete(self, tmp_path: Path):
         """Defect without intermediates and not failed stays UNITCELL_DEFECT."""
@@ -1053,16 +1131,47 @@ class TestPhaseFailedSkip:
 
         assert _system_phase(s) == "UNITCELL_DEFECT"
 
-    def test_junk_subdir_without_vasp_inputs_ignored(self, tmp_path: Path):
-        """Non-calculation subdirs under defect/ must not block COMPLETE."""
-        
+    def test_junk_subdir_without_vasp_inputs_blocks_complete(self, tmp_path: Path):
+        """Any directory on disk without a converged verdict — even one
+        that was never prepared — keeps the system in UNITCELL_DEFECT
+        (ADR 0004: COMPLETE means every dir converged)."""
 
         s, _root, df = self._complete_ready_system(tmp_path)
         junk = df / "c3v"
         junk.mkdir()
         (junk / "readme.txt").write_text("not a calc\n")
 
-        assert _system_phase(s) == "COMPLETE"
+        assert _system_phase(s) == "UNITCELL_DEFECT"
+
+    def test_unconverged_competing_phase_blocks_complete(self, tmp_path: Path):
+        """A competing phase that ran but failed the force gate keeps the
+        system in UNITCELL_DEFECT even after the CPD gate was passed."""
+
+        s, root, _df = self._complete_ready_system(tmp_path)
+        comp = root / "cpd" / "Ga_mp-142"
+        comp.mkdir()
+        _write_poscar(comp, 1)
+        _write_incar(comp)
+        _write_potcar(comp)
+        _write_kpoints(comp)
+        (comp / "OUTCAR").write_text(
+            " General timing and accounting\n"
+            " TOTAL-FORCE (eV/Angst)\n ---\n"
+            " 0.000000 0.000000 0.000000 0.990000 0.000000 0.000000\n"
+            " IBRION = 2  NSW = 40  EDIFFG = -0.03\n"
+        )
+
+        assert _system_phase(s) == "UNITCELL_DEFECT"
+
+    def test_missing_full_summary_blocks_complete(self, tmp_path: Path):
+        """Only a partial defect summary — no full summary — is not COMPLETE."""
+
+        s, root, _df = self._complete_ready_system(tmp_path)
+        df = root / "defect"
+        (df / "defect_energy_summary.json").unlink()
+        (df / "defect_energy_summary.partial.json").write_text("{}\n")
+
+        assert _system_phase(s) == "UNITCELL_DEFECT"
 
 
 class TestUcFalseConvergedResubmit:

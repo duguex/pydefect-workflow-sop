@@ -23,6 +23,9 @@ Never raises. The module is standalone — it does not import ``vasp/io.py``.
 
 from __future__ import annotations
 
+import atexit as _atexit
+import json as _json
+import os as _os
 import re as _re
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,8 +58,97 @@ _EDIFFG_RE = _re.compile(
 )
 
 # mtime-based memoisation: avoid re-reading unchanged OUTCARs across
-# successive batch-run cycles.
-_verdict_cache: dict[Path, tuple[float, "ConvergenceVerdict"]] = {}
+# successive batch-run cycles. Keyed by (outcar path, task_type) — the
+# force gate differs per task type, so a plain path key would let a
+# band/dos/dielectric verdict poison a relaxation verdict and vice versa.
+# The sidecar file persists the memo across processes (batch status /
+# progress re-parse thousands of OUTCARs per invocation otherwise).
+_verdict_cache: dict[Path, dict[str, tuple[float, "ConvergenceVerdict"]]] = {}
+_verdict_dirty: set[tuple[Path, str]] = set()
+_verdict_loaded = False
+_VERDICT_FLUSH_EVERY = 250
+
+
+def _sidecar_path() -> Path:
+    from vasp_sop.core.paths import VERDICT_CACHE
+
+    return VERDICT_CACHE
+
+
+def _load_sidecar() -> None:
+    """Load the persistent verdict memo (tolerates absence/corruption)."""
+    global _verdict_loaded
+    if _verdict_loaded:
+        return
+    _verdict_loaded = True
+    try:
+        raw = _json.loads(_sidecar_path().read_text())
+    except (OSError, _json.JSONDecodeError, ValueError):
+        return
+    if not isinstance(raw, dict):
+        return
+    for path_str, by_task in raw.items():
+        if not isinstance(by_task, dict):
+            continue
+        entries: dict[str, tuple[float, ConvergenceVerdict]] = {}
+        for task_type, rec in by_task.items():
+            if not isinstance(rec, dict) or "mtime" not in rec:
+                continue
+            v = rec.get("verdict")
+            if not isinstance(v, dict):
+                continue
+            entries[task_type] = (
+                float(rec["mtime"]),
+                ConvergenceVerdict(
+                    converged=bool(v.get("converged")),
+                    reason=str(v.get("reason", "")),
+                    max_f=v.get("max_f"),
+                    n_ionic=v.get("n_ionic"),
+                ),
+            )
+        if entries:
+            _verdict_cache[Path(path_str)] = entries
+
+
+def _flush_sidecar() -> None:
+    """Write the dirty memo entries back atomically."""
+    if not _verdict_dirty:
+        return
+    try:
+        _load_sidecar()
+        payload: dict[str, dict] = {}
+        for outcar, by_task in _verdict_cache.items():
+            entries = {}
+            for task_type, (mtime, verdict) in by_task.items():
+                entries[task_type] = {
+                    "mtime": mtime,
+                    "verdict": {
+                        "converged": verdict.converged,
+                        "reason": verdict.reason,
+                        "max_f": verdict.max_f,
+                        "n_ionic": verdict.n_ionic,
+                    },
+                }
+            payload[str(outcar)] = entries
+        target = _sidecar_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(".json.tmp")
+        tmp.write_text(_json.dumps(payload))
+        _os.replace(tmp, target)
+    except OSError:
+        pass
+    finally:
+        _verdict_dirty.clear()
+
+
+_atexit.register(_flush_sidecar)
+
+
+def _mark_dirty(outcar: Path, task_type: str) -> None:
+    """Track a new memo entry; flush in batches to bound loss on a crash."""
+    _verdict_dirty.add((outcar, task_type))
+    if len(_verdict_dirty) >= _VERDICT_FLUSH_EVERY:
+        _flush_sidecar()
 
 
 @dataclass(frozen=True)
@@ -107,7 +199,9 @@ def convergence_verdict(path: Path, task_type: str = "") -> ConvergenceVerdict:
         mtime = outcar.stat().st_mtime
     except OSError:
         return ConvergenceVerdict(False, REASON_MISSING_OUTCAR)
-    cached = _verdict_cache.get(outcar)
+    _load_sidecar()
+    by_task = _verdict_cache.get(outcar)
+    cached = by_task.get(task_type) if by_task is not None else None
     if cached is not None and cached[0] == mtime:
         return cached[1]
 
@@ -118,13 +212,15 @@ def convergence_verdict(path: Path, task_type: str = "") -> ConvergenceVerdict:
         verdict = ConvergenceVerdict(
             False, REASON_TRUNCATED, max_f=_last_max_force(outcar)
         )
-        _verdict_cache[outcar] = (mtime, verdict)
+        _verdict_cache.setdefault(outcar, {})[task_type] = (mtime, verdict)
+        _mark_dirty(outcar, task_type)
         return verdict
 
     # Task types that never ionically relax: a finished job is the verdict.
     if task_type in NO_FORCE_GATE_TASK_TYPES:
         verdict = ConvergenceVerdict(True, REASON_NOT_RELAXATION)
-        _verdict_cache[outcar] = (mtime, verdict)
+        _verdict_cache.setdefault(outcar, {})[task_type] = (mtime, verdict)
+        _mark_dirty(outcar, task_type)
         return verdict
 
     # Prefer OUTCAR tags (run that produced this OUTCAR); INCAR is fallback only.
@@ -162,7 +258,8 @@ def convergence_verdict(path: Path, task_type: str = "") -> ConvergenceVerdict:
     # Single-point / DFPT / MD / unknown-static: finished job is enough
     if nsw <= 1 or ibrion not in (1, 2, 3):
         verdict = ConvergenceVerdict(True, REASON_NOT_RELAXATION)
-        _verdict_cache[outcar] = (mtime, verdict)
+        _verdict_cache.setdefault(outcar, {})[task_type] = (mtime, verdict)
+        _mark_dirty(outcar, task_type)
         return verdict
 
     # --- Ionic relaxation ---
@@ -178,7 +275,8 @@ def convergence_verdict(path: Path, task_type: str = "") -> ConvergenceVerdict:
                 REASON_FORCE_GATE if max_f <= abs(ediffg) + 1e-8 else REASON_FORCE_GATE_FAIL,
                 max_f=max_f,
             )
-        _verdict_cache[outcar] = (mtime, verdict)
+        _verdict_cache.setdefault(outcar, {})[task_type] = (mtime, verdict)
+        _mark_dirty(outcar, task_type)
         return verdict
 
     # Energy criterion or missing EDIFFG: NSW early-exit with *run* NSW
@@ -192,7 +290,8 @@ def convergence_verdict(path: Path, task_type: str = "") -> ConvergenceVerdict:
             max_f=max_f,
             n_ionic=n_ionic,
         )
-    _verdict_cache[outcar] = (mtime, verdict)
+    _verdict_cache.setdefault(outcar, {})[task_type] = (mtime, verdict)
+    _mark_dirty(outcar, task_type)
     return verdict
 
 

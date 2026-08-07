@@ -204,6 +204,8 @@ class System:
                     close()
 
     def _infer_phase_locked(self, _js: Any, *, input_ready) -> str:
+        from vasp_sop.vasp.convergence import convergence_verdict
+
         td = self.target_dir
         if td is None:
             return NO_TARGET
@@ -250,10 +252,40 @@ class System:
             if not (cpd_root / "chem_pot_diag.json").is_file():
                 return UNITCELL_DEFECT
 
+            # COMPLETE means every calculation on disk has actually
+            # converged (ADR 0004): a dir that ran and failed, or was
+            # never prepared, keeps the system in UNITCELL_DEFECT.
+            # ``structure_opt`` is a staging copy, not a calculation;
+            # ``combos`` is the MP combo cache, not a phase.
+            for pd in sorted(cpd_root.iterdir()):
+                if not pd.is_dir() or pd.name == "combos":
+                    continue
+                if self._is_excluded_phase(pd):
+                    continue
+                if not convergence_verdict(pd).converged:
+                    return UNITCELL_DEFECT
+
+            uc_root = self.uc_dir
+            uc_tasks = ("band", "dos", "dielectric")
+            for task in uc_tasks:
+                task_dir = uc_root / task
+                if task_dir.is_dir() and not convergence_verdict(
+                    task_dir, task_type=task
+                ).converged:
+                    return UNITCELL_DEFECT
+
             df_root = self.defect_dir
             if not df_root.is_dir():
                 return UNITCELL_DEFECT
 
+            for d in sorted(df_root.iterdir()):
+                if not d.is_dir():
+                    continue
+                if not convergence_verdict(d).converged:
+                    return UNITCELL_DEFECT
+
+            # Post-processing artifacts per defect dir (all converged dirs
+            # must carry them).
             for d in df_root.iterdir():
                 if not d.is_dir() or d.name == "perfect":
                     continue
@@ -264,10 +296,6 @@ class System:
                     and not (d / "output" / "OUTCAR").is_file()
                 ):
                     continue
-                # Failed / unconverged defects do not block COMPLETE.
-                latest_st = _js.latest(str(d.resolve()))
-                if latest_st in ("failed", "unconverged"):
-                    continue
                 if not (d / "calc_results.json").is_file():
                     return UNITCELL_DEFECT
                 if not (d / "correction.json").is_file():
@@ -277,6 +305,10 @@ class System:
 
             perfect = df_root / "perfect"
             if perfect.is_dir() and not (perfect / "perfect_band_edge_state.json").is_file():
+                return UNITCELL_DEFECT
+
+            # Full analysis summary required — a partial one is not complete.
+            if not (df_root / "defect_energy_summary.json").is_file():
                 return UNITCELL_DEFECT
 
             return COMPLETE

@@ -160,6 +160,35 @@ class JobStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def prune_missing(self) -> tuple[int, int]:
+        """Delete records whose directory no longer exists.
+
+        Returns (history_rows_deleted, tracked_rows_deleted).  Non-
+        destructive by design — only dirs gone from the filesystem are
+        removed, so a transiently unmounted path would lose its records.
+        """
+        import os
+
+        rows = self._db.execute("SELECT DISTINCT dir_path FROM job_history").fetchall()
+        dead_history = [
+            r["dir_path"] for r in rows
+            if not os.path.isdir(r["dir_path"])
+        ]
+        for p in dead_history:
+            self._db.execute("DELETE FROM job_history WHERE dir_path = ?", (p,))
+
+        trows = self._db.execute("SELECT DISTINCT dir_path FROM tracked").fetchall()
+        dead_tracked = [
+            r["dir_path"] for r in trows
+            if not os.path.isdir(r["dir_path"])
+        ]
+        for p in dead_tracked:
+            self._db.execute("DELETE FROM tracked WHERE dir_path = ?", (p,))
+
+        if dead_history or dead_tracked:
+            self._db.commit()
+        return len(dead_history), len(dead_tracked)
+
     def close(self) -> None:
         """Close the persistent connection (idempotent)."""
         if self._conn is not None:

@@ -160,3 +160,37 @@ class TestVasprunRecovery:
         assert "ISTART = 1" in text
 
 
+
+
+class TestVerdictSidecar:
+    """Persistent mtime-keyed verdict memo (batch status/progress speed)."""
+
+    def test_sidecar_persists_and_isolates_task_type(self, tmp_path):
+        from vasp_sop.core.paths import override_cache_root
+        import vasp_sop.vasp.convergence as conv
+
+        override_cache_root(tmp_path / ".vasp_sop")
+        conv._verdict_cache.clear()
+        conv._verdict_loaded = False
+        conv._verdict_dirty.clear()
+
+        d = tmp_path / "calc"
+        d.mkdir()
+        _make_outcar(d, nsw=40, ediffg=-0.03, max_force=0.001, last_ionic_step=3)
+
+        v_relax = conv.convergence_verdict(d)
+        v_band = conv.convergence_verdict(d, "band")
+        assert v_relax.reason != v_band.reason, \
+            "task_type must not poison the shared OUTCAR key"
+
+        conv._flush_sidecar()
+        assert conv._sidecar_path().is_file()
+
+        # Fresh-process view: clear the memo, reload from the sidecar.
+        conv._verdict_cache.clear()
+        conv._verdict_loaded = False
+        v2 = conv.convergence_verdict(d)
+        assert v2 == v_relax, "sidecar must reproduce the relaxation verdict"
+
+        # Reload must also keep the band verdict per task type.
+        assert conv.convergence_verdict(d, "band") == v_band

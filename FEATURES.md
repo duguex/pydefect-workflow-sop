@@ -15,10 +15,11 @@
 | Subcommand | Actions | Description |
 |---|---|---|
 | `batch` | `run` | Multi-system pipeline — advance all systems until completion |
-| | `status` | Show per-system phase table |
+| | `status` | Per-system phase table + disk-truth D/T + Run + % |
 | | `generate-inputs` | Generate VASP inputs for all systems that need them |
 | | `submit` | Submit VASP calculations for all systems |
-| | `progress` | Per-system completion percentage |
+| | `start` / `stop` | Start / stop the background batch loop |
+| | `history` | JobStore record timeline (`--prune` deletes records for missing dirs) |
 | `defect` | `init` | Generate `plan.yaml` with inference and dynamic comments |
 | | `run` | Run the full point-defect pipeline for one system |
 | | `resume` | Resume pipeline from saved state (legacy — use `batch run`) |

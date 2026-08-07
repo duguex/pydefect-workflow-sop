@@ -9,7 +9,7 @@ One material's prepared project tree, run through the pipeline from structure op
 _Avoid_: project (when meaning the runnable unit), calc tree
 
 **Phase**:
-A stage in a system's lifecycle: structure optimization, competing-phase set, chemical potential diagram, unit-cell defect, complete.
+A stage in a system's lifecycle: structure optimization, competing-phase set, chemical potential diagram, unit-cell defect, complete. COMPLETE requires every calculation directory on disk to have converged and the full defect summary to exist — a dir that ran and failed keeps the system in unit-cell defect (ADR 0004).
 _Avoid_: state, step
 
 **Wave**:
@@ -39,3 +39,11 @@ _Avoid_: results json
 **Result reuse**:
 The capability of answering "has this calculation been run, what was its result" for previously-computed calculations. Owned by crisp (`crisp cache`, wrapping the `vasp-cache` library); vasp-sop never touches the result store — crisp caches completed results and materializes cached outputs back into the worktree.
 _Avoid_: vasp-cache (as a vasp-sop concept), results cache, cache lookup
+
+**Calculation state**:
+The JobStore record of one calculation directory (`submitted` / `converged` / `failed`), pipeline accounting that may lag the disk or outlive a deleted directory. Never a source of truth for "is this calc done" — that is the convergence verdict's job.
+_Avoid_: status, done flag
+
+**Status table**:
+`vasp-sop batch status`'s per-system view. D/T columns are disk truth — the convergence verdict over every directory on disk; Run counts live `submitted` records; % is completed-dirs-over-all-dirs (100% when the defect summary exists).
+_Avoid_: progress report (the old `batch progress` command)

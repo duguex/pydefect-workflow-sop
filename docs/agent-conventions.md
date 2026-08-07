@@ -64,7 +64,7 @@ CLI (vasp-sop command)
   │       └── UNITCELL_DEFECT → build defect structures + submit VASP
   │
   ├── defect build .       ← standalone defect structure generation
-  ├── cache status/query/verify/migrate
+  ├── batch status .       ← disk-truth status table (verdict over dirs)
   └── materials fetch      ← MP query + download
 ```
 

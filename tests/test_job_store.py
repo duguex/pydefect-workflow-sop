@@ -108,3 +108,29 @@ class TestJobStore:
         monkeypatch.setattr(js_mod, "calc_done_on_disk", lambda p, task_type="": True)
         assert js_mod.record_if_done(store, d) == "converged"
         assert store.latest(str(d.resolve())) == "converged"
+
+
+class TestPruneMissing:
+    def test_prune_removes_records_for_deleted_dirs(self, store, tmp_path):
+        alive = tmp_path / "alive_calc"
+        alive.mkdir()
+        ghost = tmp_path / "ghost_calc"  # never created
+        store.record(str(alive.resolve()), "submitted")
+        store.track(str(alive.resolve()))
+        store.record(str(ghost.resolve()), "submitted")
+        store.track(str(ghost.resolve()))
+
+        n_hist, n_trk = store.prune_missing()
+
+        assert (n_hist, n_trk) == (1, 1)
+        assert store.latest(str(alive.resolve())) == "submitted"
+        assert store.latest(str(ghost.resolve())) is None
+        assert [r["dir_path"] for r in store.tracked_dirs()] == [str(alive.resolve())]
+
+    def test_prune_keeps_live_records(self, store, tmp_path):
+        alive = tmp_path / "alive"
+        alive.mkdir()
+        store.record(str(alive.resolve()), "converged")
+        n_hist, n_trk = store.prune_missing()
+        assert (n_hist, n_trk) == (0, 0)
+        assert store.latest(str(alive.resolve())) == "converged"

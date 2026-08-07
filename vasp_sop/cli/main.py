@@ -619,6 +619,10 @@ def _add_batch_parser(subparsers) -> None:
     )
     p_history.add_argument("--system", "-s", type=str, default=None,
                            help="System name (omit for all)")
+    p_history.add_argument(
+        "--prune", action="store_true",
+        help="Delete JobStore records whose directory no longer exists",
+    )
 
     # generate-inputs
     gp = sub.add_parser("generate-inputs", help="Generate VASP inputs for all systems")
@@ -673,14 +677,6 @@ def _add_batch_parser(subparsers) -> None:
     sp_stop = sub.add_parser("stop", help="Stop background batch loop")
     sp_stop.add_argument("root", type=Path, help="Project root directory")
 
-    pp = sub.add_parser("progress", help="Show per-system completion percentage")
-    pp.add_argument(
-        "root", type=Path,
-        help="Project root directory containing system subdirectories",
-    )
-
-
-
 def _handle_batch(args: argparse.Namespace) -> None:
     if args.batch_action == "status":
         _batch_status(args.root.resolve())
@@ -691,14 +687,13 @@ def _handle_batch(args: argparse.Namespace) -> None:
     elif args.batch_action == "stop":
         _batch_stop(args.root.resolve())
     elif args.batch_action == "history":
-        _batch_history(args.root.resolve(), system=args.system)
+        _batch_history(args.root.resolve(), system=args.system,
+                       prune=args.prune)
     elif args.batch_action == "generate-inputs":
         _batch_generate_inputs(args.root.resolve(), unitcell=args.unitcell)
     elif args.batch_action == "run":
         _batch_run(args.root.resolve(), poll_interval=args.poll, dry_run=args.dry_run,
                    exclude=args.exclude, loop=args.loop)
-    elif args.batch_action == "progress":
-        _batch_progress(args.root.resolve())
 
 
 
@@ -776,48 +771,36 @@ def _batch_loop_status(root: Path) -> None:
     print(f"Loop running (PID {pid})  uptime={uptime}{suffix}")
 
 
-def _batch_progress(root: Path) -> None:
-    """Print per-system completion percentage (completed / total pipeline dirs)."""
-    import subprocess, json
-
-    from vasp_sop.vasp.convergence import convergence_verdict
-    def is_done(p: Path) -> bool:
-        return convergence_verdict(p).converged
-
-    rows: list[tuple[int, str, int, int, int, int, int, int]] = []
-    for d in sorted(root.iterdir()):
-        if not d.is_dir() or d.name.startswith("."):
-            continue
-        cpd_dirs = [p for p in (d / "cpd").iterdir() if p.is_dir()] if (d / "cpd").is_dir() else []
-        uc_dirs = [p for p in (d / "unitcell").iterdir() if p.is_dir() and p.name != "structure_opt"] if (d / "unitcell").is_dir() else []
-        df_dirs = [p for p in (d / "defect").iterdir() if p.is_dir()] if (d / "defect").is_dir() else []
-
-        cpd_ok = sum(1 for p in cpd_dirs if is_done(p))
-        uc_ok = sum(1 for p in uc_dirs if is_done(p))
-        df_ok = sum(1 for p in df_dirs if is_done(p))
-
-        nc, nu, nd = len(cpd_dirs), len(uc_dirs), len(df_dirs)
-        total = nc + nu + nd
-        done = cpd_ok + uc_ok + df_ok
-
-        pct = 100 if (d / "defect" / "defect_energy_summary.json").exists() else (
-            int(done / total * 100) if total else 0
-        )
-        if nc + nu + nd > 0 or pct == 100:
-            rows.append((pct, d.name, nc, nu, nd, cpd_ok, uc_ok, df_ok))
-    for pct, name, nc, nu, nd, cpd_ok, uc_ok, df_ok in rows:
-        print(f"{name:22s}  {pct:3d}%  {cpd_ok:>2d}/{nc:<3d}  {uc_ok:>2d}/{nu:<3d}  {df_ok:>3d}/{nd:<3d}")
-
-
 def _batch_status(root: Path) -> None:
-    """Scan *root* for vasp-sop systems and print status table."""
+    """Scan *root* for vasp-sop systems and print status table.
+
+    D/T columns are **disk truth**: the denominator is every directory on
+    disk (cpd/ phases, unitcell tasks except structure_opt, defect dirs)
+    and the numerator is how many of them pass the convergence verdict.
+    Run counts JobStore ``submitted`` records whose directory still exists
+    (jobs believed to be in crisp's queue); records for deleted dirs are
+    filtered out on read.
+    """
     _batch_loop_status(root)
     from vasp_sop.core.job_store import JobStore
     from vasp_sop.core.config import PipelineConfig
+    from vasp_sop.vasp.convergence import convergence_verdict
 
     store = JobStore()
     all_jobs = store.latest_all()
     store.close()
+
+    def _dirs(base: Path, *, exclude: str | None = None) -> list[Path]:
+        if not base.is_dir():
+            return []
+        return [p for p in base.iterdir() if p.is_dir() and p.name != exclude]
+
+    def _running(prefix: str) -> int:
+        # Read-side filter: ignore records whose directory no longer exists.
+        return sum(
+            1 for p, st in all_jobs.items()
+            if st == "submitted" and p.startswith(prefix) and Path(p).is_dir()
+        )
 
     rows: list[dict] = []
     for d in sorted(root.iterdir()):
@@ -828,65 +811,73 @@ def _batch_status(root: Path) -> None:
             continue
         try:
             config = PipelineConfig.from_yaml(plan, root=d)
-            src = config.poscar_src
-            mpid = src.split("mp-", 1)[1] if src.startswith("MP mp-") else None
-            s = {"name": d.name, "root": d, "config": config,
-                 "formula": config.formula, "mpid": mpid}
         except Exception:
             continue
 
         phase = System(d, config).phase()
         prefix = str(d.resolve())
-        cpd_prefix = prefix + "/cpd/"
-        uc_prefix = prefix + "/unitcell/"
-        df_prefix = prefix + "/defect/"
-        cpd_r = sum(1 for p, st in all_jobs.items()
-                    if p.startswith(cpd_prefix) and st == "submitted")
-        cpd_d = sum(1 for p, st in all_jobs.items()
-                    if p.startswith(cpd_prefix) and st == "converged")
-        uc_r = sum(1 for p, st in all_jobs.items()
-                   if p.startswith(uc_prefix) and st == "submitted")
-        uc_d = sum(1 for p, st in all_jobs.items()
-                   if p.startswith(uc_prefix) and st == "converged")
-        df_r = sum(1 for p, st in all_jobs.items()
-                   if p.startswith(df_prefix) and st == "submitted")
-        df_d = sum(1 for p, st in all_jobs.items()
-                   if p.startswith(df_prefix) and st == "converged")
-
-        pri = _PRIORITY_MAP.get(d.name, "\u2014")
-        rows.append({"name": d.name, "pri": pri, "phase": phase,
-                     "cpd_r": cpd_r, "cpd_d": cpd_d,
-                     "uc_r": uc_r, "uc_d": uc_d,
-                     "df_r": df_r, "df_d": df_d})
+        cpd_dirs = _dirs(d / "cpd")
+        uc_dirs = _dirs(d / "unitcell", exclude="structure_opt")
+        df_dirs = _dirs(d / "defect")
+        cpd_d = sum(1 for p in cpd_dirs if convergence_verdict(p).converged)
+        uc_d = sum(1 for p in uc_dirs if convergence_verdict(p).converged)
+        df_d = sum(1 for p in df_dirs if convergence_verdict(p).converged)
+        running = (
+            _running(prefix + "/cpd/")
+            + _running(prefix + "/unitcell/")
+            + _running(prefix + "/defect/")
+        )
+        total = len(cpd_dirs) + len(uc_dirs) + len(df_dirs)
+        done = cpd_d + uc_d + df_d
+        # Pure disk truth — no summary shortcut: % is the fraction of
+        # directories that passed the verdict, matching the COMPLETE gate.
+        pct = int(done / total * 100) if total else 0
+        rows.append({
+            "name": d.name, "pri": _PRIORITY_MAP.get(d.name, "\u2014"),
+            "phase": phase, "cpd": (cpd_d, len(cpd_dirs)),
+            "uc": (uc_d, len(uc_dirs)), "df": (df_d, len(df_dirs)),
+            "running": running, "pct": pct,
+        })
 
     if not rows:
         print(f"No vasp-sop systems found in {root}")
         return
 
-    print(f"{'System':<22} {'P':<3} {'Phase':<10} {'CPD':>8} {'UC':>8} {'Defect':>9}")
+    print(f"{'System':<22} {'P':<3} {'Phase':<10} {'CPD':>8} {'UC':>8} {'Defect':>9} {'Run':>4} {'%':>4}")
     print(f"{'':22s} {'':3s} {'':10s} {'D/T':>8} {'D/T':>8} {'D/T':>9}")
-    print("-" * 62)
+    print("-" * 66)
     for r in rows:
-        cpd_total = r["cpd_d"] + r["cpd_r"]
-        cpd_s = f"{r['cpd_d']}/{cpd_total}" if cpd_total else "·"
-        uc_total = r["uc_d"] + r["uc_r"]
-        uc_s = f"{r['uc_d']}/{uc_total}" if uc_total else "·"
-        df_total = r["df_d"] + r["df_r"]
-        df_s = f"{r['df_d']}/{df_total}" if df_total else "·"
+        cpd_s = f"{r['cpd'][0]}/{r['cpd'][1]}" if r["cpd"][1] else "\u00b7"
+        uc_s = f"{r['uc'][0]}/{r['uc'][1]}" if r["uc"][1] else "\u00b7"
+        df_s = f"{r['df'][0]}/{r['df'][1]}" if r["df"][1] else "\u00b7"
+        run_s = str(r["running"]) if r["running"] else "\u00b7"
+        pct_s = f"{r['pct']:3d}%"
         print(f"{r['name']:<22} {r['pri']:<3} {r['phase']:<10} "
-              f"{cpd_s:>8} {uc_s:>8} {df_s:>9}")
-    print("-" * 62)
+              f"{cpd_s:>8} {uc_s:>8} {df_s:>9} {run_s:>4} {pct_s:>4}")
+    print("-" * 66)
     done_count = sum(1 for r in rows if r["phase"] == "COMPLETE")
     print(f"Total: {len(rows)}  Done: {done_count}  "
           f"Remaining: {len(rows) - done_count}")
 
 
-def _batch_history(root: Path, *, system: str | None = None) -> None:
-    """Print job state history for one or all systems from JobStore."""
+def _batch_history(root: Path, *, system: str | None = None,
+                   prune: bool = False) -> None:
+    """Print job state history for one or all systems from JobStore.
+
+    With *prune*, delete JobStore records (job_history + tracked) whose
+    directory no longer exists — stale entries for deleted calculation
+    dirs otherwise inflate status accounting.
+    """
     from vasp_sop.core.job_store import JobStore
     from datetime import datetime
 
     store = JobStore()
+    if prune:
+        n_hist, n_trk = store.prune_missing()
+        store.close()
+        print(f"Pruned {n_hist} history record(s) and {n_trk} tracked "
+              f"row(s) for missing directories.")
+        return
     all_jobs = store.latest_all()
     store.close()
 
