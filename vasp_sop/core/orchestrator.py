@@ -53,6 +53,7 @@ def _submit_or_skip(
     info_fn: Callable[[str], None],
     *,
     js: Any = None,
+    source: str | None = None,
 ) -> Any:
     """Submit a VASP job via crisp, or skip in dry-run mode."""
     from vasp_sop.core.jobs import submit_vasp
@@ -68,7 +69,10 @@ def _submit_or_skip(
         store = js if not owned else JobStore()
         try:
             store.track(str(path.resolve()))
-            store.record(str(path.resolve()), "submitted", source=job.task_name)
+            store.record(
+                str(path.resolve()), "submitted",
+                source=source or job.task_name,
+            )
         finally:
             if owned:
                 store.close()
@@ -128,7 +132,8 @@ def wave1_optimize(
 
 
 def wave2_submit(
-    sys: System, js: Any, dry_run: bool, *, log_to_logger: bool = False
+    sys: System, js: Any, dry_run: bool, *, log_to_logger: bool = False,
+    retry_failed: bool = False,
 ) -> None:
     """Wave 2: COMPETING + UNITCELL_DEFECT submission.
 
@@ -318,7 +323,28 @@ def wave2_submit(
                     )
                 continue
 
-            if latest in ("failed", "converged", "unconverged"):
+            if latest == "converged":
+                continue
+            if latest in ("failed", "unconverged"):
+                # One-shot auto-rerun (ADR 0007): terminal defect dirs get
+                # exactly one machine resubmit, marked auto_retry; a second
+                # failure is terminal forever. Armed only by an explicit
+                # `batch run --retry-failed`.
+                if not retry_failed:
+                    continue
+                if any(r.get("source") == "auto_retry"
+                       for r in js.history(str(child.resolve()))):
+                    continue
+                if latest == "unconverged":
+                    from vasp_sop.vasp.io import restart_from_contcar
+                    try:
+                        restart_from_contcar(child)
+                    except Exception:
+                        pass
+                _submit_or_skip(
+                    child, f"df-{child.name}", sys.name, dry_run, info,
+                    js=js, source="auto_retry",
+                )
                 continue
             _submit_or_skip(child, f"df-{child.name}", sys.name, dry_run, info, js=js)
 
@@ -603,7 +629,8 @@ _MAX_RESTART = 5
 
 
 def advance_one_system(
-    s: dict, *, dry_run: bool = False, log_to_logger: bool = False
+    s: dict, *, dry_run: bool = False, log_to_logger: bool = False,
+    retry_failed: bool = False,
 ) -> None:
     """Advance one system by one cycle (runs serially in batch mode).
 
@@ -654,7 +681,8 @@ def advance_one_system(
         try:
             if dry_run:
                 wave3_postprocess(sys_obj, js, dry_run, log_to_logger=log_to_logger)
-            wave2_submit(sys_obj, js, dry_run, log_to_logger=log_to_logger)
+            wave2_submit(sys_obj, js, dry_run, log_to_logger=log_to_logger,
+                         retry_failed=retry_failed)
             if not dry_run:
                 wave3_postprocess(sys_obj, js, dry_run, log_to_logger=log_to_logger)
         except Exception as exc:
@@ -685,6 +713,7 @@ class BatchOrchestrator:
         exclude: list[str] | None = None,
         poll_interval: int = 60,
         loop: bool = False,
+        retry_failed: bool = False,
     ) -> None:
         from vasp_sop.core.job_store import JobStore
         from vasp_sop.core.config import PipelineConfig
@@ -694,6 +723,7 @@ class BatchOrchestrator:
         self.exclude = list(exclude or [])
         self.poll_interval = poll_interval
         self.loop = loop
+        self.retry_failed = retry_failed
         self.js = JobStore()
         self.sw = None
         if loop:
@@ -1014,7 +1044,7 @@ class BatchOrchestrator:
 
             if self.loop:
                 try:
-                    advance_one_system(s, dry_run=self.dry_run, log_to_logger=True)
+                    advance_one_system(s, dry_run=self.dry_run, log_to_logger=True, retry_failed=self.retry_failed)
                     logger.info(
                         "  [%d/%d] %-18s %s ... done", idx, len(self.systems), name, p
                     )
@@ -1033,7 +1063,7 @@ class BatchOrchestrator:
                     end="", flush=True,
                 )
                 try:
-                    advance_one_system(s, dry_run=self.dry_run)
+                    advance_one_system(s, dry_run=self.dry_run, retry_failed=self.retry_failed)
                     print(" done")
                 except Exception as exc:
                     reason = str(exc).split("(")[0].strip() or type(exc).__name__

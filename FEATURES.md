@@ -22,6 +22,8 @@
 | | `history` | JobStore record timeline (`--prune` deletes records for missing dirs) |
 | | `reconcile` | Settle stale JobStore records from disk/crisp truth (no phase advance) |
 | | `retry` | Reset calc dirs to `pending` so the next `batch run` resubmits them |
+| | `blockers` | Per-system block census — why each calc dir is not done (ADR 0007) |
+| | `restore` | Restore missing POTCAR from the local PSP store for blocked dirs |
 | `defect` | `init` | Generate `plan.yaml` with inference and dynamic comments |
 | | `run` | Run the full point-defect pipeline for one system |
 | | `resume` | Resume pipeline from saved state (legacy — use `batch run`) |

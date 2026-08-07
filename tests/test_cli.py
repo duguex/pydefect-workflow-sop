@@ -2229,3 +2229,136 @@ class TestBatchRetry:
             assert js.latest(str((root / "missing" / "thing").resolve())) is None
         finally:
             js.close()
+
+
+class TestAutoRerunFailed:
+    """ADR 0007 one-shot auto-rerun: `batch run --retry-failed` semantics.
+
+    A failed/unconverged defect dir is resubmitted exactly once (marked
+    auto_retry); a second failure is terminal.  Without the flag, failed
+    defect dirs stay terminal (status quo).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _patch_common(self, monkeypatch, tmp_path: Path):
+        from types import SimpleNamespace
+        from vasp_sop.core.paths import override_cache_root
+        override_cache_root(tmp_path / ".vasp_sop")
+        monkeypatch.setattr("vasp_sop.defect.builder.build_all",
+                           lambda *a, **kw: None)
+        monkeypatch.setattr("vasp_sop.defect.builder._generate_vasp_inputs",
+                           lambda *a, **kw: None)
+        monkeypatch.setattr(
+            "vasp_sop.vasp.convergence.convergence_verdict",
+            lambda p: SimpleNamespace(
+                converged="NaCl_mp-12345" in str(p), max_f=None,
+                reason="force_gate_fail"),
+        )
+        monkeypatch.setattr("vasp_sop.vasp.io.prepare_inputs",
+                           lambda *a, **kw: None)
+        monkeypatch.setattr("vasp_sop.defect.analysis.analyze",
+                           lambda *a, **kw: None)
+
+    def _ucdf(self, tmp_path: Path) -> Path:
+        formula = "NaCl"
+        mpid = "12345"
+        root = tmp_path / "ucdf_system"
+        root.mkdir(parents=True)
+        (root / "plan.yaml").write_text(yaml.dump({
+            "project": {"formula": formula, "dopant_elements": [],
+                        "poscar_src": f"MP mp-{mpid}"},
+            "parameters": {"functional": "pbesol"},
+            "supercell": {"tool": "doped", "min_distance": 10.0},
+        }))
+        cpd = root / "cpd"
+        cpd.mkdir()
+        target_dir = cpd / f"{formula}_mp-{mpid}"
+        target_dir.mkdir()
+        (target_dir / "OUTCAR").write_text("converged\n")
+        (cpd / "target_vertices.yaml").write_text("tv: 1\n")
+        (cpd / "standard_energies.yaml").write_text("se: 1\n")
+        df = root / "defect"
+        df.mkdir()
+        perfect = df / "perfect"
+        perfect.mkdir()
+        _write_incar(perfect); _write_kpoints(perfect)
+        _write_potcar(perfect); _write_poscar(perfect, 2)
+        defect = df / "Va_Na_0"
+        defect.mkdir()
+        _write_incar(defect); _write_kpoints(defect)
+        _write_potcar(defect); _write_poscar(defect, 2)
+        uc = root / "unitcell"
+        uc.mkdir()
+        for t in ("band", "dos", "dielectric"):
+            td = uc / t
+            td.mkdir()
+            _write_incar(td); _write_kpoints(td)
+        return root
+
+    def _defect_crash(self, defect: Path) -> str:
+        """OUTCAR with no timing banner = crashed run."""
+        (defect / "OUTCAR").write_text("some header\nscf loop\n")
+        (defect / "CONTCAR").write_text("c\n")
+        return str(defect.resolve())
+
+    def test_armed_flag_resubmits_failed_once(
+            self, tmp_path: Path, monkeypatch):
+        """--retry-failed: failed dir resubmitted; marker makes 2nd failure terminal."""
+        from vasp_sop.core.job_store import JobStore
+        from vasp_sop.core.paths import override_cache_root
+        from vasp_sop.core.orchestrator import advance_one_system
+
+        override_cache_root(tmp_path / ".vasp_sop")
+        root = self._ucdf(tmp_path)
+        defect = self._defect_crash(root / "defect" / "Va_Na_0")
+
+        js = JobStore()
+        js.record(defect, "failed", source="test", reason="vasp_crash")
+        js.close()
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "vasp_sop.core.jobs.submit_vasp",
+            lambda p: (calls.append(str(Path(p).resolve())) or
+                       type("J", (), {"task_name": "t"})()),
+        )
+        s = _make_system_dict(root)
+        advance_one_system(s, dry_run=False, retry_failed=True)
+        assert calls.count(defect) == 1, "failed defect should be auto-retried once"
+
+        js = JobStore()
+        try:
+            hist = js.history(defect)
+            assert any(r["source"] == "auto_retry" for r in hist), \
+                "retry must be marked auto_retry"
+        finally:
+            js.close()
+
+        # retry runs again and fails → terminal forever
+        js = JobStore()
+        js.record(defect, "failed", source="test", reason="vasp_crash")
+        js.close()
+        advance_one_system(s, dry_run=False, retry_failed=True)
+        assert calls.count(defect) == 1, "second failure must be terminal"
+
+    def test_no_flag_keeps_failed_terminal(self, tmp_path: Path, monkeypatch):
+        from vasp_sop.core.job_store import JobStore
+        from vasp_sop.core.paths import override_cache_root
+        from vasp_sop.core.orchestrator import advance_one_system
+
+        override_cache_root(tmp_path / ".vasp_sop")
+        root = self._ucdf(tmp_path)
+        defect = self._defect_crash(root / "defect" / "Va_Na_0")
+        js = JobStore()
+        js.record(defect, "failed", source="test", reason="vasp_crash")
+        js.close()
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "vasp_sop.core.jobs.submit_vasp",
+            lambda p: (calls.append(str(Path(p).resolve())) or
+                       type("J", (), {"task_name": "t"})()),
+        )
+        advance_one_system(_make_system_dict(root), dry_run=False,
+                           retry_failed=False)
+        assert calls.count(defect) == 0, "un-armed run must not retry failed dirs"

@@ -63,3 +63,15 @@ _Avoid_: production job queue, deliverables
 **Stale record**:
 A calculation-state entry that says `submitted` for a directory whose job is no longer running — disk or crisp already has the truth. Repairing it is *reconciling*; an un-reconciled stale record deadlocks progress because the machine skips dirs it believes are still running (ADR 0006).
 _Avoid_: stuck job, ghost entry
+
+**Block reason**:
+Why one calculation directory is not done, as reported by `batch blockers`: missing inputs, failed (crashed), unconverged, never ran, or live. One directory, one reason; the tool cannot claim to automate what it cannot enumerate (ADR 0007).
+_Avoid_: 卡住原因, issue
+
+**Auto-rerun**:
+The one-shot retry policy (ADR 0007). A failed or unconverged *defect* directory is resubmitted exactly once by the machine, marked `auto_retry`; a second failure is terminal forever. The machine never retries beyond one shot, never touches CPD phases after the persistent gate, and never decides exclusions.
+_Avoid_: 无限重试, resubmission loop
+
+**Input restore**:
+Making a directory runnable again by restoring its missing inputs — POTCAR from the local PSP store, keyed by POSCAR species — so a never-ran or input-stripped directory becomes `input_ready` (ADR 0007). Restoring inputs does not by itself decide whether the calculation should run.
+_Avoid_: fix inputs, 补输入

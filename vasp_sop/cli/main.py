@@ -648,6 +648,30 @@ def _add_batch_parser(subparsers) -> None:
         help="Calc dir(s) relative to root, e.g. BaGe4O9/unitcell/dielectric",
     )
 
+    # blockers
+    p_blockers = sub.add_parser(
+        "blockers",
+        help="Enumerate every block reason per system (the tool's own census)",
+    )
+    p_blockers.add_argument(
+        "root", type=Path,
+        help="Project root directory containing system subdirectories",
+    )
+
+    # restore
+    p_restore = sub.add_parser(
+        "restore",
+        help="Restore missing POTCAR from the local PSP store for runnable dirs",
+    )
+    p_restore.add_argument(
+        "root", type=Path,
+        help="Project root directory containing system subdirectories",
+    )
+    p_restore.add_argument(
+        "--dry-run", action="store_true",
+        help="Report what would be restored without writing any file",
+    )
+
     # generate-inputs
     gp = sub.add_parser("generate-inputs", help="Generate VASP inputs for all systems")
     gp.add_argument(
@@ -688,6 +712,11 @@ def _add_batch_parser(subparsers) -> None:
         "--exclude", action="append", default=[],
         help="Exclude a system by directory name (repeatable: --exclude hBN --exclude orth-SiC)",
     )
+    rp.add_argument(
+        "--retry-failed", action="store_true",
+        help="Arm the one-shot auto-rerun (ADR 0007): resubmit every failed/"
+        "unconverged defect dir exactly once; a second failure is terminal",
+    )
     rp.add_argument("--loop", action="store_true",
                     help="Keep polling and advancing until all systems complete")
     rp.add_argument("--daemon", action="store_true",
@@ -717,11 +746,15 @@ def _handle_batch(args: argparse.Namespace) -> None:
         _batch_reconcile(args.root.resolve())
     elif args.batch_action == "retry":
         _batch_retry(args.root.resolve(), args.dirs)
+    elif args.batch_action == "blockers":
+        _batch_blockers(args.root.resolve())
+    elif args.batch_action == "restore":
+        _batch_restore(args.root.resolve(), dry_run=args.dry_run)
     elif args.batch_action == "generate-inputs":
         _batch_generate_inputs(args.root.resolve(), unitcell=args.unitcell)
     elif args.batch_action == "run":
         _batch_run(args.root.resolve(), poll_interval=args.poll, dry_run=args.dry_run,
-                   exclude=args.exclude, loop=args.loop)
+                   exclude=args.exclude, loop=args.loop, retry_failed=args.retry_failed)
 
 
 
@@ -968,7 +1001,8 @@ def _unitcell_build_failure(root: Path) -> dict[str, str] | None:
 
 
 def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
-               exclude: list[str] | None = None, loop: bool = False) -> None:
+               exclude: list[str] | None = None, loop: bool = False,
+               retry_failed: bool = False) -> None:
     """Batch pipeline — advance all systems via the core orchestrator.
 
     One-shot advances each system once, then exits; ``--loop`` runs the
@@ -984,6 +1018,7 @@ def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
         exclude=exclude,
         poll_interval=poll_interval,
         loop=loop,
+        retry_failed=retry_failed,
     ).run()
 
 
@@ -1008,6 +1043,66 @@ def _batch_reconcile(root: Path) -> None:
         f"reconcile: backfill={backfilled} orphan_sweep={orphaned} "
         f"poll_finalized={completed} stale_settled={settled}"
     )
+
+
+def _batch_restore(root: Path, *, dry_run: bool = False) -> None:
+    """Restore missing POTCAR from the local PSP store (ADR 0007)."""
+    import os
+    from vasp_sop.vasp.io import restore_missing_inputs
+
+    psp = os.environ.get("VASP_PSP_DIR")
+    res = restore_missing_inputs(root, psp_dir=psp, dry_run=dry_run)
+    if dry_run:
+        print(f"  would restore {len(res['restored'])} POTCAR(s)")
+    else:
+        print(f"  restored {len(res['restored'])} POTCAR(s)")
+    for msg in res["restored"][:20]:
+        print(f"    OK   {msg}")
+    if len(res["restored"]) > 20:
+        print(f"    … and {len(res['restored']) - 20} more")
+    for msg in res["failed"][:10]:
+        print(f"    FAIL {msg}")
+    for msg in res["skipped"][:5]:
+        print(f"    SKIP {msg}")
+
+
+def _batch_blockers(root: Path) -> None:
+    """Per-system block census — the tool's own answer to "why not done".
+
+    One dir, one block reason (ADR 0007).  Converged/task-complete dirs are
+    done and never listed; the summary counts systems with no identified
+    blocker at all.
+    """
+    from collections import Counter
+    from vasp_sop.core.blockers import scan_system
+    from vasp_sop.core.config import PipelineConfig
+    from vasp_sop.core.system import System
+
+    total: Counter[str] = Counter()
+    n_blocked = 0
+    for d in sorted(root.iterdir()):
+        if not d.is_dir() or not (d / "plan.yaml").is_file():
+            continue
+        try:
+            cfg = PipelineConfig.from_yaml(d / "plan.yaml", root=d)
+            phase = System(d, cfg).phase()
+        except Exception:
+            continue
+        blocks = scan_system(d)
+        if not blocks:
+            continue
+        n_blocked += 1
+        reason_counts: Counter[str] = Counter()
+        for rel, b in blocks.items():
+            reason_counts[b.reason] += 1
+        total.update(reason_counts)
+        print(f"{d.name:<15}{phase:<16}"
+              f"{' '.join(f'{k}:{v}' for k, v in sorted(reason_counts.items()))}")
+    if n_blocked:
+        print(f"\n  {n_blocked} system(s) blocked — "
+              + " ".join(f"{k}:{v}" for k, v in sorted(total.items())))
+    else:
+        print("No systems report blockers.")
 
 
 def _batch_retry(root: Path, dirs: list[str]) -> None:

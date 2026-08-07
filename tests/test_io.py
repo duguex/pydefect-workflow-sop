@@ -78,3 +78,77 @@ class TestCheckTaskComplete:
         from vasp_sop.vasp.io import check_task_complete
         assert check_task_complete(self.dir, "phonon")
 
+
+
+class TestRestorePotcar:
+    """POTCAR restore from the local PSP store (ADR 0007 input restore)."""
+
+    def _psp_store(self, tmp_path: Path) -> Path:
+        psp = tmp_path / "psp"
+        (psp / "Se").mkdir(parents=True)
+        (psp / "Se" / "POTCAR").write_text("Se psp\n   ENMAX = 211.55 ;\n")
+        (psp / "Ba_sv").mkdir(parents=True)
+        (psp / "Ba_sv" / "POTCAR").write_text("Ba sv psp\n   ENMAX = 97.04 ;\n")
+        (psp / "Ba_sv_GW").mkdir(parents=True)
+        (psp / "Ba_sv_GW" / "POTCAR").write_text("GW psp\n   ENMAX = 1.0 ;\n")
+        return psp
+
+    def _poscar(self, d: Path, species: str) -> None:
+        (d / "POSCAR").write_text(
+            "title\n1.0\n"
+            "10.0 0.0 0.0\n0.0 10.0 0.0\n0.0 0.0 10.0\n"
+            f"{species}\n1 1\nDirect\n0 0 0\n0.5 0.5 0.5\n")
+
+    def test_exact_and_variant_restore(self, tmp_path: Path):
+        from vasp_sop.vasp.io import restore_potcar
+        psp = self._psp_store(tmp_path)
+        d = tmp_path / "dir"
+        d.mkdir()
+        self._poscar(d, "Ba Se")
+
+        ok, msg = restore_potcar(d, psp_dir=str(psp))
+        assert ok, msg
+        text = (d / "POTCAR").read_text()
+        assert "Ba sv psp" in text, "Ba must resolve to Ba_sv (not GW)"
+        assert "Se psp" in text
+        assert "GW psp" not in text
+
+    def test_encut_matches_variant(self, tmp_path: Path):
+        from vasp_sop.vasp.io import restore_potcar
+        from vasp_sop.vasp.io import _pick_psp_variant
+        psp = self._psp_store(tmp_path)
+        # ENCUT 126 = 1.3 * 97.04  (Ba_sv); a plain-Ba dir doesn't exist
+        candidate = _pick_psp_variant("Ba", psp=psp, encut=126.2)
+        assert candidate is not None
+        assert candidate.name == "Ba_sv"
+
+    def test_restore_missing_inputs_skips_done(self, tmp_path: Path):
+        """Blocked dirs restored; dirs already done on disk (POTCAR
+        stripped after completion) are NOT mass-restored."""
+        from vasp_sop.vasp.io import restore_missing_inputs
+        psp = self._psp_store(tmp_path)
+        sysd = tmp_path / "NaSe"
+        sysd.mkdir()
+        (sysd / "plan.yaml").write_text("x\n")
+        blocked = sysd / "cpd" / "NaSe_mp-1"
+        blocked.mkdir(parents=True)
+        self._poscar(blocked, "Ba Se")
+        (blocked / "INCAR").write_text("ENCUT = 200\n")
+        (blocked / "KPOINTS").write_text("k\n")
+        done = sysd / "cpd" / "BaSeO_mp-2"
+        done.mkdir(parents=True)
+        self._poscar(done, "Ba Se O")
+        (done / "INCAR").write_text("ENCUT = 200\n")
+        (done / "KPOINTS").write_text("k\n")
+        # done on disk: converged OUTCAR → restore must skip it
+        (done / "OUTCAR").write_text(
+            "NSW = 50\nIBRION = 2\nEDIFFG = -0.005\n"
+            " General timing and accounting informations for this job:\n"
+            " TOTAL-FORCE (eV/Angst)\n ---\n"
+            " 0.001 0.001 0.001 0.002 0.001 0.001\n")
+
+        res = restore_missing_inputs(sysd, psp_dir=str(psp))
+        assert len(res["restored"]) == 1, res
+        assert (blocked / "POTCAR").is_file()
+        assert not (done / "POTCAR").is_file(), \
+            "done-on-disk dir must not get a POTCAR restored"

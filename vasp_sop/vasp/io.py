@@ -238,3 +238,172 @@ def patch_incar(path: Path, **kwargs: str | int | float) -> None:
         params[k.upper()] = str(v)
     write_incar(path, params)
 
+
+
+# ── POTCAR restore (ADR 0007: input restore) ─────────────────────────────
+
+_DEFAULT_PSP_DIR = "/mnt/shared/VASP_POT/POT_GGA_PAW_PBE"
+
+
+def _poscar_species(poscar: Path) -> list[str] | None:
+    """Element symbols in POSCAR order (pymatgen, then line-6 fallback)."""
+    try:
+        from pymatgen.core import Structure
+        structure = Structure.from_file(str(poscar))
+        return [str(sp.specie) for sp in structure]
+    except Exception:
+        pass
+    try:
+        lines = poscar.read_text().splitlines()
+        for line in lines[5:9]:
+            parts = line.split()
+            if parts and all(p[:1].isalpha() and p[0].isupper() for p in parts):
+                return parts
+    except Exception:
+        return None
+    return None
+
+
+def _psp_encmax(potcar: Path) -> float | None:
+    """ENMAX from a POTCAR's header block (first element line)."""
+    import re
+    try:
+        head = potcar.read_text()[:4096]
+    except OSError:
+        return None
+    m = re.search(r"ENMAX\s*=\s*([\d.]+)", head)
+    return float(m.group(1)) if m else None
+
+
+def _pick_psp_variant(
+    el: str, *, psp: Path, encut: float | None
+) -> Path | None:
+    """PSP dir for *el*: exact name first, else the ENCUT-matching variant.
+
+    The store carries per-element variants (``Ba_sv`` not ``Ba``, plain
+    ``Se`` alongside ``Se_sv_GW``).  The documented rule: INCAR ENCUT =
+    1.3 * ENMAX of the chosen POTCAR.  GW variants are never picked for
+    standard PBE work.
+    """
+    exact = psp / el
+    if (exact / "POTCAR").is_file():
+        return exact
+    best: Path | None = None
+    best_err: float | None = None
+    for cand in psp.iterdir():
+        if not cand.is_dir() or not cand.name.startswith(el):
+            continue
+        if "_GW" in cand.name:
+            continue
+        potcar = cand / "POTCAR"
+        if not potcar.is_file():
+            continue
+        if encut is None:
+            if best is None:
+                best = cand
+            continue
+        enmax = _psp_encmax(potcar)
+        if enmax is None:
+            continue
+        err = abs(encut - 1.3 * enmax)
+        if best_err is None or err < best_err:
+            best_err, best = err, cand
+    return best
+
+
+def _dir_encut(path: Path) -> float | None:
+    """INCAR ENCUT (float), or None."""
+    incar = path / "INCAR"
+    if not incar.is_file():
+        return None
+    try:
+        text = incar.read_text()
+    except OSError:
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.upper().startswith("ENCUT"):
+            try:
+                return float(line.split("=")[1].split()[0])
+            except (IndexError, ValueError):
+                return None
+    return None
+
+
+def restore_potcar(
+    path: Path, *, psp_dir: str | None = None, dry_run: bool = False
+) -> tuple[bool, str]:
+    """Restore a missing POTCAR for *path* from the local PSP store.
+
+    Concats each element's PSP POTCAR in POSCAR species order, choosing
+    the ENCUT-matching variant per element.  Returns (ok, message).
+    """
+    potcar = path / "POTCAR"
+    if potcar.is_file():
+        return True, "POTCAR already present"
+    poscar = path / "POSCAR"
+    if not poscar.is_file():
+        return False, "no POSCAR — cannot infer species"
+    species = _poscar_species(poscar)
+    if not species:
+        return False, "cannot parse POSCAR species"
+    psp = Path(psp_dir or _DEFAULT_PSP_DIR)
+    encut = _dir_encut(path)
+    chunks: list[str] = []
+    missing: list[str] = []
+    for el in species:
+        cand = _pick_psp_variant(el, psp=psp, encut=encut)
+        if cand is None:
+            missing.append(el)
+            continue
+        chunks.append((cand / "POTCAR").read_text())
+    if missing:
+        return False, f"PSP store missing: {', '.join(missing)}"
+    if dry_run:
+        return True, f"would restore POTCAR for {' '.join(dict.fromkeys(species))}"
+    potcar.write_text("".join(chunks))
+    return True, f"restored POTCAR for {' '.join(dict.fromkeys(species))}"
+
+
+def restore_missing_inputs(
+    root: Path, *, psp_dir: str | None = None, dry_run: bool = False
+) -> dict[str, list[str]]:
+    """Restore missing POTCAR for runnable-but-unprovisioned dirs.
+
+    *root* is a project root of systems, or a single system.  Scans each
+    system's cpd/unitcell/defect trees; dirs that have POSCAR but no
+    POTCAR (missing exactly the PSP-derived input) get it restored.
+    Returns {restored: [...], skipped: [...], failed: [...]}.
+    """
+    from vasp_sop.core.blockers import calc_dirs
+
+    if (root / "plan.yaml").is_file():
+        systems = [root]
+    else:
+        systems = [
+            d for d in sorted(root.iterdir())
+            if d.is_dir() and (d / "plan.yaml").is_file()
+        ]
+
+    from vasp_sop.core.blockers import classify_dir
+
+    restored: list[str] = []
+    skipped: list[str] = []
+    failed: list[str] = []
+    for sysd in systems:
+        for d, task_type in calc_dirs(sysd):
+            if (d / "POTCAR").is_file():
+                continue
+            # Only blocked dirs are restored — dirs whose calc is already
+            # done on disk (POTCAR stripped after completion) stay untouched
+            # (established policy: no mass restore of completed work).
+            if classify_dir(d, task_type=task_type).finished:
+                continue
+            if not (d / "POSCAR").is_file():
+                if task_type not in ("band", "dos", "dielectric"):
+                    skipped.append(f"{d.relative_to(sysd)} (no POSCAR)")
+                continue
+            ok, msg = restore_potcar(d, psp_dir=psp_dir, dry_run=dry_run)
+            target = restored if ok else failed
+            target.append(f"{d.relative_to(sysd)} ({msg})")
+    return {"restored": restored, "skipped": skipped, "failed": failed}
