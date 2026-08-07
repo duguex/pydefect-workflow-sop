@@ -975,31 +975,6 @@ def _batch_history(root: Path, *, system: str | None = None,
             print(f"  {name:<22}  {running:>3}  {done:>4}  {len(states):>5}")
     store.close()
 
-# ── Pipeline phase constants (module-level for shared access) ──────
-_CPD = "cpd"
-_UC = "unitcell"
-_DF = "defect"
-
-
-def _unitcell_build_failure(root: Path) -> dict[str, str] | None:
-    """Read a terminal unitcell build failure without introducing a phase."""
-    import json
-
-    status_path = Path(root) / _UC / "unitcell_build_status.json"
-    if not status_path.is_file():
-        return None
-    try:
-        status = json.loads(status_path.read_text())
-    except (OSError, ValueError):
-        return None
-    if not isinstance(status, dict) or status.get("status") != "failed":
-        return None
-    return {
-        "reason": str(status.get("reason", "unitcell_build_failed")),
-        "diagnostic": str(status.get("diagnostic", "no diagnostic recorded")),
-    }
-
-
 def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
                exclude: list[str] | None = None, loop: bool = False,
                retry_failed: bool = False) -> None:

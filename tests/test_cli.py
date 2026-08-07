@@ -2362,3 +2362,53 @@ class TestAutoRerunFailed:
         advance_one_system(_make_system_dict(root), dry_run=False,
                            retry_failed=False)
         assert calls.count(defect) == 0, "un-armed run must not retry failed dirs"
+
+
+class TestUnitcellBuildFailureSelfHeal:
+    """unitcell_build_status.json failure marker self-heals on disk truth.
+
+    Regression: a stale unitcell build failure (07-17 pydefect_vasp_u_failed
+    on SeO2) permanently pinned the system even after all three UC tasks
+    completed on disk.  The gate must clear the marker when the UC leg is
+    done (ADR 0003 disk truth).
+    """
+
+    def _uc_task(self, td: Path, task: str) -> None:
+        td.mkdir(parents=True)
+        (td / "OUTCAR").write_text(
+            " General timing and accounting informations for this job:\n"
+            " TOTAL-FORCE (eV/Angst)\n ---\n"
+            " 0.001 0.001 0.001 0.002 0.001 0.001\n")
+        if task in ("band", "dos"):
+            (td / "vasprun.xml").write_text("<vasp/>\n")
+
+    def test_stale_failure_cleared_when_uc_done(self, tmp_path: Path):
+        import os
+        from vasp_sop.core.orchestrator import _unitcell_build_failure
+        uc = tmp_path / "unitcell"
+        for t in ("band", "dos", "dielectric"):
+            self._uc_task(uc / t, t)
+        status = uc / "unitcell_build_status.json"
+        status.write_text('{"status": "failed", '
+                          '"reason": "pydefect_vasp_u_failed"}')
+        # marker predates the completed UC outputs → stale
+        old = (uc / "band" / "OUTCAR").stat().st_mtime - 86400
+        os.utime(status, (old, old))
+
+        assert _unitcell_build_failure(tmp_path) is None, \
+            "UC leg done after the failure marker → must not block"
+        assert not status.exists(), "stale marker must be cleared"
+
+    def test_real_failure_still_blocks_when_uc_incomplete(self, tmp_path):
+        from vasp_sop.core.orchestrator import _unitcell_build_failure
+        uc = tmp_path / "unitcell"
+        # band done, dos missing → build genuinely incomplete
+        self._uc_task(uc / "band", "band")
+        (uc / "dos").mkdir(parents=True)
+        (uc / "unitcell_build_status.json").write_text(
+            '{"status": "failed", "reason": "pydefect_vasp_u_failed"}')
+
+        failure = _unitcell_build_failure(tmp_path)
+        assert failure is not None and failure["reason"] == "pydefect_vasp_u_failed"
+        assert (uc / "unitcell_build_status.json").exists(), \
+            "genuine failure must keep blocking"

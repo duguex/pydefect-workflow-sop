@@ -84,7 +84,15 @@ def _submit_or_skip(
 
 
 def _unitcell_build_failure(root: Path) -> dict[str, str] | None:
-    """Read a terminal unitcell build failure without introducing a phase."""
+    """Read a terminal unitcell build failure without introducing a phase.
+
+    Self-heals on staleness, never on evidence: a failure marker is cleared
+    only when every UC task (band/dos/dielectric) is complete on disk AND
+    the marker predates those outputs — i.e. the build failed, then the UC
+    leg later completed anyway (SeO2: 07-17 pydefect_vasp_u_failed, UC
+    converged weeks later).  A marker NEWER than the outputs is a genuine
+    current build failure and keeps blocking (disk truth wins, ADR 0003).
+    """
     status_path = Path(root) / "unitcell" / "unitcell_build_status.json"
     if not status_path.is_file():
         return None
@@ -93,6 +101,34 @@ def _unitcell_build_failure(root: Path) -> dict[str, str] | None:
     except (OSError, ValueError):
         return None
     if not isinstance(status, dict) or status.get("status") != "failed":
+        return None
+    from vasp_sop.vasp.io import check_task_complete
+
+    uc = Path(root) / "unitcell"
+    artifacts = [
+        uc / t / "OUTCAR"
+        for t in ("band", "dos", "dielectric")
+    ] + [uc / t / "vasprun.xml" for t in ("band", "dos")]
+    try:
+        marker_mtime = status_path.stat().st_mtime
+    except OSError:
+        marker_mtime = 0.0
+    newest_output = max(
+        (p.stat().st_mtime for p in artifacts if p.is_file()),
+        default=0.0,
+    )
+    if all(
+        (uc / t).is_dir() and check_task_complete(uc / t, t)
+        for t in ("band", "dos", "dielectric")
+    ) and newest_output > marker_mtime:
+        try:
+            status_path.unlink()
+        except OSError:
+            pass
+        logger.warning(
+            "%s: cleared stale unitcell build failure (UC leg done on disk)",
+            Path(root).name,
+        )
         return None
     return {
         "reason": str(status.get("reason", "unitcell_build_failed")),
