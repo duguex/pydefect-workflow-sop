@@ -262,6 +262,16 @@ def _crisp_submit(work_dir: Path) -> CrispVaspJob:
     payload = json.loads(result.stdout)
     data = payload.get("data") or {}
     task_name = data.get("task_name") or payload.get("task_name")
+    # Result-reuse hit (ADR 0002): crisp owns the cache and says this exact
+    # calc already exists — it will materialize the cached outputs back into
+    # the worktree.  No new job runs; report a sentinel handle so callers
+    # record source="cached" and let the poll finalize the materialized
+    # results instead of raising (which caused warning/retry loops).
+    if payload.get("cached") or data.get("cached"):
+        logger.info(
+            "crisp result-cache hit for %s — will materialize", work_dir.name
+        )
+        return CrispVaspJob(work_dir, "cached")
     if not task_name:
         raise RuntimeError(f"crisp submit missing task_name: {payload}")
     logger.info("crisp task %s submitted for %s", task_name, work_dir.name)

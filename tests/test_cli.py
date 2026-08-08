@@ -2506,3 +2506,51 @@ class TestUcEmptyPoscarGuard:
             assert js.history(dielectric)[-1]["reason"] == "empty_poscar"
         finally:
             js.close()
+
+
+class TestHandleUnconvergedCached:
+    """handle_unconverged must accept a crisp cached result as terminal.
+
+    Regression: crisp returned {cached: True} for restarts of cached calcs;
+    _crisp_submit raised, handle_unconverged logged "submit failed" and
+    retried every cycle forever.  A cached result IS the answer — record
+    unconverged (cached_result) and stop, never restart the same calc.
+    """
+
+    def test_cached_restart_is_terminal(self, tmp_path: Path, monkeypatch):
+        from vasp_sop.core.job_store import JobStore
+        from vasp_sop.core.paths import override_cache_root
+        from vasp_sop.core.orchestrator import BatchOrchestrator
+
+        override_cache_root(tmp_path / ".vasp_sop")
+        (tmp_path / "INCAR").write_text("NSW = 50\nIBRION = 2\nEDIFFG = -0.03\n")
+        (tmp_path / "POSCAR").write_text("old\n")
+        (tmp_path / "CONTCAR").write_text("contcar\n")
+        (tmp_path / "POTCAR").write_text("p\n")
+        (tmp_path / "KPOINTS").write_text("k\n")
+        (tmp_path / "OUTCAR").write_text(
+            " General timing and accounting informations for this job:\n"
+            " TOTAL-FORCE (eV/Angst)\n ---\n"
+            " 0.0 0.0 0.0 0.5 0.0 0.0\n"
+        )
+        wd_str = str(tmp_path.resolve())
+        js = JobStore()
+        js.record(wd_str, "submitted", source="test")
+        js.track(wd_str)
+        js.close()
+
+        from vasp_sop.core.jobs import CrispVaspJob
+        monkeypatch.setattr(
+            "vasp_sop.core.jobs.submit_vasp",
+            lambda p: CrispVaspJob(Path(p), "cached"),
+        )
+        orch = BatchOrchestrator(tmp_path, dry_run=True)
+        orch.handle_unconverged(tmp_path)
+
+        js = JobStore()
+        try:
+            last = js.history(wd_str)[-1]
+            assert last["status"] == "unconverged", last
+            assert last["reason"].startswith("cached_result"), last
+        finally:
+            js.close()

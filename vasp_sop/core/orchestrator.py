@@ -886,6 +886,21 @@ class BatchOrchestrator:
 
             restart_from_contcar(wd)
             job = submit_vasp(wd.resolve())
+            if getattr(job, "task_name", "") == "cached":
+                # crisp has this exact calc cached — the cached result IS the
+                # answer; re-running reproduces the same (unconverged) output,
+                # so accept it as terminal instead of looping every cycle.
+                self.js.record(
+                    wd_str, "unconverged",
+                    reason=f"cached_result,max_f={cur_f:.4f}",
+                    attempt=attempt + 1,
+                )
+                self.js.untrack(wd_str)
+                logger.warning(
+                    "! %s result cached by crisp — accepting terminal "
+                    "(max_f %.4f)", wd.name, cur_f,
+                )
+                return
             self.js.record(
                 wd_str, "submitted",
                 source=job.task_name, attempt=attempt + 1,
