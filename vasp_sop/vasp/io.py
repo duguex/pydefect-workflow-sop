@@ -113,6 +113,10 @@ def _prepare_inputs_vise_api(
     ``CategorizedInputOptions`` accepts it and ``IncarSettingsGenerator``
     computes NELECT = Σ N_i·ZVAL_i − q from the POTCAR ZVALs.  This is
     the sanctioned path for defect directories (vise owns NELECT).
+
+    Neutral (q=0) dirs get no NELECT line — VASP's default (Σ ZVAL from
+    POSCAR+POTCAR) is exactly the correct electron count; writing 0 would
+    be wrong.  Only charged dirs carry NELECT.
     """
     from vise.input_set.input_options import CategorizedInputOptions
     from vise.input_set.vasp_input_files import VaspInputFiles
