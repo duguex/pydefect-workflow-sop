@@ -35,8 +35,9 @@ def prepare_inputs(
     kspacing: float = 2.0,
     task_type: str = "",
     extra_uis: str = "",
+    charge: float | None = None,
 ) -> None:
-    """Generate INCAR/POTCAR/KPOINTS via ``vise vs`` if missing.
+    """Generate INCAR/POTCAR/KPOINTS via vise if missing.
 
     Args:
         work_dir: Target calculation directory.
@@ -44,6 +45,11 @@ def prepare_inputs(
         kspacing: K-point spacing for ``-k`` (default 2.0).
         task_type: Optional ``-t`` value (e.g. ``"defect"``).
         extra_uis: Extra ``-uis`` flags (e.g. ``"SIGMA 0.02 LORBIT 11"``).
+        charge: Defect charge state; when given, INCAR is generated through
+            vise's Python API with ``charge=q`` so NELECT is computed by
+            vise itself (Σ N_i·ZVAL_i − q, ZVAL read from POTCAR) instead of
+            the removed hardcoded ``_fix_defect_nelect`` patch (vise owns
+            NELECT — ADR 0007 input restore).
     """
     # Single-path SOC handling:
     #   - if inputs already complete: patch (idempotent retrofit) and return
@@ -53,6 +59,11 @@ def prepare_inputs(
         logger.debug("VASP input already ready in %s", work_dir)
         if config.soc:
             patch_incar(work_dir, LSORBIT=".TRUE.", ISYM=-1)
+        return
+
+    if charge is not None:
+        _prepare_inputs_vise_api(work_dir, config, kspacing, task_type,
+                                 charge)
         return
 
     pp_opt = (
@@ -85,6 +96,49 @@ def prepare_inputs(
     run_local(cmd, cwd=work_dir, timeout=300)
     # vise never sets SOC tags — patch AFTER run_local so freshly
     # generated INCAR inherits LSORBIT/ISYM without clobbering other tags.
+    if config.soc:
+        patch_incar(work_dir, LSORBIT=".TRUE.", ISYM=-1)
+
+
+def _prepare_inputs_vise_api(
+    work_dir: Path,
+    config: PipelineConfig,
+    kspacing: float,
+    task_type: str,
+    charge: float,
+) -> None:
+    """Generate VASP inputs through vise's Python API with *charge*.
+
+    The CLI (``vise vs``) has no charge flag; the API's
+    ``CategorizedInputOptions`` accepts it and ``IncarSettingsGenerator``
+    computes NELECT = Σ N_i·ZVAL_i − q from the POTCAR ZVALs.  This is
+    the sanctioned path for defect directories (vise owns NELECT).
+    """
+    from vise.input_set.input_options import CategorizedInputOptions
+    from vise.input_set.vasp_input_files import VaspInputFiles
+    from vise.input_set.task import Task
+    from vise.input_set.xc import Xc
+    from pymatgen.core import Structure
+
+    _VISE_TASK_MAP = {
+        "dielectric": "dielectric_dfpt",
+        "band": "band",
+        "dos": "dos",
+        "structure_opt": "structure_opt",
+        "defect": "defect",
+    }
+    vise_task = _VISE_TASK_MAP.get(task_type, task_type)
+
+    structure = Structure.from_file(str(work_dir / "POSCAR"))
+    options = CategorizedInputOptions(
+        structure=structure,
+        task=Task(vise_task),
+        xc=Xc.from_string(config.functional),
+        kpt_density=kspacing,
+        charge=charge,
+    )
+    vif = VaspInputFiles(options)
+    vif.create_input_files(work_dir)
     if config.soc:
         patch_incar(work_dir, LSORBIT=".TRUE.", ISYM=-1)
 

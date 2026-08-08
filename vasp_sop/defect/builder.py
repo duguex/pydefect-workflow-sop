@@ -52,7 +52,6 @@ def build_all(
     _generate_structures(defect_root)
     _generate_vasp_inputs(defect_root, config)
 
-    _fix_defect_nelect(defect_root)
     # Write fingerprint *after* successful build.
     _write_fingerprint(defect_root, config)
 
@@ -303,48 +302,38 @@ def _generate_structures(defect_root: Path) -> None:
 def _generate_vasp_inputs(defect_root: Path, config: PipelineConfig) -> None:
     """Generate VASP inputs for every defect directory.
 
-    Generates INCAR/POTCAR/KPOINTS once via ``prepare_inputs``, then
-    copies them to remaining directories to avoid N repeated subprocess
-    calls (each ``vise vs`` starts a fresh Python interpreter).
+    Each defect directory gets its inputs from vise's Python API with its
+    own charge (NELECT = ΣNᵢZVALᵢ − q computed by vise from POTCAR).
+    POSCARs are per-directory already; INCAR/POTCAR/KPOINTS are generated
+    per directory so species and charge are respected (no cross-dir copy
+    of the host INCAR — that is what broke NELECT before).
     """
     from vasp_sop.vasp.io import prepare_inputs, input_ready
-    from shutil import copy2
     from tqdm import tqdm
     from vasp_sop.defect import is_valid_defect_dir
+    import re
 
+    Q_RE = re.compile(r"_(-?\d+)$")
     dirs = [child for child in defect_root.iterdir()
             if child.is_dir() and (child.name == "perfect" or is_valid_defect_dir(child))]
     if not dirs:
         return
 
-    # Phase 1: ensure first directory has full inputs (subprocess call)
-    first = dirs[0]
-    if not input_ready(first):
-        try:
-            prepare_inputs(first, config,
-                           kspacing=0.1, task_type="defect",
-                           extra_uis="SIGMA 0.02 LORBIT 11")
-        except Exception:
-            pass
-
-    # Phase 2: copy shared files to remaining directories
-    shared = ["INCAR", "POTCAR", "KPOINTS"]
-    skip = []
-    for d in tqdm(dirs[1:], desc="VASP inputs", unit=" dir"):
+    for d in tqdm(dirs, desc="VASP inputs", unit=" dir"):
         if input_ready(d):
             continue
-        for f in shared:
-            src = first / f
-            if src.is_file():
-                copy2(str(src), str(d / f))
-        # Verify: POSCAR is per-directory, so input_ready needs it
-        if not input_ready(d):
-            try:
-                prepare_inputs(d, config,
-                               kspacing=0.1, task_type="defect",
-                               extra_uis="SIGMA 0.02 LORBIT 11")
-            except Exception:
-                pass
+        q = 0.0
+        if d.name != "perfect":
+            m = Q_RE.search(d.name)
+            if m:
+                q = float(m.group(1))
+        try:
+            prepare_inputs(d, config,
+                           kspacing=0.1, task_type="defect",
+                           extra_uis="SIGMA 0.02 LORBIT 11",
+                           charge=q)
+        except Exception as exc:
+            logger.warning("%s: input generation failed: %s", d.name, exc)
 
 
 def construct_complex_defects(defect_root: Path, config: PipelineConfig) -> None:
@@ -423,6 +412,110 @@ def _write_fingerprint(defect_root: Path, config: PipelineConfig) -> None:
     (defect_root / ".build_fingerprint").write_text(fp + "\n")
 
 
+def construct_complex_defects(defect_root: Path, config: PipelineConfig) -> None:
+    """Build combined defects via ``pydefect.complex.ComplexDefectMaker``.
+
+    Delegates to the library for geometry enumeration, composition
+    assignment, structure generation, and deduplication.
+    """
+    complex_flag = defect_root / "complex_flag"
+    if complex_flag.is_file():
+        logger.info("Complex defects already constructed, skipping.")
+        return
+
+    sc_info = defect_root / "supercell_info.json"
+    if not sc_info.is_file():
+        logger.warning("supercell_info.json not found at %s, skipping complex defects.", sc_info)
+        return
+
+    from pydefect.complex import ComplexDefectMaker
+
+    maker = ComplexDefectMaker.from_supercell_info(
+        str(sc_info),
+        dopants=config.dopant_elements or None,
+        max_distance=config.remote_cutoff,
+    )
+
+    for order in range(2, config.complex_defect_order + 1):
+        logger.info("Generating complex defects of order %d", order)
+        geoms = maker.make_all_n_body(n=order)
+        entries = maker.generate_entries(order, dopants=config.dopant_elements or None)
+        maker.write(entries, str(defect_root), merge=True)
+
+
+def _config_fingerprint(config: PipelineConfig) -> str:
+    """Return a short hash of config fields that affect the build."""
+    relevant = {
+        "supercell_tool": config.supercell_tool,
+        "supercell_min_distance": config.supercell_min_distance,
+        "supercell_min_atoms": config.supercell_min_atoms,
+        "supercell_max_atoms": config.supercell_max_atoms,
+        "interstitial": config.interstitial,
+        "interstitial_indices": config.interstitial_indices,
+        "dopant_elements": config.dopant_elements,
+        "complex_defect_order": config.complex_defect_order,
+        "remote_cutoff": config.remote_cutoff,
+        "formula": config.formula,
+    }
+    raw = json.dumps(relevant, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _check_rebuild(defect_root: Path, config: PipelineConfig) -> None:
+    """Compare config fingerprint against last build; clear flags on mismatch."""
+    fp_path = defect_root / ".build_fingerprint"
+    if not fp_path.is_file():
+        return  # first build, nothing to compare
+    old_fp = fp_path.read_text().strip()
+    new_fp = _config_fingerprint(config)
+    if old_fp == new_fp:
+        return
+    logger.info(
+        "Config fingerprint changed (%s → %s), clearing build flags.",
+        old_fp, new_fp,
+    )
+    for name in ("supercell_info.json", "defect_in.yaml",
+                  "defect_generate_flag", "complex_flag"):
+        p = defect_root / name
+        if p.is_file():
+            p.unlink()
+            logger.info("  Cleared %s", name)
+
+
+def _write_fingerprint(defect_root: Path, config: PipelineConfig) -> None:
+    """Persist the current config fingerprint so next build can detect changes."""
+    fp = _config_fingerprint(config)
+    (defect_root / ".build_fingerprint").write_text(fp + "\n")
+
+
+def _potcar_zvals(potcar: Path) -> dict[str, float]:
+    """Element → ZVAL from the POTCAR header blocks, in file order.
+
+    Walks the file sequentially: each PAW_PBE block opens with a TITEL
+    line naming its element; the ZVAL line that follows belongs to that
+    element.  Elements without a ZVAL line are omitted.
+    """
+    import re as _re
+
+    zvals: dict[str, float] = {}
+    try:
+        text = potcar.read_text()
+    except OSError:
+        return zvals
+    current: str | None = None
+    for line in text.splitlines():
+        m_t = _re.search(r"TITEL\s*=\s*PAW_PBE\s+(\S+)", line)
+        if m_t:
+            # POTCAR TITEL carries the variant name (Zr_sv, Ba_sv, Gd_3);
+            # key by the base element symbol so POSCAR species match.
+            current = m_t.group(1).split("_")[0]
+            continue
+        m_z = _re.search(r"ZVAL\s*=\s*([\d.]+)", line)
+        if m_z and current is not None and current not in zvals:
+            zvals[current] = float(m_z.group(1))
+    return zvals
+
+
 def _fix_defect_nelect(defect_root: Path) -> None:
     """Per‑defect NELECT patch (Σ N_i·ZVAL_i − q).
 
@@ -430,13 +523,12 @@ def _fix_defect_nelect(defect_root: Path) -> None:
     the first directory's INCAR (with host‑centric NELECT) to every
     defect directory.  This post‑process step fixes each directory to
     the correct NELECT for its specific defect and charge state.
+
+    ZVALs come from the directory's own POTCAR header (each PAW_PBE
+    block carries its ZVAL) — never hardcoded, so any element works.
     """
     from vasp_sop.vasp.io import read_incar, patch_incar
     import re
-
-    # ZVAL per POTCAR variant — must match plan.yaml `pp:` order.
-    # Cs_sv:9, Pb_d:4, Br:7, Bi_d:5  (standard PAW_PBE suffixes)
-    ZVAL: dict[str, float] = {"Cs": 9.0, "Pb": 4.0, "Br": 7.0, "Bi": 5.0}
 
     # Regex to extract q from directory name  e.g. Bi_Pb1_-1 → -1
     Q_RE = re.compile(r"_(-?\d+)$")
@@ -470,8 +562,21 @@ def _fix_defect_nelect(defect_root: Path) -> None:
             continue
         counts = dict(zip(species_line, map(int, counts_line)))
 
+        # ── ZVAL per element from this dir's POTCAR ────────────────
+        potcar = wd / "POTCAR"
+        zval_by_element = _potcar_zvals(potcar) if potcar.is_file() else {}
+
         # ── Calculate base NELECT = Σ N_i·ZVAL_i ──────────────────
-        base = sum(counts.get(el, 0) * ZVAL.get(el, 0) for el in counts)
+        base = 0.0
+        for el, n in counts.items():
+            zv = zval_by_element.get(el)
+            if zv is None:
+                logger.warning(
+                    "%s: no ZVAL for %s in POTCAR — NELECT may be wrong",
+                    wd.name, el,
+                )
+                zv = 0.0
+            base += n * zv
 
         # ── Determine q and target NELECT ─────────────────────────--
         name = wd.name
@@ -485,4 +590,4 @@ def _fix_defect_nelect(defect_root: Path) -> None:
             target = base - q
 
         # ── Idempotent patch ──────────────────────────────────────-
-        patch_incar(wd, NELECT=target)
+        patch_incar(wd, NELECT=int(round(target)))
