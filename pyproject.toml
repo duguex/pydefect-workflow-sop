@@ -10,6 +10,7 @@ requires-python = ">=3.10"
 dependencies = [
     "pymatgen>=2023.0",
     "pydefect>=0.1",
+    "doped>=3.0",
     "vise>=0.1",
     "numpy>=1.24",
     "pyyaml>=6.0",
