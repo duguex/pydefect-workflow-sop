@@ -480,11 +480,16 @@ def verify_inputs(defect_root: Path, config: PipelineConfig) -> list[str]:
       [ERR] KPOINTS missing or unparsable
     Returns a list of "name: [ERR|WARN] message" strings (empty if clean).
     """
+    from vasp_sop.defect import is_valid_defect_dir
     import re
 
     problems: list[str] = []
     for wd in sorted(defect_root.iterdir()):
         if not wd.is_dir():
+            continue
+        # Only defect calculation dirs (perfect + named defects); skip
+        # symmetry/test subdirs that are not part of the calc set.
+        if wd.name != "perfect" and not is_valid_defect_dir(wd):
             continue
         name = wd.name
         # ── File completeness ───────────────────────────────────────
@@ -502,27 +507,13 @@ def verify_inputs(defect_root: Path, config: PipelineConfig) -> list[str]:
         n_atoms = sum(comp.values())
         lines = (wd / "POSCAR").read_text().splitlines()
         coords = [ln for ln in lines[8:] if ln.strip()]
-        # Real coordinates exclude all-zero placeholder rows (a known
-        # historical pollution: N real rows + N zero rows appended) and
-        # any non-coordinate text rows.
-        def _is_zero_row(c: str) -> bool:
-            toks = c.split()
-            if len(toks) < 3:
-                return False
-            try:
-                return all(float(t) == 0.0 for t in toks[:3])
-            except ValueError:
-                return False
-
-        if len(coords) > n_atoms and all(_is_zero_row(c) for c in coords[n_atoms:]):
+        # POSCAR may carry one velocity row per atom after the coordinates
+        # (VASP MD/velocity output; zero rows = zero velocities — legal).
+        # Valid layouts: N coords, or N coords + N velocities.
+        if len(coords) < n_atoms or len(coords) > 2 * n_atoms:
             problems.append(
-                f"{name}: [ERR] POSCAR has {len(coords) - n_atoms} trailing "
-                f"zero placeholder rows (pymatgen parse will fail)"
-            )
-        elif len(coords) != n_atoms:
-            problems.append(
-                f"{name}: [ERR] POSCAR has {len(coords)} coords for "
-                f"{n_atoms} atoms"
+                f"{name}: [ERR] POSCAR has {len(coords)} coordinate/velocity "
+                f"rows for {n_atoms} atoms (expected {n_atoms} or {2 * n_atoms})"
             )
 
         # ── POTCAR vs POSCAR ────────────────────────────────────────

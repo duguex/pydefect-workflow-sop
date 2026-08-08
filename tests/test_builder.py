@@ -412,16 +412,27 @@ class TestVerifyInputs:
         self._dir(root, "Va_O1_0", {"La": 8, "Zr": 4, "O": 27}, bad_coords=True)
         cfg = PipelineConfig(formula="La2Zr2O7", supercell_tool="doped")
         problems = verify_inputs(root, cfg)
-        # one atom short → 38 coords vs 39 atoms
-        assert any("coords for" in p and "39 atoms" in p for p in problems)
+        # one atom short → 38 rows vs 39 atoms
+        assert any("rows for" in p and "39 atoms" in p for p in problems)
 
-    def test_trailing_zero_placeholders_detected(self, tmp_path: Path):
+    def test_velocity_rows_are_legal(self, tmp_path: Path):
         from vasp_sop.defect.builder import verify_inputs
         root = tmp_path / "df"
         wd = self._dir(root, "Va_O1_0", {"La": 8, "Zr": 4, "O": 27})
-        # append N zero placeholder rows (historical pollution pattern)
+        # N zero velocity rows after the coordinates — legal (velocities=0)
         with open(wd / "POSCAR", "a") as f:
             f.write("\n".join(["0.00000000E+00 0.00000000E+00 0.00000000E+00"] * 39) + "\n")
         cfg = PipelineConfig(formula="La2Zr2O7", supercell_tool="doped")
+        assert verify_inputs(root, cfg) == []
+
+    def test_too_many_rows_detected(self, tmp_path: Path):
+        from vasp_sop.defect.builder import verify_inputs
+        root = tmp_path / "df"
+        wd = self._dir(root, "Va_O1_0", {"La": 8, "Zr": 4, "O": 27})
+        # 3× rows — beyond coords+velocities, must flag
+        with open(wd / "POSCAR", "a") as f:
+            f.write("\n".join(["0.1 0.2 0.3"] * 39) + "\n")
+            f.write("\n".join(["0.1 0.2 0.3"] * 39) + "\n")
+        cfg = PipelineConfig(formula="La2Zr2O7", supercell_tool="doped")
         problems = verify_inputs(root, cfg)
-        assert any("placeholder" in p for p in problems)
+        assert any("velocity" in p for p in problems)
