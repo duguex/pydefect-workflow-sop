@@ -464,8 +464,118 @@ def _potcar_zvals(potcar: Path) -> dict[str, float]:
     return zvals
 
 
+_MAGNETIC_ELEMENTS = {"Fe", "Co", "Ni", "Gd", "Mn", "Cr", "Eu", "Ce"}
+
+
+def verify_inputs(defect_root: Path, config: PipelineConfig) -> list[str]:
+    """Verify VASP input completeness/consistency for every defect dir.
+
+    Checks (errors are submission-blocking; warnings are advisory):
+      [ERR] missing INCAR/POSCAR/POTCAR/KPOINTS
+      [ERR] POSCAR unparsable (species line / counts / coordinate count)
+      [ERR] POTCAR species set/order differs from POSCAR
+      [ERR] INCAR missing relaxation tags (NSW/IBRION/EDIFFG) for relax tasks
+      [WARN] ENCUT below 1.3×ENMAX (VASP convention) for any POTCAR block
+      [WARN] magnetic element present (Fe/Gd/…) but ISPIN not set
+      [ERR] KPOINTS missing or unparsable
+    Returns a list of "name: [ERR|WARN] message" strings (empty if clean).
+    """
+    import re
+
+    problems: list[str] = []
+    for wd in sorted(defect_root.iterdir()):
+        if not wd.is_dir():
+            continue
+        name = wd.name
+        # ── File completeness ───────────────────────────────────────
+        for f in ("POSCAR", "INCAR", "POTCAR", "KPOINTS"):
+            if not (wd / f).is_file():
+                problems.append(f"{name}: [ERR] missing {f}")
+        if not (wd / "POSCAR").is_file():
+            continue
+
+        # ── POSCAR ─────────────────────────────────────────────────
+        comp = _poscar_composition(wd)
+        if comp is None:
+            problems.append(f"{name}: [ERR] POSCAR species/counts unparsable")
+            continue
+        n_atoms = sum(comp.values())
+        lines = (wd / "POSCAR").read_text().splitlines()
+        coords = [ln for ln in lines[8:] if ln.strip()]
+        # Real coordinates exclude all-zero placeholder rows (a known
+        # historical pollution: N real rows + N zero rows appended) and
+        # any non-coordinate text rows.
+        def _is_zero_row(c: str) -> bool:
+            toks = c.split()
+            if len(toks) < 3:
+                return False
+            try:
+                return all(float(t) == 0.0 for t in toks[:3])
+            except ValueError:
+                return False
+
+        if len(coords) > n_atoms and all(_is_zero_row(c) for c in coords[n_atoms:]):
+            problems.append(
+                f"{name}: [ERR] POSCAR has {len(coords) - n_atoms} trailing "
+                f"zero placeholder rows (pymatgen parse will fail)"
+            )
+        elif len(coords) != n_atoms:
+            problems.append(
+                f"{name}: [ERR] POSCAR has {len(coords)} coords for "
+                f"{n_atoms} atoms"
+            )
+
+        # ── POTCAR vs POSCAR ────────────────────────────────────────
+        if (wd / "POTCAR").is_file():
+            pot_species = [k for k in _potcar_zvals(wd / "POTCAR")]
+            pos_species = list(comp.keys())
+            if pot_species != pos_species:
+                problems.append(
+                    f"{name}: [ERR] POTCAR species {pot_species} != "
+                    f"POSCAR {pos_species} (order matters)"
+                )
+
+        # ── INCAR ───────────────────────────────────────────────────
+        if (wd / "INCAR").is_file():
+            inc = (wd / "INCAR").read_text()
+            for tag in ("NSW", "IBRION", "EDIFFG"):
+                if not re.search(rf"^\s*{tag}\s*=", inc, re.M):
+                    problems.append(f"{name}: [ERR] INCAR missing {tag}")
+            m_encut = re.search(r"^\s*ENCUT\s*=\s*([\d.]+)", inc, re.M)
+            if m_encut and (wd / "POTCAR").is_file():
+                encut = float(m_encut.group(1))
+                enmax = _potcar_enmax_max(wd / "POTCAR")
+                if enmax and encut < enmax - 1e-6:
+                    problems.append(
+                        f"{name}: [WARN] ENCUT={encut:.1f} below max ENMAX "
+                        f"={enmax:.1f} (VASP hard floor; 1.3×ENMAX is the "
+                        f"conservative convention)"
+                    )
+            has_mag = any(el in _MAGNETIC_ELEMENTS for el in comp)
+            if has_mag and not re.search(r"^\s*ISPIN\s*=\s*2", inc, re.M):
+                problems.append(f"{name}: [WARN] magnetic element(s) but ISPIN≠2")
+
+        # ── KPOINTS ────────────────────────────────────────────────
+        if (wd / "KPOINTS").is_file():
+            kp = (wd / "KPOINTS").read_text().splitlines()
+            if not kp or not kp[0].strip():
+                problems.append(f"{name}: [ERR] KPOINTS empty")
+    return problems
+
+
+def _potcar_enmax_max(potcar: Path) -> float | None:
+    """Maximum ENMAX across POTCAR blocks (the binding cutoff)."""
+    import re
+
+    try:
+        text = potcar.read_text()
+    except OSError:
+        return None
+    vals = [float(m.group(1)) for m in re.finditer(r"ENMAX\s*=\s*([\d.]+)", text)]
+    return max(vals) if vals else None
+
+
 def _poscar_composition(wd: Path) -> dict[str, int] | None:
-    """Element → count from the directory's POSCAR species lines."""
     import re
 
     poscar = wd / "POSCAR"

@@ -330,3 +330,98 @@ class TestVerifyNelect:
         problems = verify_nelect(root, cfg)
         assert len(problems) == 1
         assert "neutral" in problems[0]
+
+
+class TestVerifyInputs:
+    """verify_inputs — input file completeness/consistency checks."""
+
+    def _dir(self, root: Path, name: str, comp: dict[str, int],
+             *, potcar_order: list[str] | None = None, no_potcar=False,
+             incar: str | None = None, no_incar=False, bad_coords=False,
+             no_kpoints=False) -> Path:
+        wd = root / name
+        wd.mkdir(parents=True)
+        els = " ".join(comp.keys())
+        counts = " ".join(str(n) for n in comp.values())
+        n = sum(comp.values())
+        coord_lines = ["0.1 0.2 0.3"] * (n - 1 if bad_coords else n)
+        wd.joinpath("POSCAR").write_text(
+            "title\n1.0\n10.0 0.0 0.0\n0.0 10.0 0.0\n0.0 0.0 10.0\n"
+            f"{els}\n{counts}\nDirect\n" + "\n".join(coord_lines)
+        )
+        if not no_potcar:
+            order = potcar_order or list(comp.keys())
+            pot = []
+            for el in order:
+                pot.append(f"   TITEL  = PAW_PBE {el} 01Jan2000\n"
+                           f"   POMASS = 1.0; ZVAL   =    6.000    mass and valenz\n"
+                           f"   ENMAX  =  400.0; ENMIN  =  300.0\n")
+            wd.joinpath("POTCAR").write_text("".join(pot))
+        if not no_incar:
+            wd.joinpath("INCAR").write_text(
+                incar or "NSW = 50\nIBRION = 2\nEDIFFG = -0.03\nENCUT = 600\n"
+            )
+        if not no_kpoints:
+            wd.joinpath("KPOINTS").write_text("0\nGamma\n1 1 1\n0 0 0\n")
+        return wd
+
+    def test_clean_dir_no_problems(self, tmp_path: Path):
+        from vasp_sop.defect.builder import verify_inputs
+        root = tmp_path / "df"
+        self._dir(root, "Va_O1_0", {"La": 8, "Zr": 4, "O": 27})
+        cfg = PipelineConfig(formula="La2Zr2O7", supercell_tool="doped")
+        assert verify_inputs(root, cfg) == []
+
+    def test_potcar_species_mismatch(self, tmp_path: Path):
+        from vasp_sop.defect.builder import verify_inputs
+        root = tmp_path / "df"
+        self._dir(root, "Ba_O1_0", {"Ba": 8, "O": 27}, potcar_order=["O", "Ba"])
+        cfg = PipelineConfig(formula="BaO", supercell_tool="doped")
+        problems = verify_inputs(root, cfg)
+        assert any("POTCAR species" in p for p in problems)
+
+    def test_missing_incar_tag(self, tmp_path: Path):
+        from vasp_sop.defect.builder import verify_inputs
+        root = tmp_path / "df"
+        self._dir(root, "Va_O1_0", {"La": 8, "Zr": 4, "O": 27},
+                  incar="NSW = 50\nIBRION = 2\n")  # no EDIFFG
+        cfg = PipelineConfig(formula="La2Zr2O7", supercell_tool="doped")
+        problems = verify_inputs(root, cfg)
+        assert any("missing EDIFFG" in p for p in problems)
+
+    def test_encut_below_convention(self, tmp_path: Path):
+        from vasp_sop.defect.builder import verify_inputs
+        root = tmp_path / "df"
+        self._dir(root, "Va_O1_0", {"La": 8, "Zr": 4, "O": 27},
+                  incar="NSW = 50\nIBRION = 2\nEDIFFG = -0.03\nENCUT = 100\n")
+        cfg = PipelineConfig(formula="La2Zr2O7", supercell_tool="doped")
+        problems = verify_inputs(root, cfg)
+        assert any("ENCUT" in p and "WARN" in p for p in problems)
+
+    def test_magnetic_element_no_ispin(self, tmp_path: Path):
+        from vasp_sop.defect.builder import verify_inputs
+        root = tmp_path / "df"
+        self._dir(root, "Fe_O1_0", {"Fe": 8, "O": 27})
+        cfg = PipelineConfig(formula="FeO", supercell_tool="doped")
+        problems = verify_inputs(root, cfg)
+        assert any("ISPIN" in p for p in problems)
+
+    def test_coordinate_count_mismatch(self, tmp_path: Path):
+        from vasp_sop.defect.builder import verify_inputs
+        root = tmp_path / "df"
+        self._dir(root, "Va_O1_0", {"La": 8, "Zr": 4, "O": 27}, bad_coords=True)
+        cfg = PipelineConfig(formula="La2Zr2O7", supercell_tool="doped")
+        problems = verify_inputs(root, cfg)
+        # one atom short → 38 coords vs 39 atoms
+        assert any("coords for" in p and "39 atoms" in p for p in problems)
+
+    def test_trailing_zero_placeholders_detected(self, tmp_path: Path):
+        from vasp_sop.defect.builder import verify_inputs
+        root = tmp_path / "df"
+        wd = self._dir(root, "Va_O1_0", {"La": 8, "Zr": 4, "O": 27})
+        # append N zero placeholder rows (historical pollution pattern)
+        with open(wd / "POSCAR", "a") as f:
+            f.write("\n".join(["0.00000000E+00 0.00000000E+00 0.00000000E+00"] * 39) + "\n")
+        cfg = PipelineConfig(formula="La2Zr2O7", supercell_tool="doped")
+        problems = verify_inputs(root, cfg)
+        assert any("placeholder" in p for p in problems)
