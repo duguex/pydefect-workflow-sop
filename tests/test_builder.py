@@ -261,3 +261,72 @@ class TestBuildAll:
         assert "structures" in order
         assert "vasp_inputs" in order
         assert "fingerprint" in order
+
+
+class TestVerifyNelect:
+    """verify_nelect — charge-count verification of defect INCARs."""
+
+    def _make_dir(self, root: Path, name: str, comp: dict[str, int],
+                  q: int | None, nelect: str | None) -> Path:
+        """Create a defect dir with POSCAR/POTCAR/INCAR, return path."""
+        wd = root / name
+        wd.mkdir(parents=True)
+        els = " ".join(comp.keys())
+        counts = " ".join(str(n) for n in comp.values())
+        wd.joinpath("POSCAR").write_text(
+            "title\n1.0\n"
+            "10.0 0.0 0.0\n0.0 10.0 0.0\n0.0 0.0 10.0\n"
+            f"{els}\n{counts}\nDirect\n"
+            + "\n".join("0 0 0" for _ in range(sum(comp.values())))
+        )
+        # POTCAR with real ZVALs (La 11, O 6, Zr_sv 12)
+        zvals = {"La": 11.0, "O": 6.0, "Zr": 12.0, "Al": 3.0, "Sr": 10.0}
+        pot = []
+        for el in comp:
+            zv = zvals.get(el, 6.0)
+            pot.append(f"   TITEL  = PAW_PBE {el} 01Jan2000\n"
+                       f"   POMASS = 1.0; ZVAL   = {zv:8.3f}    mass and valenz\n")
+        wd.joinpath("POTCAR").write_text("".join(pot))
+        incar = "ALGO = Normal\nNSW = 50\n"
+        if nelect is not None:
+            incar += f"NELECT = {nelect}\n"
+        wd.joinpath("INCAR").write_text(incar)
+        return wd
+
+    def test_all_correct(self, tmp_path: Path):
+        from vasp_sop.defect.builder import verify_nelect
+        root = tmp_path / "df"
+        self._make_dir(root, "perfect", {"La": 8, "Zr": 4, "O": 28}, 0, None)
+        self._make_dir(root, "Va_O1_2", {"La": 8, "Zr": 4, "O": 27}, 2, "296")
+        # correct: 8*11 + 4*12 + 27*6 - 2 = 88+48+162-2 = 296
+        self._make_dir(root, "Va_O1_-1", {"La": 8, "Zr": 4, "O": 27}, -1, "299")
+        cfg = PipelineConfig(formula="La2Zr2O7", supercell_tool="doped")
+        assert verify_nelect(root, cfg) == []
+
+    def test_detects_wrong_charged(self, tmp_path: Path):
+        from vasp_sop.defect.builder import verify_nelect
+        root = tmp_path / "df"
+        self._make_dir(root, "Va_O1_2", {"La": 8, "Zr": 4, "O": 27}, 2, "424")
+        cfg = PipelineConfig(formula="La2Zr2O7", supercell_tool="doped")
+        problems = verify_nelect(root, cfg)
+        assert len(problems) == 1
+        assert "296" in problems[0]
+
+    def test_detects_missing_for_charged(self, tmp_path: Path):
+        from vasp_sop.defect.builder import verify_nelect
+        root = tmp_path / "df"
+        self._make_dir(root, "Va_O1_2", {"La": 8, "Zr": 4, "O": 27}, 2, None)
+        cfg = PipelineConfig(formula="La2Zr2O7", supercell_tool="doped")
+        problems = verify_nelect(root, cfg)
+        assert len(problems) == 1
+        assert "missing" in problems[0]
+
+    def test_neutral_with_wrong_value_detected(self, tmp_path: Path):
+        from vasp_sop.defect.builder import verify_nelect
+        root = tmp_path / "df"
+        # neutral q=0 but INCAR carries the host's wrong NELECT (2025-style bug)
+        self._make_dir(root, "Va_O1_0", {"La": 8, "Zr": 4, "O": 27}, 0, "424")
+        cfg = PipelineConfig(formula="La2Zr2O7", supercell_tool="doped")
+        problems = verify_nelect(root, cfg)
+        assert len(problems) == 1
+        assert "neutral" in problems[0]

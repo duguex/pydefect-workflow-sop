@@ -52,6 +52,20 @@ def build_all(
     _generate_structures(defect_root)
     _generate_vasp_inputs(defect_root, config)
 
+    # Post-build charge verification: every defect INCAR must carry the
+    # correct NELECT (or none for neutral dirs).  A violation means the
+    # inputs are broken and must not be submitted (charge errors are
+    # silent killers — they ran to "completion" with wrong electron
+    # counts in the 2025 tree).
+    problems = verify_nelect(defect_root, config)
+    if problems:
+        for p in problems[:20]:
+            logger.error("NELECT verify: %s", p)
+        raise RuntimeError(
+            f"NELECT verification failed for {len(problems)} "
+            f"directory/directories (first: {problems[0] if problems else ''})"
+        )
+
     # Write fingerprint *after* successful build.
     _write_fingerprint(defect_root, config)
 
@@ -334,6 +348,142 @@ def _generate_vasp_inputs(defect_root: Path, config: PipelineConfig) -> None:
                            charge=q)
         except Exception as exc:
             logger.warning("%s: input generation failed: %s", d.name, exc)
+
+
+def verify_nelect(defect_root: Path, config: PipelineConfig) -> list[str]:
+    """Verify NELECT in every defect INCAR against POSCAR×ZVAL − q.
+
+    Returns a list of problem descriptions (empty when all correct).
+    Neutral dirs (q=0) must have NO NELECT line (VASP default); charged
+    dirs must carry exactly ΣNᵢZVALᵢ − q.  ZVALs come from each dir's
+    own POTCAR, falling back to plan.yaml pp variants.
+    """
+    from vasp_sop.vasp.io import _pick_psp_variant
+    from vasp_sop.defect import is_valid_defect_dir
+    import re
+
+    _PSP = Path("/mnt/shared/VASP_POT/POT_GGA_PAW_PBE")
+    problems: list[str] = []
+    Q_RE = re.compile(r"_(-?\d+)$")
+    pp_zval: dict[str, float] = {}
+    for v in config.potcar_overrides:
+        cand = _pick_psp_variant(v.split("_")[0], psp=_PSP, encut=None)
+        if cand is not None:
+            zv = _potcar_zvals(cand / "POTCAR")
+            if zv:
+                pp_zval[v.split("_")[0]] = zv.get(cand.name, zv.get(v.split("_")[0]))
+
+    def _element_fallback(el: str) -> float | None:
+        """Element-name fallback: simple name first, then any non-GW variant."""
+        simple = _PSP / el / "POTCAR"
+        if simple.is_file():
+            zv = _potcar_zvals(simple)
+            return zv.get(el)
+        for cand in sorted(_PSP.iterdir()):
+            if cand.is_dir() and cand.name.split("_")[0] == el and "_GW" not in cand.name:
+                zv = _potcar_zvals(cand / "POTCAR")
+                return zv.get(el) or zv.get(cand.name.split("_")[0])
+        return None
+
+    for wd in sorted(defect_root.iterdir()):
+        if not wd.is_dir():
+            continue
+        if not (wd / "POSCAR").is_file():
+            continue
+        comp = _poscar_composition(wd)
+        if comp is None:
+            problems.append(f"{wd.name}: cannot parse POSCAR composition")
+            continue
+        zv: dict[str, float] = {}
+        if (wd / "POTCAR").is_file():
+            zv = {k.split("_")[0]: v for k, v in _potcar_zvals(wd / "POTCAR").items()}
+        for el in comp:
+            if el not in zv:
+                if el in pp_zval and pp_zval[el]:
+                    zv[el] = pp_zval[el]
+                else:
+                    z = _element_fallback(el)
+                    if z:
+                        zv[el] = z
+        if not all(el in zv for el in comp):
+            problems.append(
+                f"{wd.name}: missing ZVAL for {[e for e in comp if e not in zv]}"
+            )
+            continue
+        base = sum(n * zv[el] for el, n in comp.items())
+        m = Q_RE.search(wd.name)
+        q = int(m.group(1)) if m else 0
+        correct = base - q
+        incar = wd / "INCAR"
+        if not incar.is_file():
+            problems.append(f"{wd.name}: no INCAR")
+            continue
+        m2 = re.search(r"NELECT\s*=\s*(-?\d+\.?\d*)", incar.read_text())
+        actual = float(m2.group(1)) if m2 else None
+        if q == 0:
+            if actual is not None and actual != correct:
+                problems.append(
+                    f"{wd.name}: neutral but NELECT={actual:.0f} "
+                    f"(should be absent, default {correct:.0f})"
+                )
+        elif actual is None:
+            problems.append(
+                f"{wd.name}: charged q={q} but NELECT missing "
+                f"(should be {correct:.0f})"
+            )
+        elif actual != correct:
+            problems.append(
+                f"{wd.name}: NELECT={actual:.0f} != {correct:.0f} (q={q})"
+            )
+    return problems
+
+
+def _potcar_zvals(potcar: Path) -> dict[str, float]:
+    """Element → ZVAL from POTCAR header blocks, in file order.
+
+    Each PAW_PBE block opens with a TITEL line naming its element
+    (variant suffixes stripped); the ZVAL line that follows belongs to
+    that element.  Elements without a ZVAL line are omitted.
+    """
+    import re as _re
+
+    zvals: dict[str, float] = {}
+    try:
+        text = potcar.read_text()
+    except OSError:
+        return zvals
+    current: str | None = None
+    for line in text.splitlines():
+        m_t = _re.search(r"TITEL\s*=\s*PAW_PBE\s+(\S+)", line)
+        if m_t:
+            current = m_t.group(1).split("_")[0]
+            continue
+        m_z = _re.search(r"ZVAL\s*=\s*([\d.]+)", line)
+        if m_z and current is not None and current not in zvals:
+            zvals[current] = float(m_z.group(1))
+    return zvals
+
+
+def _poscar_composition(wd: Path) -> dict[str, int] | None:
+    """Element → count from the directory's POSCAR species lines."""
+    import re
+
+    poscar = wd / "POSCAR"
+    if not poscar.is_file():
+        return None
+    lines = poscar.read_text().splitlines()
+    sp = None
+    for i, ln in enumerate(lines[:8]):
+        toks = ln.split()
+        if toks and all(re.match(r"^[A-Z][a-z]?$", t) for t in toks):
+            sp = i
+            break
+    if sp is None:
+        return None
+    try:
+        return dict(zip(lines[sp].split(), map(int, lines[sp + 1].split())))
+    except (IndexError, ValueError):
+        return None
 
 
 def construct_complex_defects(defect_root: Path, config: PipelineConfig) -> None:
