@@ -1,3 +1,44 @@
+# Next Actions — +U/SOC 批次（2026-08-10，等 2026 根播种结束）
+
+> Last updated: 2026-08-10. 触发点：2026 根 submit 队列接近 0（链式播种消化完）。
+> 相关 ADR：0012（+U 永远打开）、0010（链式播种）。交接：/tmp/handoff-vasp-sop-2026-08-10.md。
+
+## 执行顺序
+
+```
+INCAR 重生成（+U+SOC） → 续算重置 → 验证闭环
+```
+
+## 1. INCAR 重生成（+U + SOC 同批）
+
+- **+U 体系**（永远打开已代码化——重生成自动带 LDAU）：Fe×4（BaAl4O7/CaAl4O7/SrAl4O7/SrGa4O7:Fe）+ ZnO + **BaAl2B2O7:Fe**（dopant Fe 已配，cpd 56 相含 Fe 21）
+- **SOC 体系**（plan 已配 soc: true——重生成自动 LSORBIT+ISYM=-1）：Gd2GaSbO7:Bi/La2SrSc2O7/La2Zr2O7/Y2Sn2O7/Y2Ti2O7（CsPbBr3 已有）
+- 脚本：`/tmp/regenerate_incar_full.py <root>`（prepare_inputs 带 extra_uis="SIGMA 0.02 LORBIT 11"、charge=q）
+- 验证：INCAR 有 `LDAU=True`+`LDAUU`（Fe=3/Zn=5）、`LSORBIT=.TRUE.`（SOC 体系）；`verify_nelect` 0 问题
+
+## 2. 续算重置（用户定：保留 CONTCAR，非从头）
+
+- 已收敛的：清 OUTCAR/vasprun（防 backfill 不重跑）→ **保留 CONTCAR** → `batch retry` → 提交前把 CONTCAR 复制为 POSCAR（+U 起点）
+- 在跑的：跑完 restart 吃新 INCAR（自然续算）
+- 触发：`crisp cancel --status submit` + 重置（Gd 36 先例；349 stale 先例）
+
+## 3. 验证闭环
+
+- Fe 磁矩局域化（Fe3+ ~4-5 μB）；与无 U 结果形成能对比（预期差 >0.1 eV）
+- SOC 体系抽查 LSORBIT；收敛率/播种数据继续监控
+
+## 已知陷阱
+
+- Ba4Al2O7（27.6Å>25Å）在 BaAl4O7/BaAl2B2O7 已排除（crisp 拒收）
+- OUTCAR 收敛 tail 窗口 256KB（勿改小）；JobStore 会 stale（用 reconcile/重置）
+- defect ISPIN=2 是 vise 模板默认——勿显式覆盖
+- hubbard_u plan 字段已废弃（永远打开）；soc 字段仍生效（plan 配置）
+- 等待链的非根自动解锁——勿手动提交
+
+---
+
+# Next Actions — Architecture Repair
+
 # Next Actions — Architecture Repair
 
 > Last updated: 2026-07-20. Source: Architecture Review → GitHub #102.
