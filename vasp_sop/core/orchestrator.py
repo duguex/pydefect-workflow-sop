@@ -368,7 +368,6 @@ def wave2_submit(
             has_vasprun,
             recover_vasprun_artifacts,
             prepare_vasprun_recovery_run,
-            restart_from_contcar,
             seed_geometry_from_contcar,
         )
 
@@ -422,18 +421,17 @@ def wave2_submit(
                             for r in js.history(str(c.resolve())) or [])
                     for c in g["dirs"]
                 )
-                if not conv_siblings and not terminal_failed and not (
-                    child / "OUTCAR"
-                ).is_file():
+                if not conv_siblings and not terminal_failed:
                     logger.debug(
                         "%s: waiting for chain sibling (ADR 0010)", child.name
                     )
                     continue
                 # Seed from the nearest converged sibling when one exists —
                 # applies to already-run dirs too (their stale geometry is
-                # worse than a converged sibling's).  Otherwise, if the dir
-                # ran before, continue from its own CONTCAR instead of the
-                # pristine structure.
+                # worse than a converged sibling's).  Without a converged
+                # sibling (and no terminal-failed one) the chain is not
+                # unlocked: this charge waits for the chain to reach it,
+                # regardless of whether it ran an old round before.
                 if conv_siblings:
                     src = min(
                         conv_siblings,
@@ -444,8 +442,6 @@ def wave2_submit(
                             "%s: seeded geometry from %s (ADR 0010)",
                             child.name, src.name,
                         )
-                elif (child / "CONTCAR").is_file():
-                    restart_from_contcar(child)
 
             # Ion-converged but missing vasprun/calc_results -> recovery (#0016)
             if verdicts.get(str(child.resolve()), False):
