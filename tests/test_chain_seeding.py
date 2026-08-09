@@ -202,9 +202,12 @@ class TestWave2ChainUnlock:
         assert "ISTART = 0" in (df / "Va_O1_0" / "INCAR").read_text()
         assert "ISTART = 0" in (df / "Va_O1_-2" / "INCAR").read_text()
 
-    def test_terminal_failed_sibling_unlocks_without_seed(
+    def test_terminal_failed_sibling_blocks_chain(
         self, tmp_path: Path, monkeypatch
     ):
+        """A terminal-failed sibling does NOT unlock the chain: non-root
+        charges wait for a converged sibling (operator repairs the failed
+        dir via `batch retry` instead)."""
         root = _make_unitcell_system(tmp_path / "p")
         plan = {
             "project": {"formula": "NaCl", "poscar_src": "MP mp-1"},
@@ -226,8 +229,9 @@ class TestWave2ChainUnlock:
         self._run_wave2(root, monkeypatch, lambda p: False)
         defect_calls = [c for c in self.calls if "defect" in str(c)]
         names = {c.name for c in defect_calls if c.name != "perfect"}
-        assert names == {"Va_O1_0", "Va_O1_-2"}
-        # no converged sibling -> pristine POSCAR kept
+        # root is terminal-failed: not resubmitted, chain stays locked
+        assert names == set()
+        # pristine POSCAR untouched
         assert (root / "defect" / "Va_O1_0" / "POSCAR").read_text().startswith(
             "seed\n"
         )

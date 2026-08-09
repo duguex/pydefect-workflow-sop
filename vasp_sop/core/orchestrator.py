@@ -443,11 +443,11 @@ def wave2_submit(
                 continue
 
             # ── Charge-state chain (ADR 0010) ─────────────────────────
-            # A non-root charge submits only when the chain unlocks it: a
-            # converged sibling seeds its geometry, a terminal-failed
-            # sibling degrades to the pristine structure.  Otherwise the
-            # charge waits — even if it ran an old round before, its stale
-            # geometry is not a substitute for a converged sibling's.
+            # A non-root charge submits only when a converged sibling can
+            # seed its geometry.  Without one it waits — a terminal-failed
+            # sibling does NOT unlock the chain (operator intervention via
+            # `batch retry` repairs the failed dir instead), and its own
+            # stale geometry is never a substitute.
             q = _defect_charge(child.name)
             g = groups.get(_defect_group_key(child.name)) if q is not None else None
             if g is not None and q not in g["roots"]:
@@ -455,33 +455,26 @@ def wave2_submit(
                     c for c in g["dirs"]
                     if c is not child and verdicts.get(str(c.resolve()), False)
                 ]
-                terminal_failed = any(
-                    c is not child
-                    and js.latest(str(c.resolve())) == "failed"
-                    and any(r.get("source") == "auto_retry"
-                            for r in js.history(str(c.resolve())) or [])
-                    for c in g["dirs"]
-                )
-                if not conv_siblings and not terminal_failed:
+                if not conv_siblings:
                     logger.debug(
                         "%s: waiting for chain sibling (ADR 0010)", child.name
                     )
                     continue
-                src_name = None
-                if conv_siblings:
-                    src = min(
-                        conv_siblings,
-                        key=lambda c: abs((_defect_charge(c.name) or 0) - q),
-                    )
-                    if seed_geometry_from_contcar(child, src):
-                        src_name = src.name
-                        logger.info(
-                            "%s: seeded geometry from %s (ADR 0010)",
-                            child.name, src.name,
-                        )
+                src = min(
+                    conv_siblings,
+                    key=lambda c: abs((_defect_charge(c.name) or 0) - q),
+                )
+                if not seed_geometry_from_contcar(child, src):
+                    # converged sibling without a usable CONTCAR — keep
+                    # waiting rather than run from the pristine structure
+                    continue
+                logger.info(
+                    "%s: seeded geometry from %s (ADR 0010)",
+                    child.name, src.name,
+                )
                 _submit_or_skip(
                     child, f"df-{child.name}", sys.name, dry_run, info, js=js,
-                    source=f"seeded_from_{src_name}" if src_name else "chain_degraded",
+                    source=f"seeded_from_{src.name}",
                     priority=priority,
                 )
                 continue
