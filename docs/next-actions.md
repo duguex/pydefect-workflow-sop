@@ -14,6 +14,8 @@ INCAR 重生成（+U+SOC） → 续算重置 → 验证闭环
 - **+U 体系**（永远打开已代码化——重生成自动带 LDAU）：Fe×4（BaAl4O7/CaAl4O7/SrAl4O7/SrGa4O7:Fe）+ ZnO + **BaAl2B2O7:Fe**（dopant Fe 已配，cpd 56 相含 Fe 21）
 - **SOC 体系**（plan 已配 soc: true——重生成自动 LSORBIT+ISYM=-1）：Gd2GaSbO7:Bi/La2SrSc2O7/La2Zr2O7/Y2Sn2O7/Y2Ti2O7（CsPbBr3 已有）
 - 脚本：`/tmp/regenerate_incar_full.py <root>`（prepare_inputs 带 extra_uis="SIGMA 0.02 LORBIT 11"、charge=q）
+- **阴-阳错位反位已排除（ADR 0013）**：is_valid_defect_dir 门自动跳过——被筛目录不重生成、不重提
+- **NSW=100**（用户 2026-08-10 确认）：|q|≥5 反位等首轮 20 步不收敛的硬尾目录重生成时 NSW=100（vasp-sop-defect-convergence-nsw 配方）
 - 验证：INCAR 有 `LDAU=True`+`LDAUU`（Fe=3/Zn=5）、`LSORBIT=.TRUE.`（SOC 体系）；`verify_nelect` 0 问题
 
 ## 2. 续算重置（用户定：保留 CONTCAR，非从头）

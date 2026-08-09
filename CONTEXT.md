@@ -111,3 +111,11 @@ _Avoid_: 起点价态, seed source
 **Seeded geometry**:
 The starting structure of a defect directory that was replaced by a converged sibling's CONTCAR (charge-state chain, ADR 0010). Geometry only — the WAVECAR is charge-specific and never carried over (`ISTART=0`); pydefect post-processing is unaffected because it reads the initial structure from `defect_entry.json`, not the on-disk POSCAR.
 _Avoid_: 播种, CONTCAR reuse, 复用结构
+
+**Defect name**:
+pydefect's directory-name scheme: `Va_Xn` = vacancy, `X_Yn` = substitution/antisite (X replaces the atom on site Yn — composition changes by −Y +X, verified from `defect_entry.json`), `X_iN` = interstitial (X at interstitial site N). The charge state is appended as `_q`. `X_Yn` with a real host site is never an interstitial; the two are frequently confused because both read "X near Yn".
+_Avoid_: 间隙位 vs 反位混用, reading `O_Ga1` as an O interstitial
+
+**Anion-cation antisite**:
+A single substitution `X_Yn` where exactly one side is an anion-role element (O/S/Se/Te/F/Cl/Br/I/N/P) — an anion on a cation site or a cation on an anion site. Excluded from the defect set at the directory validity gate (ADR 0013): never submitted or analyzed, but left on disk. Metalloids (Sb, Ge) count as cations in these oxide hosts. Complex defects and metal↔metal substitutions are unaffected.
+_Avoid_: 阴-阳错位, 反位全筛

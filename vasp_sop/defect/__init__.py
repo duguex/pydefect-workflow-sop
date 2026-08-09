@@ -9,6 +9,7 @@ This package provides three independent submodules:
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 from vasp_sop.core.config import PipelineConfig
@@ -23,6 +24,29 @@ DEFECT_NEW_DIR = "defect_new"
 
 # Directories that are never defect calculation dirs
 _NON_DEFECT_DIRS = frozenset({"perfect", "defect_new", "__pycache__"})
+
+# Anion-role elements: the negative partner in these oxide/sulfide hosts.
+# A single substitution where exactly one side is an anion-role element is
+# an anion-cation antisite (ADR 0013) — a cation on an anion site or an
+# anion on a cation site is physically unreasonable and excluded from the
+# defect set (still enumerated by pydefect, but never submitted or analyzed).
+_ANION_ELEMENTS = frozenset(
+    {"O", "S", "Se", "Te", "F", "Cl", "Br", "I", "N", "P"}
+)
+_SINGLE_DEFECT_RE = re.compile(r"^([A-Z][a-z]?)_([A-Z][a-z]?)(\d+)_(-?\d+)$")
+
+
+def _is_anion_cation_antisite(name: str) -> bool:
+    """True if *name* is a single substitution with exactly one anion side.
+
+    ``O_Ga1_-1`` (anion on a cation site) and ``Bi_O1_0`` (cation on an
+    anion site) both match; ``Gd_Sb1_6``, ``Va_O1_0`` and complex defects
+    (``Gd_Ga1+Va_O1_-1``) do not.
+    """
+    m = _SINGLE_DEFECT_RE.match(name)
+    if m is None or m.group(1) == "Va":
+        return False
+    return (m.group(1) in _ANION_ELEMENTS) != (m.group(2) in _ANION_ELEMENTS)
 
 
 def is_valid_defect_dir(path: Path, *, include_defect_new: bool = False) -> bool:
@@ -55,6 +79,12 @@ def is_valid_defect_dir(path: Path, *, include_defect_new: bool = False) -> bool
 
     # Hidden dirs
     if name.startswith("."):
+        return False
+
+    # Anion-cation antisites are excluded (ADR 0013): still on disk, but
+    # never submitted or counted by any scan (this gate is the single
+    # entry point for wave2 submission and analysis enumeration).
+    if _is_anion_cation_antisite(name):
         return False
 
     # Check Name_Charge pattern: split on first "_", both parts non-empty

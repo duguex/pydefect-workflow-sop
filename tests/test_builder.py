@@ -375,7 +375,7 @@ class TestVerifyInputs:
     def test_potcar_species_mismatch(self, tmp_path: Path):
         from vasp_sop.defect.builder import verify_inputs
         root = tmp_path / "df"
-        self._dir(root, "Ba_O1_0", {"Ba": 8, "O": 27}, potcar_order=["O", "Ba"])
+        self._dir(root, "Va_O1_0", {"Ba": 8, "O": 27}, potcar_order=["O", "Ba"])
         cfg = PipelineConfig(formula="BaO", supercell_tool="doped")
         problems = verify_inputs(root, cfg)
         assert any("POTCAR species" in p for p in problems)
@@ -401,7 +401,7 @@ class TestVerifyInputs:
     def test_magnetic_element_no_ispin(self, tmp_path: Path):
         from vasp_sop.defect.builder import verify_inputs
         root = tmp_path / "df"
-        self._dir(root, "Fe_O1_0", {"Fe": 8, "O": 27})
+        self._dir(root, "Va_O1_0", {"Fe": 8, "O": 27})
         cfg = PipelineConfig(formula="FeO", supercell_tool="doped")
         problems = verify_inputs(root, cfg)
         assert any("ISPIN" in p for p in problems)
