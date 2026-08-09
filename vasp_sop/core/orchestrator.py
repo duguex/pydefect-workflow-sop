@@ -1213,6 +1213,7 @@ class BatchOrchestrator:
         """Poll tracked dirs: finalize converged, detect crashes, restart."""
         from vasp_sop.core.jobs import crisp_active_dirs
         from vasp_sop.vasp.convergence import convergence_verdict, _tail_text
+        from vasp_sop.defect import is_valid_defect_dir
 
         completed = 0
         crispy = crisp_active_dirs(skip=True) if self.dry_run else crisp_active_dirs(skip=False)
@@ -1220,6 +1221,12 @@ class BatchOrchestrator:
         for row in self.js.tracked_dirs():
             wd = Path(row["dir_path"])
             wd_str = str(wd.resolve())
+            # ADR 0013: anion-cation antisites are excluded from the defect
+            # set — never restart/resubmit them (wave2 already skips them;
+            # the poll path must not resurrect them after a cancel).
+            if "defect" in wd.parts and not is_valid_defect_dir(wd):
+                self.js.untrack(wd_str)
+                continue
             if wd_str in crispy:
                 continue
             if convergence_verdict(wd).converged:

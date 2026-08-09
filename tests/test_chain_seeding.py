@@ -311,3 +311,107 @@ class TestWave2ChainUnlock:
         # median failed once (auto_retry armed by --retry-failed) -> root is
         # retried, but the chain stays locked for its neighbors
         assert names == {"Va_O1_-1"}
+
+
+class TestPollExcludesAntisite:
+    """ADR 0013: the poll/restart path must not resurrect excluded dirs.
+
+    wave2 already skips anion-cation antisites; _poll_tracked must
+    untrack them instead of restarting them (which would re-submit a
+    calculation whose result is discarded).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_store(self, tmp_path: Path, monkeypatch):
+        from vasp_sop.core.paths import override_cache_root
+
+        override_cache_root(tmp_path / ".vasp_sop")
+
+    def test_poll_untracks_excluded_dir_without_resubmitting(
+        self, tmp_path: Path, monkeypatch
+    ):
+        from types import SimpleNamespace as _NS
+
+        root = _make_unitcell_system(tmp_path / "p")
+        plan = {
+            "project": {"formula": "NaCl", "poscar_src": "MP mp-1"},
+            "parameters": {"functional": "pbesol"},
+        }
+        (root / "plan.yaml").write_text(yaml.dump(plan))
+        # Excluded dir on disk, tracked as if previously submitted, with a
+        # normal-exit unconverged OUTCAR (would restart if not excluded).
+        excl = root / "defect" / "O_Ga1_0"
+        _write_inputs(excl)
+        (excl / "OUTCAR").write_text(
+            "some output\n General timing and accounting informations for this job:\n"
+        )
+
+        from vasp_sop.core.orchestrator import BatchOrchestrator
+
+        orch = BatchOrchestrator(root, dry_run=True)
+        try:
+            orch.js.record(str(excl.resolve()), "submitted")
+            orch.js.track(str(excl.resolve()))
+            monkeypatch.setattr(
+                "vasp_sop.core.jobs.crisp_active_dirs", lambda skip=False: set()
+            )
+            calls: list[Path] = []
+            monkeypatch.setattr(
+                "vasp_sop.core.jobs.submit_vasp",
+                lambda p, priority=0: (
+                    calls.append(Path(p)) or _NS(task_name=f"t{len(calls)}")
+                ),
+            )
+            orch._poll_tracked()
+            assert calls == []
+            assert orch.js.tracked_dirs() == []
+        finally:
+            orch.js.close()
+
+    def test_poll_keeps_tracked_valid_dir(self, tmp_path: Path, monkeypatch):
+        from types import SimpleNamespace as _NS
+
+        root = _make_unitcell_system(tmp_path / "p")
+        plan = {
+            "project": {"formula": "NaCl", "poscar_src": "MP mp-1"},
+            "parameters": {"functional": "pbesol"},
+        }
+        (root / "plan.yaml").write_text(yaml.dump(plan))
+        # converged sibling -1 -> valid dir (-2) gets seeded and restarted
+        sib = root / "defect" / "Va_O1_-1"
+        (sib / "CONTCAR").write_text("converged geometry\n")
+        (sib / "OUTCAR").write_text(
+            "reached required accuracy\n General timing and accounting informations for this job:\n"
+        )
+        valid = root / "defect" / "Va_O1_-2"
+        (valid / "INCAR").write_text(
+            "SYSTEM = test\nEDIFFG = -0.03\nNSW = 100\nIBRION = 2\n"
+        )
+        (valid / "OUTCAR").write_text(
+            "some output\n General timing and accounting informations for this job:\n"
+        )
+
+        from vasp_sop.core.orchestrator import BatchOrchestrator
+
+        orch = BatchOrchestrator(root, dry_run=True)
+        try:
+            orch.js.record(str(valid.resolve()), "submitted")
+            orch.js.track(str(valid.resolve()))
+            monkeypatch.setattr(
+                "vasp_sop.core.jobs.crisp_active_dirs", lambda skip=False: set()
+            )
+            calls: list[Path] = []
+            monkeypatch.setattr(
+                "vasp_sop.core.jobs.submit_vasp",
+                lambda p, priority=0: (
+                    calls.append(Path(p)) or _NS(task_name=f"t{len(calls)}")
+                ),
+            )
+            orch._poll_tracked()
+            # valid dir is restarted (normal-exit unconverged), not dropped
+            assert calls == [valid.resolve()]
+            assert [r["dir_path"] for r in orch.js.tracked_dirs()] == [
+                str(valid.resolve())
+            ]
+        finally:
+            orch.js.close()
