@@ -205,7 +205,10 @@ def convergence_verdict(path: Path, task_type: str = "") -> ConvergenceVerdict:
     if cached is not None and cached[0] == mtime:
         return cached[1]
 
-    tail = _tail_text(outcar, n=8192)
+    # Window must cover the convergence line: long runs (100+ ionic steps
+    # with many electronic iterations) can leave "reached required accuracy"
+    # >64KB before EOF, behind the timing block.
+    tail = _tail_text(outcar, n=262144)
     if tail is None or _TIMING_MARK not in tail:
         # Still report last-block force when available: stall detection reads
         # it on OUTCARs whose run crashed before the timing marker was written.
