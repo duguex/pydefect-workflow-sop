@@ -1746,6 +1746,57 @@ class TestHandleUnconvergedPoll:
         assert js.latest(wd_str) == "unconverged"  # chain_wait record
         js.close()
 
+    def test_chain_seeds_from_converged_sibling_on_restart(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """Non-root defect with a converged sibling: poll restart seeds the
+        sibling's geometry (POSCAR), not its own stale CONTCAR."""
+        from vasp_sop.core.job_store import JobStore
+        from vasp_sop.core.paths import override_cache_root
+
+        override_cache_root(tmp_path / ".vasp_sop")
+
+        defect = tmp_path / "defect"
+        wd = defect / "Va_O1_0"
+        wd.mkdir(parents=True)
+        sib = defect / "Va_O1_1"
+        sib.mkdir()
+        (wd / "INCAR").write_text("NSW = 100\nIBRION = 2\nEDIFFG = -0.03\n")
+        (wd / "POSCAR").write_text("pristine\n")
+        (wd / "CONTCAR").write_text("own stale\n")
+        (wd / "POTCAR").write_text("p\n")
+        (wd / "KPOINTS").write_text("k\n")
+        (wd / "OUTCAR").write_text(
+            " General timing and accounting informations for this job:\n"
+            " TOTAL-FORCE (eV/Angst)\n ---\n 0.0 0.0 0.0 0.5 0.0 0.0\n"
+        )
+        # converged sibling with a real CONTCAR
+        (sib / "INCAR").write_text("NSW = 100\n")
+        (sib / "CONTCAR").write_text("sibling converged geometry\n")
+        (sib / "OUTCAR").write_text(
+            " General timing and accounting informations for this job:\n"
+            " reached required accuracy - stopping structural energy minimisation\n"
+        )
+
+        wd_str = str(wd.resolve())
+        js = JobStore()
+        js.record(wd_str, "submitted", source="test", reason="restart,prev_f=0.5")
+        js.track(wd_str)
+
+        monkeypatch.setattr(
+            "vasp_sop.core.jobs.submit_vasp",
+            lambda path, priority=0: type("Job", (), {"task_name": "fake"}),
+        )
+
+        from vasp_sop.core.orchestrator import BatchOrchestrator
+
+        orch = BatchOrchestrator(tmp_path, dry_run=True)
+        orch.handle_unconverged(wd)
+
+        # seeded geometry wins over own CONTCAR restart
+        assert (wd / "POSCAR").read_text() == "sibling converged geometry\n"
+        js.close()
+
     def test_nsw_ibrion_preserved_on_restart(self, tmp_path: Path, monkeypatch):
         """CONTCAR→POSCAR must NOT rewrite NSW or IBRION (user policy)."""
         from vasp_sop.core.job_store import JobStore

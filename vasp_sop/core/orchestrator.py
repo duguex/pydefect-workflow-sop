@@ -1031,6 +1031,7 @@ class BatchOrchestrator:
             # Charge-state chain (ADR 0010): a non-root defect restarts only
             # from a converged sibling's geometry (seed); without one it
             # waits for the chain instead of continuing its stale geometry.
+            seeded = False
             q = _defect_charge(wd.name)
             if q is not None:
                 conv_sib = None
@@ -1043,7 +1044,7 @@ class BatchOrchestrator:
                         conv_sib = cand
                         break
                 if conv_sib is not None:
-                    seed_geometry_from_contcar(wd, conv_sib)
+                    seeded = seed_geometry_from_contcar(wd, conv_sib)
                 else:
                     self.js.record(
                         wd_str, "unconverged", source="chain_wait",
@@ -1055,7 +1056,8 @@ class BatchOrchestrator:
                     )
                     return
 
-            restart_from_contcar(wd)
+            if not seeded:
+                restart_from_contcar(wd)
             job = submit_vasp(wd.resolve(), priority=self._dispatch_priority(wd))
             if getattr(job, "task_name", "") == "cached":
                 # crisp has this exact calc cached — the cached result IS the
