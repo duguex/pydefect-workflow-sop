@@ -28,18 +28,6 @@ def input_ready(path: Path) -> bool:
     return _vasp_input_ready(path)
 
 
-def _needs_spin_polarized(work_dir: Path) -> bool:
-    """True when the POSCAR contains DFT+U elements (3d TM / lanthanides).
-
-    Spin polarization pairs with +U (ADR 0012): magnetic species need
-    ISPIN=2 for a physical ground state; non-magnetic systems stay
-    unpolarized.
-    """
-    from vasp_sop.materials.mp import needs_hubbard_u
-
-    return needs_hubbard_u(work_dir / "POSCAR")
-
-
 def prepare_inputs(
     work_dir: Path,
     config: PipelineConfig,
@@ -102,9 +90,6 @@ def prepare_inputs(
     # elements (3d Mn-Ni, Cu, Zn, lanthanides) get U, others none.
     cmd += " --options set_hubbard_u True"
     uis_flags = f"NSW 50 {extra_uis} {encut_opt}".strip()
-    # Spin polarization pairs with +U on magnetic (U-table) elements.
-    if "ISPIN" not in uis_flags and _needs_spin_polarized(work_dir):
-        uis_flags += " ISPIN 2"
     cmd += f" -uis {uis_flags}"
 
     run_local(cmd, cwd=work_dir, timeout=300)
@@ -162,9 +147,6 @@ def _prepare_inputs_vise_api(
     tokens = extra_uis.split()
     for i in range(0, len(tokens) - 1, 2):
         overrides[tokens[i]] = tokens[i + 1]
-    # Spin polarization pairs with +U on magnetic (U-table) elements.
-    if "ISPIN" not in overrides and _needs_spin_polarized(work_dir):
-        overrides["ISPIN"] = "2"
 
     structure = Structure.from_file(str(work_dir / "POSCAR"))
     options = CategorizedInputOptions(

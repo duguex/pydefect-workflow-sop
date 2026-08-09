@@ -11,6 +11,8 @@ This also fixes a unitcell inconsistency where `structure_opt` went through the 
 
 ## Consequences
 
-- Affected systems (contain U-table elements, currently without +U): Fe ×4 (MAl4O7 ×3, SrGa4O7:Fe) and ZnO — their INCARs get `LDAU=True` with vise defaults (Fe/Zn `LDAUU=3`/`5`) when regenerated.
+- Affected systems (contain U-table elements, currently without +U): Fe ×4 (MAl4O7 ×3, SrGa4O7:Fe) and ZnO — their INCARs get `LDAU=True` with vise defaults (Fe/Zn `LDAUU=3`/`5`) when regenerated. **BaAl2B2O7 is Fe-doped** (`dopant_elements: [Fe]`) and likewise gets +U; its Fe competing phases (21, incl. Fe/FeO/Fe2O3 and Ba-Fe/Al-Fe phases) were added to its cpd set.
+- ISPIN is left to vise's defect template default (ISPIN=2 for defect calculations); no element-based override.
+- The `hubbard_u` plan field is retired (ignored); existing plan values (including the four ineffective `true` entries for Ti/Zr/Sn/Sc systems, whose elements are absent from vise's U table) are left untouched.
 - Regeneration is deferred until the 2026-root chain seeding wave finishes (operator decision); resumed calculations keep their CONTCAR as the +U starting geometry (restart semantics, no clean rerun).
-- Systems without U-table elements (e.g. BaAl2B2O7) are unaffected — vise simply does not enable LDAU.
+- Systems without U-table elements (e.g. pure BaAl2B2O7 host) are unaffected — vise simply does not enable LDAU.
