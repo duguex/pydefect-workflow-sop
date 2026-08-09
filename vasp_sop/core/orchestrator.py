@@ -421,7 +421,9 @@ def wave2_submit(
                             for r in js.history(str(c.resolve())) or [])
                     for c in g["dirs"]
                 )
-                if not conv_siblings and not terminal_failed:
+                if not conv_siblings and not terminal_failed and not (
+                    child / "OUTCAR"
+                ).is_file():
                     logger.debug(
                         "%s: waiting for chain sibling (ADR 0010)", child.name
                     )
