@@ -404,45 +404,6 @@ def wave2_submit(
             if latest == "submitted":
                 continue
 
-            # Chain unlock (ADR 0010): a non-root charge may only submit once
-            # a converged sibling exists (its geometry source) or a sibling
-            # is terminal-failed (fall back to the pristine structure).
-            q = _defect_charge(child.name)
-            g = groups.get(_defect_group_key(child.name)) if q is not None else None
-            if g is not None and q not in g["roots"]:
-                conv_siblings = [
-                    c for c in g["dirs"]
-                    if c is not child and verdicts.get(str(c.resolve()), False)
-                ]
-                terminal_failed = any(
-                    c is not child
-                    and js.latest(str(c.resolve())) == "failed"
-                    and any(r.get("source") == "auto_retry"
-                            for r in js.history(str(c.resolve())) or [])
-                    for c in g["dirs"]
-                )
-                if not conv_siblings and not terminal_failed:
-                    logger.debug(
-                        "%s: waiting for chain sibling (ADR 0010)", child.name
-                    )
-                    continue
-                # Seed from the nearest converged sibling when one exists —
-                # applies to already-run dirs too (their stale geometry is
-                # worse than a converged sibling's).  Without a converged
-                # sibling (and no terminal-failed one) the chain is not
-                # unlocked: this charge waits for the chain to reach it,
-                # regardless of whether it ran an old round before.
-                if conv_siblings:
-                    src = min(
-                        conv_siblings,
-                        key=lambda c: abs((_defect_charge(c.name) or 0) - q),
-                    )
-                    if seed_geometry_from_contcar(child, src):
-                        logger.info(
-                            "%s: seeded geometry from %s (ADR 0010)",
-                            child.name, src.name,
-                        )
-
             # Ion-converged but missing vasprun/calc_results -> recovery (#0016)
             if verdicts.get(str(child.resolve()), False):
                 has_cr = (child / "calc_results.json").is_file()
@@ -480,6 +441,51 @@ def wave2_submit(
 
             if latest == "converged":
                 continue
+
+            # ── Charge-state chain (ADR 0010) ─────────────────────────
+            # A non-root charge submits only when the chain unlocks it: a
+            # converged sibling seeds its geometry, a terminal-failed
+            # sibling degrades to the pristine structure.  Otherwise the
+            # charge waits — even if it ran an old round before, its stale
+            # geometry is not a substitute for a converged sibling's.
+            q = _defect_charge(child.name)
+            g = groups.get(_defect_group_key(child.name)) if q is not None else None
+            if g is not None and q not in g["roots"]:
+                conv_siblings = [
+                    c for c in g["dirs"]
+                    if c is not child and verdicts.get(str(c.resolve()), False)
+                ]
+                terminal_failed = any(
+                    c is not child
+                    and js.latest(str(c.resolve())) == "failed"
+                    and any(r.get("source") == "auto_retry"
+                            for r in js.history(str(c.resolve())) or [])
+                    for c in g["dirs"]
+                )
+                if not conv_siblings and not terminal_failed:
+                    logger.debug(
+                        "%s: waiting for chain sibling (ADR 0010)", child.name
+                    )
+                    continue
+                src_name = None
+                if conv_siblings:
+                    src = min(
+                        conv_siblings,
+                        key=lambda c: abs((_defect_charge(c.name) or 0) - q),
+                    )
+                    if seed_geometry_from_contcar(child, src):
+                        src_name = src.name
+                        logger.info(
+                            "%s: seeded geometry from %s (ADR 0010)",
+                            child.name, src.name,
+                        )
+                _submit_or_skip(
+                    child, f"df-{child.name}", sys.name, dry_run, info, js=js,
+                    source=f"seeded_from_{src_name}" if src_name else "chain_degraded",
+                    priority=priority,
+                )
+                continue
+
             if latest in ("failed", "unconverged"):
                 # One-shot auto-rerun (ADR 0007): terminal defect dirs get
                 # exactly one machine resubmit, marked auto_retry; a second
@@ -972,7 +978,10 @@ class BatchOrchestrator:
 
     def handle_unconverged(self, wd: Path) -> None:
         """VASP normal exit but unconverged — CONTCAR restart or give up."""
-        from vasp_sop.vasp.io import restart_from_contcar
+        from vasp_sop.vasp.io import (
+            restart_from_contcar,
+            seed_geometry_from_contcar,
+        )
         from vasp_sop.core.jobs import submit_vasp
         from vasp_sop.vasp.convergence import convergence_verdict, is_stalled
 
@@ -1018,6 +1027,33 @@ class BatchOrchestrator:
                     wd.name, attempt,
                 )
                 return
+
+            # Charge-state chain (ADR 0010): a non-root defect restarts only
+            # from a converged sibling's geometry (seed); without one it
+            # waits for the chain instead of continuing its stale geometry.
+            q = _defect_charge(wd.name)
+            if q is not None:
+                conv_sib = None
+                for cand in wd.parent.iterdir():
+                    if cand.name == wd.name or not cand.is_dir():
+                        continue
+                    if _defect_group_key(cand.name) != _defect_group_key(wd.name):
+                        continue
+                    if convergence_verdict(cand).converged:
+                        conv_sib = cand
+                        break
+                if conv_sib is not None:
+                    seed_geometry_from_contcar(wd, conv_sib)
+                else:
+                    self.js.record(
+                        wd_str, "unconverged", source="chain_wait",
+                        attempt=attempt + 1,
+                    )
+                    self.js.untrack(wd_str)
+                    logger.info(
+                        "! %s waiting for chain sibling (ADR 0010)", wd.name
+                    )
+                    return
 
             restart_from_contcar(wd)
             job = submit_vasp(wd.resolve(), priority=self._dispatch_priority(wd))

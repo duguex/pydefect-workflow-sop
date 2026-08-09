@@ -1702,6 +1702,50 @@ class TestBatchRunLoopObservability:
 class TestHandleUnconvergedPoll:
     """BatchOrchestrator.handle_unconverged: CONTCAR restart without parameter changes."""
 
+    def test_chain_wait_without_converged_sibling(self, tmp_path: Path, monkeypatch):
+        """Non-root defect with no converged sibling: waits for the chain
+        instead of restarting its own stale geometry (ADR 0010)."""
+        from vasp_sop.core.job_store import JobStore
+        from vasp_sop.core.paths import override_cache_root
+
+        override_cache_root(tmp_path / ".vasp_sop")
+
+        wd = tmp_path / "defect" / "Va_O1_0"
+        wd.mkdir(parents=True)
+        (wd / "INCAR").write_text("NSW = 100\nIBRION = 2\nEDIFFG = -0.03\n")
+        (wd / "POSCAR").write_text("pristine\n")
+        (wd / "CONTCAR").write_text("own stale\n")
+        (wd / "POTCAR").write_text("p\n")
+        (wd / "KPOINTS").write_text("k\n")
+        (wd / "OUTCAR").write_text(
+            " General timing and accounting informations for this job:\n"
+            " TOTAL-FORCE (eV/Angst)\n ---\n 0.0 0.0 0.0 0.5 0.0 0.0\n"
+        )
+
+        wd_str = str(wd.resolve())
+        js = JobStore()
+        js.record(wd_str, "submitted", source="test", reason="restart,prev_f=0.5")
+        js.track(wd_str)
+
+        calls = []
+        monkeypatch.setattr(
+            "vasp_sop.core.jobs.submit_vasp",
+            lambda path, priority=0: (
+                calls.append(path),
+                type("Job", (), {"task_name": "fake"}),
+            )[1],
+        )
+
+        from vasp_sop.core.orchestrator import BatchOrchestrator
+
+        orch = BatchOrchestrator(tmp_path, dry_run=True)
+        orch.handle_unconverged(wd)
+
+        assert (wd / "POSCAR").read_text() == "pristine\n"  # no restart
+        assert calls == []  # no resubmit
+        assert js.latest(wd_str) == "unconverged"  # chain_wait record
+        js.close()
+
     def test_nsw_ibrion_preserved_on_restart(self, tmp_path: Path, monkeypatch):
         """CONTCAR→POSCAR must NOT rewrite NSW or IBRION (user policy)."""
         from vasp_sop.core.job_store import JobStore
