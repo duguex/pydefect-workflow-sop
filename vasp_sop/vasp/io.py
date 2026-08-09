@@ -143,6 +143,12 @@ def _prepare_inputs_vise_api(
     )
     vif = VaspInputFiles(options)
     vif.create_input_files(work_dir)
+    # vise's defect template hardcodes NSW=20, which forces 3-5 CONTCAR
+    # restart rounds per relaxation (each round re-enters VASP with
+    # ISTART=1). A single longer run converges in one pass for the
+    # small doped supercells; restart still works when 100 steps are
+    # genuinely not enough.
+    patch_incar(work_dir, NSW=100)
     if config.soc:
         patch_incar(work_dir, LSORBIT=".TRUE.", ISYM=-1)
 
