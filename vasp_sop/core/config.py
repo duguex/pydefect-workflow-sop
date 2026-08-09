@@ -9,7 +9,7 @@
    parameters:
      functional: pbesol
      encut: null                  # 自动检测
-     hubbard_u: false             # auto: 无 TM/f-electron
+     hubbard_u: false             # retired (ADR 0012): DFT+U always on, vise auto-adapts by element
      pp: []                       # auto: 从 POTCAR 目录排序
    supercell: {min_atoms: 200, max_atoms: 600}
    defects:
