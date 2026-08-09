@@ -697,8 +697,11 @@ def _add_batch_parser(subparsers) -> None:
     # run
     rp = sub.add_parser("run", help="Run batch pipeline — advance all systems until completion")
     rp.add_argument(
-        "root", type=Path,
-        help="Project root directory containing system subdirectories",
+        "root", type=Path, nargs="+",
+        help="One or more project root directories. Order = dispatch "
+             "priority: systems under earlier roots are submitted first "
+             "(crisp priority), so list the root that must finish first "
+             "leftmost.",
     )
     rp.add_argument(
         "--poll", type=int, default=60,
@@ -753,8 +756,9 @@ def _handle_batch(args: argparse.Namespace) -> None:
     elif args.batch_action == "generate-inputs":
         _batch_generate_inputs(args.root.resolve(), unitcell=args.unitcell)
     elif args.batch_action == "run":
-        _batch_run(args.root.resolve(), poll_interval=args.poll, dry_run=args.dry_run,
-                   exclude=args.exclude, loop=args.loop, retry_failed=args.retry_failed)
+        _batch_run([r.resolve() for r in args.root], poll_interval=args.poll,
+                   dry_run=args.dry_run, exclude=args.exclude, loop=args.loop,
+                   retry_failed=args.retry_failed)
 
 
 
@@ -975,20 +979,24 @@ def _batch_history(root: Path, *, system: str | None = None,
             print(f"  {name:<22}  {running:>3}  {done:>4}  {len(states):>5}")
     store.close()
 
-def _batch_run(root: Path, *, poll_interval: int = 60, dry_run: bool = False,
-               exclude: list[str] | None = None, loop: bool = False,
-               retry_failed: bool = False) -> None:
+def _batch_run(roots: Path | list[Path], *, poll_interval: int = 60,
+               dry_run: bool = False, exclude: list[str] | None = None,
+               loop: bool = False, retry_failed: bool = False) -> None:
     """Batch pipeline — advance all systems via the core orchestrator.
 
     One-shot advances each system once, then exits; ``--loop`` runs the
     continuous poll-and-advance cycle.  All loop machinery (JobStore handle,
     cache worker, restart policy, snapshots) lives in
     :class:`vasp_sop.core.orchestrator.BatchOrchestrator`.
+
+    ``roots`` accepts a single root (legacy callers) or an ordered list;
+    root order sets dispatch priority (earlier roots submit first).
     """
     from vasp_sop.core.orchestrator import BatchOrchestrator
 
+    root_list = [roots] if isinstance(roots, Path) else list(roots)
     BatchOrchestrator(
-        root,
+        root_list,
         dry_run=dry_run,
         exclude=exclude,
         poll_interval=poll_interval,

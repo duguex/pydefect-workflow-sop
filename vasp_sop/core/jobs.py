@@ -194,10 +194,14 @@ def submit_vasp(
     work_dir: Path,
     nproc: int = 4,
     vasp_cmd: str = "mpirun -np {nproc} vasp_std",
+    priority: int = 0,
 ) -> VaspJob:
     """Launch VASP in *work_dir* and return a handle.
 
     Backend: crisp (if available) or local ``Popen``.
+
+    *priority* is the crisp dispatch priority (higher dispatches first);
+    the batch orchestrator derives it from the system's root.
     """
     if not _vasp_input_ready(work_dir):
         raise RuntimeError(f"VASP input files not complete in {work_dir}.")
@@ -206,9 +210,8 @@ def submit_vasp(
         raise RuntimeError(
             f"Lattice too large in {work_dir} "
             f"(max_abc > {MAX_LATTICE} Å, skipped)")
-
     if _crisp_available():
-        return _crisp_submit(work_dir)
+        return _crisp_submit(work_dir, priority=priority)
     return _local_submit(work_dir, nproc, vasp_cmd)
 
 
@@ -226,7 +229,7 @@ def _local_submit(
     return LocalVaspJob(work_dir, proc)
 
 
-def _crisp_submit(work_dir: Path) -> CrispVaspJob:
+def _crisp_submit(work_dir: Path, priority: int = 0) -> CrispVaspJob:
     logger.info("Submit crisp VASP in %s", work_dir)
     # ── Dedup: crisp agent.db can have active jobs unknown to JobStore ─
     import json as _json, sqlite3 as _sqlite3
@@ -250,8 +253,11 @@ def _crisp_submit(work_dir: Path) -> CrispVaspJob:
                 return CrispVaspJob(work_dir, _existing_task)
         except Exception:
             logger.warning("agent.db dedup check failed, falling through to submit")
+    submit_cmd = ["crisp", "submit"]
+    if priority:
+        submit_cmd += ["--priority", str(priority)]
     result = subprocess.run(
-        ["crisp", "submit"],
+        submit_cmd,
         cwd=str(work_dir),
         capture_output=True, text=True, timeout=120,
     )

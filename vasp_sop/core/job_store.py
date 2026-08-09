@@ -53,8 +53,9 @@ class JobStore:
         """Lazily-opened persistent connection (WAL mode)."""
         if self._conn is None:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._conn = sqlite3.connect(str(self._path), timeout=10)
+            self._conn = sqlite3.connect(str(self._path), timeout=60)
             self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA busy_timeout=60000")
             self._conn.row_factory = sqlite3.Row
         return self._conn
 

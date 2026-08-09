@@ -65,13 +65,37 @@ A calculation-state entry that says `submitted` for a directory whose job is no 
 _Avoid_: stuck job, ghost entry
 
 **Block reason**:
-Why one calculation directory is not done, as reported by `batch blockers`: missing inputs, failed (crashed), unconverged, never ran, or live. One directory, one reason; the tool cannot claim to automate what it cannot enumerate (ADR 0007).
+Why one calculation directory is not done, as reported by `batch blockers`: missing inputs, failed (crashed), unconverged, terminal, never ran, or live. One directory, one reason; the tool cannot claim to automate what it cannot enumerate (ADR 0007, extended by ADR 0008).
 _Avoid_: 卡住原因, issue
 
 **Auto-rerun**:
-The one-shot retry policy (ADR 0007). A failed or unconverged *defect* directory is resubmitted exactly once by the machine, marked `auto_retry`; a second failure is terminal forever. The machine never retries beyond one shot, never touches CPD phases after the persistent gate, and never decides exclusions.
+The one-shot retry policy of ADR 0007, **superseded by ADR 0008** (classified retry). A failed or unconverged *defect* directory is resubmitted exactly once by the machine, marked `auto_retry`; a second failure is terminal forever. The machine never retries beyond one shot, never touches CPD phases after the persistent gate, and never decides exclusions. _Historical term — new code speaks of failure classes and the retry state machine._
 _Avoid_: 无限重试, resubmission loop
+
+**Retry state machine**:
+The automatic resubmission policy (ADR 0008): the long-running batch loop tracks failed calculation directories and resubmits them by *failure class* until they converge or become *terminal*. One unified loop serves every batch root (ADR 0009). It replaces the ADR 0007 one-shot rule.
+_Avoid_: auto retry, 自动重试
+
+**Failure class**:
+How a failed calculation directory is categorized at the retry decision point, parsed from crisp's raw diagnostics (`.failed`, `{jobid}.log`) by vasp-sop. **Transient** failures (SIGKILL, time limit, submit/network errors) are retried every loop cycle — cluster recovery makes them self-healing. **Persistent** failures (ZBRENT, force-gate) are physics answers, retried a bounded number of times (default 2, configurable) before going *terminal*.
+_Avoid_: crash reason, 失败类型
+
+**Terminal**:
+A calculation directory that has exhausted its retry budget and will not be automatically resubmitted again. Recorded as calculation state `failed` with `reason=terminal:<class>`; surfaced by `batch blockers` for human decision (retry via `--retry-failed` / `batch retry`, fix inputs, or exclude — an exclusion is a scope decision, never a failure bucket).
+_Avoid_: dead, 放弃, gave up
 
 **Input restore**:
 Making a directory runnable again by restoring its missing inputs — POTCAR from the local PSP store, keyed by POSCAR species — so a never-ran or input-stripped directory becomes `input_ready` (ADR 0007). Restoring inputs does not by itself decide whether the calculation should run.
 _Avoid_: fix inputs, 补输入
+
+**Batch root**:
+One project tree handed to the batch loop (`batch run <root>…`). Roots are ordered: the list's left-to-right order sets each root's dispatch priority — systems under earlier roots submit before later ones. One root alone is the legacy single-project loop.
+_Avoid_: project, tree, 根目录
+
+**Unified loop**:
+The single batch-loop process that serves every batch root (ADR 0009): it collects systems across all roots, advances them in one cycle, and writes one log/snapshot under the first root. One process eliminates the cross-root JobStore write-lock contention and the duplicated `_restore_crisp_active` submissions that two per-root loops produced.
+_Avoid_: 多 loop, per-root loop
+
+**Dispatch priority**:
+A crisp job attribute (integer, default 0) controlling daemon dispatch order: higher values dispatch first, then created-at FIFO. vasp-sop derives it from the job's batch root; the daemon never hardcodes project paths. Strict priority means the daemon exhausts higher-priority jobs before dispatching any lower-priority one (ADR 0009).
+_Avoid_: 优先级, queue rank

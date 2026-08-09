@@ -142,7 +142,7 @@ class TestAdvanceOneSystem:
         override_cache_root(tmp_path / ".vasp_sop")
         monkeypatch.setattr("vasp_sop.defect.builder.build_all", lambda *a, **kw: None)
         monkeypatch.setattr("vasp_sop.vasp.convergence.convergence_verdict",
-                            lambda p: SimpleNamespace(converged="NaCl_mp-12345" in str(p), max_f=None))
+                            lambda p, priority=0: SimpleNamespace(converged="NaCl_mp-12345" in str(p), max_f=None))
         monkeypatch.setattr("vasp_sop.defect.cpd.compute_chemical_potentials",
                             lambda *a, **kw: None)
         monkeypatch.setattr("vasp_sop.defect.cpd._get_target_composition",
@@ -151,7 +151,7 @@ class TestAdvanceOneSystem:
     def test_dry_run_does_not_submit(self, competing_system, monkeypatch):
         calls = []
         monkeypatch.setattr("vasp_sop.core.jobs.submit_vasp",
-                            lambda p: (calls.append(p) or
+                            lambda p, priority=0: (calls.append(p) or
                                        type("J", (), {"task_name": "t"})()))
         from vasp_sop.core.orchestrator import advance_one_system
         s = _make_system_dict(competing_system)
@@ -161,7 +161,7 @@ class TestAdvanceOneSystem:
     def test_non_dry_submits_competing(self, competing_system, monkeypatch):
         calls = []
         monkeypatch.setattr("vasp_sop.core.jobs.submit_vasp",
-                            lambda p: (calls.append(p) or
+                            lambda p, priority=0: (calls.append(p) or
                                        type("J", (), {"task_name": "t"})()))
         from vasp_sop.core.orchestrator import advance_one_system
         s = _make_system_dict(competing_system)
@@ -485,7 +485,7 @@ class TestAdvanceDryRunPostprocess:
         override_cache_root(tmp_path / ".vasp_sop")
         monkeypatch.setattr("vasp_sop.defect.builder.build_all", lambda *a, **kw: None)
         monkeypatch.setattr("vasp_sop.vasp.convergence.convergence_verdict",
-                            lambda p: SimpleNamespace(converged="NaCl_mp-12345" in str(p), max_f=None))
+                            lambda p, priority=0: SimpleNamespace(converged="NaCl_mp-12345" in str(p), max_f=None))
         monkeypatch.setattr("vasp_sop.defect.cpd.compute_chemical_potentials",
                             lambda *a, **kw: None)
         monkeypatch.setattr("vasp_sop.defect.cpd._get_target_composition",
@@ -591,7 +591,7 @@ class TestBatchNoDuplicateSubmission:
         monkeypatch.setattr("vasp_sop.defect.builder._generate_vasp_inputs",
                            lambda *a, **kw: None)
         monkeypatch.setattr("vasp_sop.vasp.convergence.convergence_verdict",
-                           lambda p: SimpleNamespace(converged="NaCl_mp-12345" in str(p), max_f=None))
+                           lambda p, priority=0: SimpleNamespace(converged="NaCl_mp-12345" in str(p), max_f=None))
         monkeypatch.setattr("vasp_sop.vasp.io.prepare_inputs",
                            lambda *a, **kw: None)
         monkeypatch.setattr("vasp_sop.defect.cpd.compute_chemical_potentials",
@@ -607,7 +607,7 @@ class TestBatchNoDuplicateSubmission:
         """
         calls = []
         monkeypatch.setattr("vasp_sop.core.jobs.submit_vasp",
-                           lambda p: (calls.append(str(p)) or
+                           lambda p, priority=0: (calls.append(str(p)) or
                                       type("J", (), {"task_name": "t"})()))
         from vasp_sop.core.orchestrator import advance_one_system
         s = _make_system_dict(competing_system)
@@ -689,7 +689,7 @@ class TestBatchNoDuplicateSubmission:
         """UC and defect dirs submitted once across two cycles."""
         calls = []
         monkeypatch.setattr("vasp_sop.core.jobs.submit_vasp",
-                           lambda p: (calls.append(str(p)) or
+                           lambda p, priority=0: (calls.append(str(p)) or
                                       type("J", (), {"task_name": "t"})()))
         from vasp_sop.core.orchestrator import advance_one_system
         root = self._make_ucdf_system(tmp_path)
@@ -791,7 +791,7 @@ class TestFullPipelineWalkthrough:
         # Shared submit tracker
         submit_calls: list[str] = []
         monkeypatch.setattr("vasp_sop.core.jobs.submit_vasp",
-                           lambda p: (submit_calls.append(str(p.resolve())) or
+                           lambda p, priority=0: (submit_calls.append(str(p.resolve())) or
                                       type("J", (), {"task_name": "t"})()))
 
         s = _make_system_dict(root)
@@ -915,7 +915,7 @@ class TestFullPipelineWalkthrough:
 
         submit_calls = []
         monkeypatch.setattr("vasp_sop.core.jobs.submit_vasp",
-                           lambda p: (_ for _ in ()).throw(AssertionError("submit_vasp called")))
+                           lambda p, priority=0: (_ for _ in ()).throw(AssertionError("submit_vasp called")))
 
         s = _make_system_dict(root)
         assert _system_phase(s) == "STRUCTURE_OPT"
@@ -945,7 +945,7 @@ class TestFullPipelineWalkthrough:
         # ── Mock submit_vasp: must NEVER be called ────────────────────
         submit_calls = []
         monkeypatch.setattr("vasp_sop.core.jobs.submit_vasp",
-                           lambda p: (submit_calls.append(str(p)) or
+                           lambda p, priority=0: (submit_calls.append(str(p)) or
                                       type("J", (), {"task_name": "t"})()))
 
         # ── Materialize converged results on disk (crisp's job) ───────
@@ -1005,7 +1005,7 @@ class TestFullPipelineWalkthrough:
 
         submit_calls: list[str] = []
         monkeypatch.setattr("vasp_sop.core.jobs.submit_vasp",
-                           lambda p: (submit_calls.append(str(p.resolve())) or
+                           lambda p, priority=0: (submit_calls.append(str(p.resolve())) or
                                       type("J", (), {"task_name": "t"})()))
         # Materialize the converged target on disk (result reuse is crisp's
         # job now) so the phase advances past STRUCTURE_OPT toward UC.
@@ -1243,7 +1243,7 @@ class TestUcFalseConvergedResubmit:
         submit_calls: list[str] = []
         monkeypatch.setattr(
             "vasp_sop.core.jobs.submit_vasp",
-            lambda p: (submit_calls.append(str(p.resolve()))
+            lambda p, priority=0: (submit_calls.append(str(p.resolve()))
                        or type("J", (), {"task_name": "t"})()),
         )
 
@@ -1280,7 +1280,7 @@ class TestAdvanceAnalyzeStatusPrint:
         )
         monkeypatch.setattr(
             "vasp_sop.core.jobs.submit_vasp",
-            lambda p: type("J", (), {"task_name": "t"})(),
+            lambda p, priority=0: type("J", (), {"task_name": "t"})(),
         )
         monkeypatch.setattr(
             "vasp_sop.core.jobs.move_crisp_outputs", lambda *a, **kw: None,
@@ -1686,7 +1686,7 @@ class TestBatchRunLoopObservability:
         from vasp_sop.core.paths import override_cache_root
         override_cache_root(tmp_path / ".vasp_sop")
         monkeypatch.setattr("vasp_sop.core.jobs.submit_vasp",
-            lambda path: type("J",(),{"task_name":"T"}))
+            lambda path, priority=0: type("J",(),{"task_name":"T"}))
 
         from vasp_sop.cli.main import _batch_run
         _batch_run(root, poll_interval=99, dry_run=False, loop=True)
@@ -1729,7 +1729,7 @@ class TestHandleUnconvergedPoll:
 
         monkeypatch.setattr(
             "vasp_sop.core.jobs.submit_vasp",
-            lambda path: type("Job", (), {"task_name": "fake"}),  # return fake job
+            lambda path, priority=0: type("Job", (), {"task_name": "fake"}),  # return fake job
         )
 
         from vasp_sop.core.orchestrator import BatchOrchestrator
@@ -1970,7 +1970,7 @@ class TestChemicalEnvironmentAdvance:
         calls: list[str] = []
         monkeypatch.setattr(
             "vasp_sop.core.jobs.submit_vasp",
-            lambda p: (calls.append(str(p)) or
+            lambda p, priority=0: (calls.append(str(p)) or
                        type("J", (), {"task_name": "t"})()),
         )
         s = _make_system_dict(root)
@@ -1996,7 +1996,7 @@ class TestChemicalEnvironmentAdvance:
         calls: list[str] = []
         monkeypatch.setattr(
             "vasp_sop.core.jobs.submit_vasp",
-            lambda p: (calls.append(str(p)) or
+            lambda p, priority=0: (calls.append(str(p)) or
                        type("J", (), {"task_name": "t"})()),
         )
         s = _make_system_dict(root)
@@ -2257,7 +2257,7 @@ class TestAutoRerunFailed:
                            lambda *a, **kw: None)
         monkeypatch.setattr(
             "vasp_sop.vasp.convergence.convergence_verdict",
-            lambda p: SimpleNamespace(
+            lambda p, priority=0: SimpleNamespace(
                 converged="NaCl_mp-12345" in str(p), max_f=None,
                 reason="force_gate_fail"),
         )
@@ -2326,7 +2326,7 @@ class TestAutoRerunFailed:
         calls: list[str] = []
         monkeypatch.setattr(
             "vasp_sop.core.jobs.submit_vasp",
-            lambda p: (calls.append(str(Path(p).resolve())) or
+            lambda p, priority=0: (calls.append(str(Path(p).resolve())) or
                        type("J", (), {"task_name": "t"})()),
         )
         s = _make_system_dict(root)
@@ -2363,7 +2363,7 @@ class TestAutoRerunFailed:
         calls: list[str] = []
         monkeypatch.setattr(
             "vasp_sop.core.jobs.submit_vasp",
-            lambda p: (calls.append(str(Path(p).resolve())) or
+            lambda p, priority=0: (calls.append(str(Path(p).resolve())) or
                        type("J", (), {"task_name": "t"})()),
         )
         advance_one_system(_make_system_dict(root), dry_run=False,
@@ -2474,7 +2474,7 @@ class TestUcEmptyPoscarGuard:
                            lambda *a, **kw: None)
         monkeypatch.setattr(
             "vasp_sop.vasp.convergence.convergence_verdict",
-            lambda p: SimpleNamespace(
+            lambda p, priority=0: SimpleNamespace(
                 converged="NaCl_mp-12345" in str(p), max_f=None,
                 reason="force_gate_fail"),
         )
@@ -2483,7 +2483,7 @@ class TestUcEmptyPoscarGuard:
         calls: list[str] = []
         monkeypatch.setattr(
             "vasp_sop.core.jobs.submit_vasp",
-            lambda p: (calls.append(str(p)) or
+            lambda p, priority=0: (calls.append(str(p)) or
                        type("J", (), {"task_name": "t"})()),
         )
         dielectric = str((root / "unitcell" / "dielectric").resolve())
@@ -2542,7 +2542,7 @@ class TestHandleUnconvergedCached:
         from vasp_sop.core.jobs import CrispVaspJob
         monkeypatch.setattr(
             "vasp_sop.core.jobs.submit_vasp",
-            lambda p: CrispVaspJob(Path(p), "cached"),
+            lambda p, priority=0: CrispVaspJob(Path(p), "cached"),
         )
         orch = BatchOrchestrator(tmp_path, dry_run=True)
         orch.handle_unconverged(tmp_path)

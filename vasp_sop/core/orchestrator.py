@@ -50,10 +50,11 @@ def _submit_or_skip(
     label: str,
     sys_name: str,
     dry_run: bool,
-    info_fn: Callable[[str], None],
+    info_fn: Any,
     *,
     js: Any = None,
     source: str | None = None,
+    priority: int = 0,
 ) -> Any:
     """Submit a VASP job via crisp, or skip in dry-run mode."""
     from vasp_sop.core.jobs import submit_vasp
@@ -64,7 +65,7 @@ def _submit_or_skip(
             info_fn(f"  [dry-run] {sys_name:<18} would submit: {label}")
         return None
     try:
-        job = submit_vasp(path.resolve())
+        job = submit_vasp(path.resolve(), priority=priority)
         owned = js is None
         store = js if not owned else JobStore()
         try:
@@ -140,7 +141,8 @@ def _unitcell_build_failure(root: Path) -> dict[str, str] | None:
 
 
 def wave1_optimize(
-    sys: System, js: Any, dry_run: bool, *, log_to_logger: bool = False
+    sys: System, js: Any, dry_run: bool, *, log_to_logger: bool = False,
+    priority: int = 0,
 ) -> None:
     """Wave 1: STRUCTURE_OPT — target submission, convergence check, cache restore.
 
@@ -161,7 +163,8 @@ def wave1_optimize(
         if convergence_verdict(td).converged:
             js.record(str(td.resolve()), "converged")
         elif input_ready(td):
-            _submit_or_skip(td, "target", sys.name, dry_run, info, js=js)
+            _submit_or_skip(td, "target", sys.name, dry_run, info, js=js,
+                            priority=priority)
 
 
 # ── Wave 2 ─────────────────────────────────────────────────────────────────
@@ -169,7 +172,7 @@ def wave1_optimize(
 
 def wave2_submit(
     sys: System, js: Any, dry_run: bool, *, log_to_logger: bool = False,
-    retry_failed: bool = False,
+    retry_failed: bool = False, priority: int = 0,
 ) -> None:
     """Wave 2: COMPETING + UNITCELL_DEFECT submission.
 
@@ -261,7 +264,8 @@ def wave2_submit(
         for cd in sys.competing_dirs(js):
             if js.latest(str(cd.resolve())) == "submitted":
                 continue
-            _submit_or_skip(cd, f"phase:{cd.name}", sys.name, dry_run, info, js=js)
+            _submit_or_skip(cd, f"phase:{cd.name}", sys.name, dry_run, info, js=js,
+                            priority=priority)
         return
 
     # ── UNITCELL_DEFECT: submit UC tasks + defect dirs ───────────────
@@ -309,7 +313,8 @@ def wave2_submit(
                                sys.name, task)
             continue
         prepare_inputs(task_dir, sys.config, task_type=task)
-        _submit_or_skip(task_dir, f"uc-{task}", sys.name, dry_run, info, js=js)
+        _submit_or_skip(task_dir, f"uc-{task}", sys.name, dry_run, info, js=js,
+                        priority=priority)
 
     # Submit perfect supercell
     perfect_dir = df_root / "perfect"
@@ -320,7 +325,8 @@ def wave2_submit(
             if perfect_state != "converged":
                 js.record(perfect_path, "converged", source="backfill")
         elif perfect_state not in ("submitted", "failed", "unconverged"):
-            _submit_or_skip(perfect_dir, "df-perfect", sys.name, dry_run, info, js=js)
+            _submit_or_skip(perfect_dir, "df-perfect", sys.name, dry_run, info, js=js,
+                            priority=priority)
 
     # Submit defect directories
     if df_root.is_dir() and not (df_root / "defect_energy_summary.json").is_file():
@@ -363,7 +369,8 @@ def wave2_submit(
                     "%s: resubmit for missing vasprun (CONTCAR/static)", child.name
                 )
                 _submit_or_skip(
-                    child, f"df-vr-{child.name}", sys.name, dry_run, info, js=js)
+                    child, f"df-vr-{child.name}", sys.name, dry_run, info, js=js,
+                    priority=priority)
                 if js.latest(str(child.resolve())) == "submitted":
                     js.record(
                         str(child.resolve()),
@@ -394,9 +401,11 @@ def wave2_submit(
                 _submit_or_skip(
                     child, f"df-{child.name}", sys.name, dry_run, info,
                     js=js, source="auto_retry",
+                    priority=priority,
                 )
                 continue
-            _submit_or_skip(child, f"df-{child.name}", sys.name, dry_run, info, js=js)
+            _submit_or_skip(child, f"df-{child.name}", sys.name, dry_run, info, js=js,
+                            priority=priority)
 
 
 # ── Wave 3 ─────────────────────────────────────────────────────────────────
@@ -712,13 +721,15 @@ def advance_one_system(
 
     # ── Wave 1: STRUCTURE_OPT ────────────────────────────────────────
     if p == STRUCTURE_OPT:
-        wave1_optimize(sys_obj, js, dry_run, log_to_logger=log_to_logger)
+        wave1_optimize(sys_obj, js, dry_run, log_to_logger=log_to_logger,
+                       priority=s.get("priority", 0))
         # Re-derive from disk — the target may now be recorded as done
         p = sys_obj.derive_phase(js)
 
     # ── Wave 2: COMPETING (early return) ─────────────────────────────
     if p == COMPETING:
-        wave2_submit(sys_obj, js, dry_run, log_to_logger=log_to_logger)
+        wave2_submit(sys_obj, js, dry_run, log_to_logger=log_to_logger,
+                     priority=s.get("priority", 0))
         sys_obj.save_phase(sys_obj.derive_phase(js))
         return
 
@@ -732,7 +743,8 @@ def advance_one_system(
             if dry_run:
                 wave3_postprocess(sys_obj, js, dry_run, log_to_logger=log_to_logger)
             wave2_submit(sys_obj, js, dry_run, log_to_logger=log_to_logger,
-                         retry_failed=retry_failed)
+                         retry_failed=retry_failed,
+                         priority=s.get("priority", 0))
             if not dry_run:
                 wave3_postprocess(sys_obj, js, dry_run, log_to_logger=log_to_logger)
         except Exception as exc:
@@ -757,7 +769,7 @@ class BatchOrchestrator:
 
     def __init__(
         self,
-        root: Path,
+        root: Path | list[Path],
         *,
         dry_run: bool = False,
         exclude: list[str] | None = None,
@@ -766,9 +778,17 @@ class BatchOrchestrator:
         retry_failed: bool = False,
     ) -> None:
         from vasp_sop.core.job_store import JobStore
-        from vasp_sop.core.config import PipelineConfig
 
-        self.root = Path(root)
+        # Ordered roots: earlier roots dispatch first (higher crisp
+        # priority). Single-root callers keep legacy behaviour.
+        self.roots: list[Path] = (
+            [Path(root)] if isinstance(root, Path) else [Path(r) for r in root]
+        )
+        if not self.roots:
+            raise ValueError("BatchOrchestrator needs at least one root")
+        # Primary root: owns the loop's log file and snapshot. With a
+        # single unified loop the log is one view over all roots.
+        self.root = self.roots[0]
         self.dry_run = dry_run
         self.exclude = list(exclude or [])
         self.poll_interval = poll_interval
@@ -789,29 +809,46 @@ class BatchOrchestrator:
 
         self._collect_systems()
 
+    def _dispatch_priority(self, wd: Path) -> int:
+        """Crisp dispatch priority for a work dir.
+
+        The root that contains *wd* decides; earlier roots in ``self.roots``
+        get a higher priority (``10 * (n - 1 - index)``, so the first root
+        is 10 and later roots step down by 10).  Anything outside every
+        root falls back to 0 (legacy default).
+        """
+        resolved = wd.resolve()
+        for index, root in enumerate(self.roots):
+            if resolved.is_relative_to(root.resolve()):
+                return 10 * (len(self.roots) - 1 - index)
+        return 0
+
     def _collect_systems(self) -> None:
         from vasp_sop.core.config import PipelineConfig
 
         sys_list: list[dict] = []
-        for d in sorted(self.root.iterdir()):
-            if not d.is_dir():
-                continue
-            plan_path = d / "plan.yaml"
-            if not plan_path.is_file():
-                continue
-            try:
-                config = PipelineConfig.from_yaml(plan_path, root=d)
-            except Exception:
-                continue
-            src = config.poscar_src
-            mpid = src.split("mp-", 1)[1] if src.startswith("MP mp-") else None
-            sys_list.append({
-                "name": d.name,
-                "root": d,
-                "config": config,
-                "formula": config.formula,
-                "mpid": mpid,
-            })
+        for root_index, root in enumerate(self.roots):
+            for d in sorted(root.iterdir()):
+                if not d.is_dir():
+                    continue
+                plan_path = d / "plan.yaml"
+                if not plan_path.is_file():
+                    continue
+                try:
+                    config = PipelineConfig.from_yaml(plan_path, root=d)
+                except Exception:
+                    continue
+                src = config.poscar_src
+                mpid = src.split("mp-", 1)[1] if src.startswith("MP mp-") else None
+                sys_list.append({
+                    "name": d.name,
+                    "root": d,
+                    "config": config,
+                    "formula": config.formula,
+                    "mpid": mpid,
+                    "root_index": root_index,
+                    "priority": 10 * (len(self.roots) - 1 - root_index),
+                })
         if self.exclude:
             sys_list = [s for s in sys_list if s["name"] not in self.exclude]
         self.systems = sys_list
@@ -885,7 +922,7 @@ class BatchOrchestrator:
                 return
 
             restart_from_contcar(wd)
-            job = submit_vasp(wd.resolve())
+            job = submit_vasp(wd.resolve(), priority=self._dispatch_priority(wd))
             if getattr(job, "task_name", "") == "cached":
                 # crisp has this exact calc cached — the cached result IS the
                 # answer; re-running reproduces the same (unconverged) output,
@@ -1189,7 +1226,10 @@ class BatchOrchestrator:
             jobs = json.loads(result.stdout).get("jobs") or []
             project_jobs = [
                 job for job in jobs
-                if (job.get("local_dir") or "").startswith(str(self.root))
+                if any(
+                    (job.get("local_dir") or "").startswith(str(r))
+                    for r in self.roots
+                )
             ]
             crisp_active = sum(
                 1 for job in project_jobs
