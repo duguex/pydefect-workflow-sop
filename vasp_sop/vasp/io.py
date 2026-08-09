@@ -63,7 +63,7 @@ def prepare_inputs(
 
     if charge is not None:
         _prepare_inputs_vise_api(work_dir, config, kspacing, task_type,
-                                 charge)
+                                 charge, extra_uis=extra_uis)
         return
 
     pp_opt = (
@@ -106,6 +106,7 @@ def _prepare_inputs_vise_api(
     kspacing: float,
     task_type: str,
     charge: float,
+    extra_uis: str = "",
 ) -> None:
     """Generate VASP inputs through vise's Python API with *charge*.
 
@@ -117,6 +118,15 @@ def _prepare_inputs_vise_api(
     Neutral (q=0) dirs get no NELECT line — VASP's default (Σ ZVAL from
     POSCAR+POTCAR) is exactly the correct electron count; writing 0 would
     be wrong.  Only charged dirs carry NELECT.
+
+    The API path must mirror the CLI path's options, or the generated
+    INCAR silently regresses to vise's template defaults.  Historically
+    this dropped NSW (50 → 20, forcing 3-5 restart rounds), the
+    ``extra_uis`` flags (SIGMA 0.02 / LORBIT 11, smearings that matter
+    for defect occupancies) and ``hubbard_u`` (Gd/Fe systems).  All are
+    restored here: ``overridden_incar_settings`` covers the free-form
+    tags, ``set_hubbard_u`` and ``cutoff_energy`` are first-class
+    ``IncarSettingsGenerator`` options.
     """
     from vise.input_set.input_options import CategorizedInputOptions
     from vise.input_set.vasp_input_files import VaspInputFiles
@@ -133,6 +143,12 @@ def _prepare_inputs_vise_api(
     }
     vise_task = _VISE_TASK_MAP.get(task_type, task_type)
 
+    # Parse the CLI-style "KEY VALUE KEY VALUE" flags into overrides.
+    overrides: dict[str, str] = {"NSW": "100"}
+    tokens = extra_uis.split()
+    for i in range(0, len(tokens) - 1, 2):
+        overrides[tokens[i]] = tokens[i + 1]
+
     structure = Structure.from_file(str(work_dir / "POSCAR"))
     options = CategorizedInputOptions(
         structure=structure,
@@ -140,15 +156,13 @@ def _prepare_inputs_vise_api(
         xc=Xc.from_string(config.functional),
         kpt_density=kspacing,
         charge=charge,
+        set_hubbard_u=config.hubbard_u,
+        cutoff_energy=config.encut,
     )
-    vif = VaspInputFiles(options)
+    vif = VaspInputFiles(options, overridden_incar_settings=overrides)
     vif.create_input_files(work_dir)
-    # vise's defect template hardcodes NSW=20, which forces 3-5 CONTCAR
-    # restart rounds per relaxation (each round re-enters VASP with
-    # ISTART=1). A single longer run converges in one pass for the
-    # small doped supercells; restart still works when 100 steps are
-    # genuinely not enough.
-    patch_incar(work_dir, NSW=100)
+    # Belt and braces: overrides can drift with vise releases.
+    patch_incar(work_dir, NSW=100, **{k: v for k, v in overrides.items() if k != "NSW"})
     if config.soc:
         patch_incar(work_dir, LSORBIT=".TRUE.", ISYM=-1)
 
