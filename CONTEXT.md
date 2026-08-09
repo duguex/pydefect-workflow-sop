@@ -99,3 +99,15 @@ _Avoid_: 多 loop, per-root loop
 **Dispatch priority**:
 A crisp job attribute (integer, default 0) controlling daemon dispatch order: higher values dispatch first, then created-at FIFO. vasp-sop derives it from the job's batch root; the daemon never hardcodes project paths. Strict priority means the daemon exhausts higher-priority jobs before dispatching any lower-priority one (ADR 0009).
 _Avoid_: 优先级, queue rank
+
+**Charge-state chain**:
+The ordered submission plan for one defect's charge states (ADR 0010): the median charge(s) submit first, then neighbors outward one layer at a time. A non-root charge submits only when a converged sibling exists (its geometry source) or a sibling is terminal-failed (pristine-structure fallback); a first failure does not unlock the chain, so the root's one-shot retry (ADR 0008) still happens first. Chains run in parallel across defects, so cluster utilization is preserved.
+_Avoid_: 价态链, broadcast reuse, charge group
+
+**Chain root**:
+The charge state(s) a chain starts from — the median charge for odd-length ranges, the two middle charges (submitted in parallel) for even-length ones. Roots always submit and are the only charges with no sibling prerequisite.
+_Avoid_: 起点价态, seed source
+
+**Seeded geometry**:
+The starting structure of a defect directory that was replaced by a converged sibling's CONTCAR (charge-state chain, ADR 0010). Geometry only — the WAVECAR is charge-specific and never carried over (`ISTART=0`); pydefect post-processing is unaffected because it reads the initial structure from `defect_entry.json`, not the on-disk POSCAR.
+_Avoid_: 播种, CONTCAR reuse, 复用结构

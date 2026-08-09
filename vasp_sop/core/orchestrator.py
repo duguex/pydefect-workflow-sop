@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Callable
 
@@ -43,6 +44,39 @@ def _make_info_fn(log_to_logger: bool) -> Callable[[str], None]:
     if log_to_logger:
         return lambda msg: logger.info("%s", msg)
     return print
+
+
+_Q_RE = re.compile(r"_(-?\d+)$")
+
+
+def _defect_group_key(name: str) -> str:
+    """Defect group = directory name with the charge suffix stripped.
+
+    ``Va_Gd1_-3`` and ``Va_Gd1_-2`` share ``Va_Gd1``; complex defects keep
+    their ``motif+unit`` prefix (``Gd_Ga1+Va_O1_-1`` → ``Gd_Ga1+Va_O1``).
+    """
+    return _Q_RE.sub("", name)
+
+
+def _defect_charge(name: str) -> int | None:
+    """The charge state parsed from a defect directory name, or None."""
+    m = _Q_RE.search(name)
+    return int(m.group(1)) if m else None
+
+
+def _chain_roots(charges: list[int]) -> set[int]:
+    """Median charge states — the chain's starting points (ADR 0010).
+
+    Odd length: the single median.  Even length: the two middle charges,
+    which start in parallel and seed outward in both directions.
+    """
+    qs = sorted(charges)
+    n = len(qs)
+    if n == 0:
+        return set()
+    if n % 2 == 1:
+        return {qs[n // 2]}
+    return {qs[n // 2 - 1], qs[n // 2]}
 
 
 def _submit_or_skip(
@@ -334,7 +368,32 @@ def wave2_submit(
             has_vasprun,
             recover_vasprun_artifacts,
             prepare_vasprun_recovery_run,
+            seed_geometry_from_contcar,
         )
+
+        # Charge-state chain grouping (ADR 0010): defect dirs sharing a name
+        # (charge suffix stripped) form one chain; median charge(s) start
+        # first and converged siblings seed the others' geometries.  Verdicts
+        # are cached once per pass — every child below reads them.
+        groups: dict[str, dict[str, Any]] = {}
+        verdicts: dict[str, bool] = {}
+        for c in sorted(df_root.iterdir()):
+            if not c.is_dir() or c.name == "perfect":
+                continue
+            if not input_ready(c):
+                continue
+            q = _defect_charge(c.name)
+            if q is None:
+                continue
+            g = groups.setdefault(
+                _defect_group_key(c.name),
+                {"dirs": [], "charges": set()},
+            )
+            g["dirs"].append(c)
+            g["charges"].add(q)
+            verdicts[str(c.resolve())] = convergence_verdict(c).converged
+        for g in groups.values():
+            g["roots"] = _chain_roots(sorted(g["charges"]))
 
         for child in sorted(df_root.iterdir()):
             if not child.is_dir() or child.name == "perfect":
@@ -345,8 +404,41 @@ def wave2_submit(
             if latest == "submitted":
                 continue
 
+            # Chain unlock (ADR 0010): a non-root charge may only submit once
+            # a converged sibling exists (its geometry source) or a sibling
+            # is terminal-failed (fall back to the pristine structure).
+            q = _defect_charge(child.name)
+            g = groups.get(_defect_group_key(child.name)) if q is not None else None
+            if g is not None and q not in g["roots"]:
+                conv_siblings = [
+                    c for c in g["dirs"]
+                    if c is not child and verdicts.get(str(c.resolve()), False)
+                ]
+                terminal_failed = any(
+                    c is not child
+                    and js.latest(str(c.resolve())) == "failed"
+                    and any(r.get("source") == "auto_retry"
+                            for r in js.history(str(c.resolve())) or [])
+                    for c in g["dirs"]
+                )
+                if not conv_siblings and not terminal_failed:
+                    logger.debug(
+                        "%s: waiting for chain sibling (ADR 0010)", child.name
+                    )
+                    continue
+                if conv_siblings and not (child / "OUTCAR").is_file():
+                    src = min(
+                        conv_siblings,
+                        key=lambda c: abs((_defect_charge(c.name) or 0) - q),
+                    )
+                    if seed_geometry_from_contcar(child, src):
+                        logger.info(
+                            "%s: seeded geometry from %s (ADR 0010)",
+                            child.name, src.name,
+                        )
+
             # Ion-converged but missing vasprun/calc_results -> recovery (#0016)
-            if convergence_verdict(child).converged:
+            if verdicts.get(str(child.resolve()), False):
                 has_cr = (child / "calc_results.json").is_file()
                 if has_cr or has_vasprun(child) or recover_vasprun_artifacts(child):
                     if js.latest(str(child.resolve())) != "converged":

@@ -227,6 +227,34 @@ def restart_from_contcar(path: Path) -> None:
         new_lines.append("ISTART = 1")
     incar.write_text("\n".join(new_lines) + "\n")
 
+def seed_geometry_from_contcar(path: Path, source_dir: Path) -> bool:
+    """Seed *path*'s starting geometry from a sibling charge state's CONTCAR.
+
+    Charge-state chain seeding (ADR 0010): the same defect at different
+    charges shares a near-identical equilibrium geometry, so a converged
+    sibling's CONTCAR is a far better starting point than the pristine
+    defect structure (typically ~10-20 ionic steps instead of ~100).
+
+    Only the geometry carries over.  The WAVECAR is charge-state specific
+    (different NELECT) and MUST NOT be reused, so it is removed and ISTART
+    is forced to 0: the electronic structure self-consists from scratch on
+    the seeded geometry.
+
+    Returns True when a seed was applied.
+    """
+    contcar = source_dir / "CONTCAR"
+    if not contcar.is_file():
+        return False
+    shutil.copy2(str(contcar), str(path / "POSCAR"))
+    wavecar = path / "WAVECAR"
+    if wavecar.is_file():
+        wavecar.unlink()
+    incar = path / "INCAR"
+    if incar.is_file():
+        patch_incar(path, ISTART=0)
+    return True
+
+
 def has_vasprun(path: Path) -> bool:
     """True if vasprun.xml exists at *path* or path/output/."""
     return (path / "vasprun.xml").is_file() or (
