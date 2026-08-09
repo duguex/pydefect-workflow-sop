@@ -232,6 +232,58 @@ class TestWave2ChainUnlock:
             "seed\n"
         )
 
+    def test_ran_before_sibling_seeded_when_sibling_converged(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """A dir that ran an old round is still seeded when a sibling
+        converges — stale geometry is worse than the sibling's."""
+        root = _make_unitcell_system(tmp_path / "p")
+        plan = {
+            "project": {"formula": "NaCl", "poscar_src": "MP mp-1"},
+            "parameters": {"functional": "pbesol"},
+        }
+        (root / "plan.yaml").write_text(yaml.dump(plan))
+        df = root / "defect"
+        # root converged with a real CONTCAR
+        (df / "Va_O1_-1" / "CONTCAR").write_text("converged geometry\n")
+        (df / "Va_O1_-1" / "vasprun.xml").write_text("<vasprun/>\n")
+        # sibling 0 already ran an old round (OUTCAR + own CONTCAR present)
+        (df / "Va_O1_0" / "OUTCAR").write_text("old run output\n")
+        (df / "Va_O1_0" / "CONTCAR").write_text("old own geometry\n")
+
+        def verdict(path: str) -> bool:
+            return "Va_O1_-1" in path
+
+        self._run_wave2(root, monkeypatch, verdict)
+        # seeded from the converged sibling, not its own stale CONTCAR
+        assert (df / "Va_O1_0" / "POSCAR").read_text() == "converged geometry\n"
+
+    def test_ran_before_restarts_from_own_contcar_without_sibling(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """No converged sibling: a ran-before dir continues from its own
+        CONTCAR (ISTART=1) instead of the pristine structure."""
+        root = _make_unitcell_system(tmp_path / "p")
+        plan = {
+            "project": {"formula": "NaCl", "poscar_src": "MP mp-1"},
+            "parameters": {"functional": "pbesol"},
+        }
+        (root / "plan.yaml").write_text(yaml.dump(plan))
+        df = root / "defect"
+        (df / "Va_O1_0" / "OUTCAR").write_text("old run output\n")
+        (df / "Va_O1_0" / "CONTCAR").write_text("own geometry\n")
+        (df / "Va_O1_0" / "INCAR").write_text("SYSTEM = test\nISTART = 0\n")
+        # median -1 has not converged -> 0 has no converged sibling
+
+        self._run_wave2(root, monkeypatch, lambda p: False)
+        # both neighbors are non-root; 0 ran before so it restarts + submits,
+        # -2 never ran so it waits for the chain; the median root -1 submits
+        defect_calls = [c for c in self.calls if "defect" in str(c)]
+        names = {c.name for c in defect_calls if c.name != "perfect"}
+        assert names == {"Va_O1_-1", "Va_O1_0"}
+        assert (df / "Va_O1_0" / "POSCAR").read_text() == "own geometry\n"
+        assert "ISTART = 1" in (df / "Va_O1_0" / "INCAR").read_text()
+
     def test_unconverged_sibling_does_not_unlock(
         self, tmp_path: Path, monkeypatch
     ):
