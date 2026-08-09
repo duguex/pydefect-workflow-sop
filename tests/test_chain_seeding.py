@@ -415,3 +415,62 @@ class TestPollExcludesAntisite:
             ]
         finally:
             orch.js.close()
+
+
+class TestWave2ExcludesAntisite:
+    """ADR 0013: wave2 must never submit anion-cation antisites.
+
+    wave2 scans defect/ with a plain iterdir — the is_valid gate is what
+    stops excluded dirs from being submitted every loop iteration.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _patch_heavy(self, monkeypatch, tmp_path: Path):
+        from vasp_sop.core.paths import override_cache_root
+
+        override_cache_root(tmp_path / ".vasp_sop")
+        monkeypatch.setattr("vasp_sop.defect.builder.build_all", lambda *a, **kw: None)
+        monkeypatch.setattr(
+            "vasp_sop.defect.builder._generate_vasp_inputs", lambda *a, **kw: None
+        )
+        monkeypatch.setattr(
+            "vasp_sop.defect.unitcell._prepare_all_inputs", lambda *a, **kw: None
+        )
+        self.calls: list[Path] = []
+        monkeypatch.setattr(
+            "vasp_sop.core.jobs.submit_vasp",
+            lambda p, priority=0: (
+                self.calls.append(Path(p))
+                or SimpleNamespace(task_name=f"t{len(self.calls)}")
+            ),
+        )
+
+    def test_excluded_dir_never_submitted(self, tmp_path: Path, monkeypatch):
+        root = _make_unitcell_system(tmp_path / "p")
+        plan = {
+            "project": {"formula": "NaCl", "poscar_src": "MP mp-1"},
+            "parameters": {"functional": "pbesol"},
+        }
+        (root / "plan.yaml").write_text(yaml.dump(plan))
+        # anion-cation antisite present on disk (would be submitted by the
+        # old ungated scan)
+        _write_inputs(root / "defect" / "O_Ga1_0")
+
+        from vasp_sop.core.config import PipelineConfig
+        from vasp_sop.core.job_store import JobStore
+        from vasp_sop.core.orchestrator import wave2_submit
+        from vasp_sop.core.system import System
+
+        config = PipelineConfig.from_plan(
+            yaml.safe_load((root / "plan.yaml").read_text()), root=root
+        )
+        sys = System(root, config)
+        js = JobStore()
+        try:
+            wave2_submit(sys, js, dry_run=False)
+        finally:
+            js.close()
+        defect_calls = [c for c in self.calls if "defect" in str(c)]
+        names = {c.name for c in defect_calls if c.name != "perfect"}
+        assert "O_Ga1_0" not in names
+        assert names == {"Va_O1_-1"}  # chain root still submits

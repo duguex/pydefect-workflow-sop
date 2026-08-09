@@ -227,6 +227,7 @@ def wave2_submit(
     from vasp_sop.vasp.io import input_ready, prepare_inputs
     from vasp_sop.core.job_store import JobStore
     from vasp_sop.defect.builder import build_all as _build_defects
+    from vasp_sop.defect import is_valid_defect_dir
 
     info = _make_info_fn(log_to_logger)
     uc_root = sys.uc_dir
@@ -380,6 +381,10 @@ def wave2_submit(
         for c in sorted(df_root.iterdir()):
             if not c.is_dir() or c.name == "perfect":
                 continue
+            # ADR 0013: anion-cation antisites are excluded from the defect
+            # set — never submitted by wave2 (poll path already untracks).
+            if not is_valid_defect_dir(c):
+                continue
             if not input_ready(c):
                 continue
             q = _defect_charge(c.name)
@@ -397,6 +402,9 @@ def wave2_submit(
 
         for child in sorted(df_root.iterdir()):
             if not child.is_dir() or child.name == "perfect":
+                continue
+            # ADR 0013 exclusion (mirrors the group-scan gate above).
+            if not is_valid_defect_dir(child):
                 continue
             if not input_ready(child):
                 continue
