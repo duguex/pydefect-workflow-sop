@@ -1,5 +1,11 @@
 # Automation boundary: what the machine will do unattended
 
+> **Superseded by [ADR 0008](0008-automatic-retry-policy.md)** — the
+> one-shot auto-rerun rule is replaced by a classified retry state machine
+> (transient failures retry until success, persistent failures bounded at a
+> configurable limit). Retained here: the human-gated mass-submission
+> principle and `batch blockers` as the counting surface.
+
 Asked whether the tool can "automatically handle" the unfinished systems of
 the production testbed, we checked the blocker census and found 32/32
 remaining systems blocked, with the dominant class being 346 terminal
