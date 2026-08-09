@@ -827,7 +827,6 @@ def advance_one_system(
     if p == COMPETING:
         wave2_submit(sys_obj, js, dry_run, log_to_logger=log_to_logger,
                      priority=s.get("priority", 0))
-        sys_obj.save_phase(sys_obj.derive_phase(js))
         return
 
     # ── Wave 3: CHEM_POT_DIAGRAM ─────────────────────────────────────
@@ -851,9 +850,7 @@ def advance_one_system(
             if not log_to_logger:
                 print(f"  ✗ {s['name']:<18} UNITCELL_DEFECT FAILED")
 
-    # ── Persist the post-cycle phase (ADR 0001) ─────────────────────
-    p = sys_obj.derive_phase(js)
-    sys_obj.save_phase(p)
+    # ── Post-cycle phase is re-derived from disk next cycle (ADR 0011) ─
 
 
 class BatchOrchestrator:

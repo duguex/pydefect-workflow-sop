@@ -9,7 +9,7 @@ One material's prepared project tree, run through the pipeline from structure op
 _Avoid_: project (when meaning the runnable unit), calc tree
 
 **Phase**:
-A stage in a system's lifecycle: structure optimization, competing-phase set, chemical potential diagram, unit-cell defect, complete. COMPLETE requires every calculation directory on disk to have converged and the full defect summary to exist — a dir that ran and failed keeps the system in unit-cell defect (ADR 0004).
+A stage in a system's lifecycle: structure optimization, competing-phase set, chemical potential diagram, unit-cell defect, complete. COMPLETE requires every calculation directory on disk to have converged and the full defect summary to exist — a dir that ran and failed keeps the system in unit-cell defect (ADR 0004). Phases are always derived from the filesystem (`derive_phase`); there is no persisted phase memory (ADR 0011 supersedes ADR 0001).
 _Avoid_: state, step
 
 **Wave**:

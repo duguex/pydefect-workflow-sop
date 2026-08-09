@@ -133,40 +133,27 @@ class TestDefectDirs:
 
 # ── state.json ──────────────────────────────────────────────────────────────
 
-class TestStateJson:
-    def test_save_and_read_phase(self, tmp_path: Path):
-        s = _make_system(tmp_path)
-        s.save_phase(COMPLETE)
-        state_file = s.root / "state.json"
-        assert state_file.is_file()
-        data = json.loads(state_file.read_text())
-        assert data["phase"] == COMPLETE
+class TestPhaseIsDiskDerived:
+    """ADR 0011: phase comes from the filesystem; state.json is ignored."""
 
-    def test_phase_reads_state_json_first(self, tmp_path: Path, monkeypatch):
+    def test_phase_ignores_state_json_marker(self, tmp_path: Path):
         s = _make_system(tmp_path)
-        s.save_phase(COMPETING)
-        # Even without any filesystem structure, state.json wins.
-        assert s.phase() == COMPETING
-
-    def test_save_phase_preserves_other_keys(self, tmp_path: Path):
-        s = _make_system(tmp_path)
-        state_file = s.root / "state.json"
-        state_file.write_text(json.dumps({"extra": 42}))
-        s.save_phase(STRUCTURE_OPT)
-        data = json.loads(state_file.read_text())
-        assert data["phase"] == STRUCTURE_OPT
-        assert data["extra"] == 42
-
-    def test_phase_falls_back_when_no_state_json(self, tmp_path: Path, monkeypatch):
-        s = _make_system(tmp_path)
-        # No state.json, no cpd dir → NO_TARGET
+        # A stale marker (legacy ADR 0001 era) must not override disk truth
+        (s.root / "state.json").write_text(json.dumps({"phase": COMPLETE}))
         assert s.phase() == NO_TARGET
 
     def test_phase_ignores_corrupt_state_json(self, tmp_path: Path):
         s = _make_system(tmp_path)
         (s.root / "state.json").write_text("not json {{{")
-        # Falls back to filesystem inference → NO_TARGET (no cpd dir)
         assert s.phase() == NO_TARGET
+
+    def test_phase_without_state_json(self, tmp_path: Path):
+        s = _make_system(tmp_path)
+        assert s.phase() == NO_TARGET
+
+    def test_derive_phase_matches_phase(self, tmp_path: Path):
+        s = _make_system(tmp_path)
+        assert s.phase() == s.derive_phase()
 
 
 # ── Phase inference ─────────────────────────────────────────────────────────

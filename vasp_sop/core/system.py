@@ -34,7 +34,7 @@ UNITCELL_DEFECT = "UNITCELL_DEFECT"
 COMPLETE = "COMPLETE"
 NO_TARGET = "NO_TARGET"
 
-_STATE_FILE = "state.json"
+_STATE_FILE = "state.json"  # legacy ADR 0001 marker; no longer read or written
 
 
 class System:
@@ -136,62 +136,22 @@ class System:
     def phase(self, js: Any = None) -> str:
         """Return the current pipeline phase for this system.
 
-        Resolution order:
-        1. ``{root}/state.json`` ``"phase"`` key (explicit state marker).
-        2. Filesystem inference.
+        Disk-derived on every call (ADR 0011): persisted ``state.json``
+        memory was removed — the orchestrator already inferred from disk
+        everywhere, and the phase-gate audits (empty ``target_vertices``,
+        missing ``standard_energies``) make the inference unambiguous.
 
         *js* is an optional :class:`~vasp_sop.core.job_store.JobStore`;
         when omitted a fresh store is opened for the inference (and closed
         again).  Pass one in to share a connection across many queries.
         """
-        state = self._read_state()
-        if state is not None:
-            phase_val = state.get("phase")
-            if phase_val:
-                return str(phase_val)
         return self._infer_phase(js=js)
 
     def derive_phase(self, js: Any = None) -> str:
-        """Fresh filesystem inference, ignoring persisted memory.
-
-        Used after a phase's work completes to compute the *next* phase (the
-        entry query uses :meth:`phase`, which honours persisted memory).  The
-        caller persists the result via :meth:`save_phase` (ADR 0001).
-        """
+        """Fresh filesystem inference of the pipeline phase (ADR 0011)."""
         return self._infer_phase(js=js)
 
-    def save_phase(self, phase: str) -> None:
-        """Persist *phase* into ``{root}/state.json``.
-
-        Existing keys in ``state.json`` are preserved.  Write failures
-        are logged but do not raise.
-        """
-        state_path = self.root / _STATE_FILE
-        existing: dict[str, Any] = {}
-        if state_path.is_file():
-            try:
-                existing = json.loads(state_path.read_text())
-                if not isinstance(existing, dict):
-                    existing = {}
-            except (OSError, json.JSONDecodeError):
-                existing = {}
-        existing["phase"] = phase
-        try:
-            state_path.write_text(json.dumps(existing, indent=2) + "\n")
-        except OSError as exc:
-            logger.warning("Could not write %s: %s", _STATE_FILE, exc)
-
     # ── Private helpers ────────────────────────────────────────────────
-
-    def _read_state(self) -> dict[str, Any] | None:
-        state_path = self.root / _STATE_FILE
-        if not state_path.is_file():
-            return None
-        try:
-            data = json.loads(state_path.read_text())
-            return data if isinstance(data, dict) else None
-        except (OSError, json.JSONDecodeError):
-            return None
 
     def _infer_phase(self, js: Any = None) -> str:
         """Filesystem-based phase inference.
