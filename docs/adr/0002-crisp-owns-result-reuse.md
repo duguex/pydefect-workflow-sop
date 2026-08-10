@@ -1,5 +1,12 @@
 # vasp-sop is result-cache-blind; crisp owns result reuse
 
+> **Status: SUPERSEDED (2026-08-11)** — crisp retired its automatic
+> result-cache paths (submit restore + daemon auto-write); `crisp cache`
+> remains a manual-only tool. Result reuse is no longer part of the crisp
+> submit/dispatch loop, so the "materializes cached outputs" flow described
+> below no longer exists. vasp-sop recomputes exactly like the "Costs"
+> paragraph describes — which is now the steady state, not a gap.
+
 vasp-sop never reads or writes the VASP result cache. Result reuse — caching
 completed calculations and restoring them later — is a crisp capability
 (`crisp cache put|has|fetch|query|status|rebuild`, wrapping the `vasp-cache`

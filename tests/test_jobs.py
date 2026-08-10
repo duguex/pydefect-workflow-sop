@@ -43,30 +43,13 @@ class TestRunLocal:
 
 
 class TestCrispSubmitCached:
-    """Result-reuse hit: crisp returns {cached: True} with no task_name."""
+    """crisp no longer returns a cached sentinel (auto-cache retired
+    2026-08-11); every successful submit must carry a task_name."""
 
     def _inputs(self, tmp_path: Path) -> Path:
         for f in ("INCAR", "POSCAR", "POTCAR", "KPOINTS"):
             (tmp_path / f).write_text("x\n")
         return tmp_path
-
-    def test_cached_response_returns_sentinel(self, tmp_path: Path, monkeypatch):
-        from types import SimpleNamespace
-        from vasp_sop.core.jobs import _crisp_submit
-
-        work = self._inputs(tmp_path)
-
-        def fake_run(*a, **k):
-            return SimpleNamespace(
-                returncode=0,
-                stdout='{"cached": true, "local_dir": "x"}',
-                stderr="",
-            )
-
-        monkeypatch.setattr(subprocess, "run", fake_run)
-        job = _crisp_submit(work)
-        assert job.task_name == "cached", \
-            "cached response must yield a sentinel handle, not raise"
 
     def test_normal_response_raises_without_task(self, tmp_path: Path, monkeypatch):
         from types import SimpleNamespace
@@ -86,10 +69,30 @@ class TestCrispSubmitCached:
         with _pt.raises(RuntimeError, match="missing task_name"):
             _crisp_submit(work)
 
+    def test_legacy_cached_payload_raises_without_task(self, tmp_path: Path, monkeypatch):
+        """A stale {cached: true} payload (no task_name) must not be
+        silently accepted — the sentinel path is gone."""
+        from types import SimpleNamespace
+        import pytest as _pt
+        from vasp_sop.core.jobs import _crisp_submit
+
+        work = self._inputs(tmp_path)
+
+        def fake_run(*a, **k):
+            return SimpleNamespace(
+                returncode=0,
+                stdout='{"cached": true, "local_dir": "x"}',
+                stderr="",
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with _pt.raises(RuntimeError, match="missing task_name"):
+            _crisp_submit(work)
+
 
 class TestCrispSubmitDefectFlags:
-    """Operator decision 2026-08-10: defect calcs skip crisp cache; big
-    defect supercells (>150 atoms) pin to long-QOS clusters."""
+    """Big defect supercells (>150 atoms) pin to long-QOS clusters.
+    --no-cache is gone (crisp auto-cache retired 2026-08-11)."""
 
     def _submit_cmd(self, tmp_path: Path, monkeypatch, *, leg: str,
                     natoms: int) -> list[str]:
@@ -117,22 +120,22 @@ class TestCrispSubmitDefectFlags:
         _crisp_submit(work)
         return captured["cmd"]
 
-    def test_big_defect_gets_no_cache_and_long_tag(
+    def test_big_defect_gets_long_tag_only(
         self, tmp_path: Path, monkeypatch
     ):
         cmd = self._submit_cmd(
             tmp_path, monkeypatch, leg="defect/Va_O1_0", natoms=288
         )
-        assert "--no-cache" in cmd
+        assert "--no-cache" not in cmd
         assert "--tag" in cmd and cmd[cmd.index("--tag") + 1] == "long"
 
-    def test_small_defect_gets_no_cache_only(
+    def test_small_defect_gets_no_flags(
         self, tmp_path: Path, monkeypatch
     ):
         cmd = self._submit_cmd(
             tmp_path, monkeypatch, leg="defect/Va_O1_0", natoms=88
         )
-        assert "--no-cache" in cmd
+        assert "--no-cache" not in cmd
         assert "--tag" not in cmd
 
     def test_cpd_gets_no_flags(self, tmp_path: Path, monkeypatch):

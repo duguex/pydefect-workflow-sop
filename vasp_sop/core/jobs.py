@@ -269,14 +269,12 @@ def _crisp_submit(work_dir: Path, priority: int = 0) -> CrispVaspJob:
     submit_cmd = ["crisp", "submit"]
     if priority:
         submit_cmd += ["--priority", str(priority)]
-    # Defect calculations: disable crisp result-cache (a cached
-    # *unconverged* result is accepted terminal and never re-runs —
-    # operator decision 2026-08-10), and pin big defect supercells
-    # (>150 atoms) to long-QOS clusters via the "long" cluster tag so
-    # long relaxations are not killed by short-QOS time limits.
+    # Pin big defect supercells (>150 atoms) to long-QOS clusters via the
+    # "long" cluster tag so long relaxations are not killed by short-QOS
+    # time limits. (crisp's result-cache auto paths were retired 2026-08-11
+    # — there is no --no-cache flag anymore.)
     _is_defect = "/defect/" in str(work_dir)
     if _is_defect:
-        submit_cmd += ["--no-cache"]
         try:
             _nats = _poscar_natoms(work_dir)
         except Exception:
@@ -295,16 +293,6 @@ def _crisp_submit(work_dir: Path, priority: int = 0) -> CrispVaspJob:
     payload = json.loads(result.stdout)
     data = payload.get("data") or {}
     task_name = data.get("task_name") or payload.get("task_name")
-    # Result-reuse hit (ADR 0002): crisp owns the cache and says this exact
-    # calc already exists — it will materialize the cached outputs back into
-    # the worktree.  No new job runs; report a sentinel handle so callers
-    # record source="cached" and let the poll finalize the materialized
-    # results instead of raising (which caused warning/retry loops).
-    if payload.get("cached") or data.get("cached"):
-        logger.info(
-            "crisp result-cache hit for %s — will materialize", work_dir.name
-        )
-        return CrispVaspJob(work_dir, "cached")
     if not task_name:
         raise RuntimeError(f"crisp submit missing task_name: {payload}")
     logger.info("crisp task %s submitted for %s", task_name, work_dir.name)
