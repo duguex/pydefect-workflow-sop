@@ -5,14 +5,16 @@
 > **本阶段修复链**（commit a417f59→**662e7d9**）：stale-converged 重判 / sidecar v2→v3（NELM 门只认最后离子步）/ cr 一致性门 / NELM=30 协议 / HTML 凸包+耳切 / **相位门反位过滤（ADR 0013）** / **cpd 相 ionic 自动续算（上限 3）** / **化学势图 stale 自动重建+重 analyze** / **analyze 类型覆盖门（防假 full）** / dei 接受 .yaml。480 passed。
 > **已验证结论**：perfect 参数漂移（SIGMA 0.1→0.02 重算）能量差 3e-8 eV——零影响；主流 defect 单步电子 16-30（LOOP/LOOP+ 计数，勿用 grep "F="——误匹配 NGXF=）；Al13Fe4 的 NELM 警告在早期离子步（后续收敛）→ 自动转 converged，**无需重算**。
 > **待办**（详见 /tmp/handoff-vasp-sop-2026-08-11.md）：
-> 1. **Sr[FeO2]2**（SrAl4O7 唯一卡点）：**用户已决策 EDIFFG=-0.01**（08-11 01:49，commit 前旧作业 d473a125 已 cancel，新作业 96629351 用 -0.01 重算中）。力若仍停在 0.02+（-0.01 判据），3 次 ionic restart 上限耗尽后再议。
-> 2. 两阶段 SOC（ADR 0014 机制已实现，5 个 SOC 体系排到时启用）
-> 3. Y2Ti2O7 Bi 缺陷重建（defect_in 早于 plan dopant Bi）
-> 4. CaAl4O7 perfect/calc_results.json 缺失（无害，analyze 短路不补；将来完整 analyze 自动补）
-> 5. 2025 恢复：11 个 NELM 警告目录重算 + perfect 参数漂移检查（INCAR↔OUTCAR 回显）——**注意 NELM 门 refine 后部分目录可能自动转 converged（先重判再重算）**
-> 6. poll giving-up 语义残留（不影响收敛，纯清理）
-> 7. 填隙：全部 10 体系 plan `interstitials: false`——需要时开 plan + 重建（用户未定）
-> 8. 缓存停用（用户搁置）
+> 1. **Sr[FeO2]2**（SrAl4O7 唯一卡点）：fd313379（EDIFFG=-0.01 + duguex_5 长 QOS）跑中，等结果。
+> 2. **La2Zr2O7 dielectric**：87a8b50f（修复协议 NSW=1/无 SOC/LREAL=False/长 QOS）跑中，预计 ~2h；完成后 La2Zr2O7 unitcell 三任务齐（band/dos 已收敛）。
+> 3. 两阶段 SOC（ADR 0014 机制已实现，5 个 SOC 体系排到时启用）
+> 4. Y2Ti2O7 Bi 缺陷重建（defect_in 早于 plan dopant Bi）
+> 5. CaAl4O7 perfect/calc_results.json 缺失（无害，analyze 短路不补；将来完整 analyze 自动补）
+> 6. 2025 恢复：11 个 NELM 警告目录重算 + perfect 参数漂移检查（INCAR↔OUTCAR 回显）——**注意 NELM 门 refine 后部分目录可能自动转 converged（先重判再重算）**
+> 7. poll giving-up 语义残留（不影响收敛，纯清理）
+> 8. 填隙：全部 10 体系 plan `interstitials: false`——需要时开 plan + 重建（用户未定）
+> 9. 缓存停用（用户搁置）
+> 10. 已知现象：crisp agent.db 历史记录有清理/丢失机制（vasp-sop JobStore 为权威，不影响正确性）
 
 # Next Actions — +U/SOC 批次（2026-08-10，**已执行** 13:30）
 
