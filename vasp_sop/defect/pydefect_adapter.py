@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -194,46 +195,48 @@ def _override_ionic_conv(d: Path, data: dict[str, Any]) -> bool:
     return False
 
 
-def calc_results(dirs: list[Path], cwd: Path) -> list[dict[str, Any]]:
-    """Run ``pydefect_vasp cr`` for each directory and collect result dicts.
-
-    Directories that already contain ``calc_results.json`` are read directly
-    without re-running the command.  Returns one dict per successfully
-    processed directory (order matches *dirs*; failures are skipped with a
-    warning).
-
-    Parameters
-    ----------
-    dirs:
-        Defect calculation directories (absolute or relative to *cwd*).
-    cwd:
-        Working directory for the subprocess (typically the ``defect/`` root).
-    """
-    results: list[dict[str, Any]] = []
-    for d in dirs:
-        cr_file = d / "calc_results.json"
-        if cr_file.is_file():
-            data = _read_json(cr_file)
-            if data is not None:
-                _override_ionic_conv(d, data)
-                results.append(data)
-                continue
-            logger.warning("calc_results: unreadable %s, re-running cr", cr_file)
-        try:
-            run_local(
-                f"pydefect_vasp cr -d {shlex.quote(d.name)}",
-                cwd=cwd,
-            )
-        except Exception as exc:
-            logger.warning("pydefect_vasp cr failed for %s: %s", d.name, exc)
-            continue
+def _cr_one(d: Path, cwd: Path) -> dict[str, Any] | None:
+    """``pydefect_vasp cr`` for one dir; returns the result dict or None."""
+    cr_file = d / "calc_results.json"
+    if cr_file.is_file():
         data = _read_json(cr_file)
         if data is not None:
             _override_ionic_conv(d, data)
-            results.append(data)
-        else:
-            logger.warning("calc_results: no output for %s after cr", d.name)
-    return results
+            return data
+        logger.warning("calc_results: unreadable %s, re-running cr", cr_file)
+    run_local(f"pydefect_vasp cr -d {shlex.quote(d.name)}", cwd=cwd)
+    data = _read_json(cr_file)
+    if data is not None:
+        _override_ionic_conv(d, data)
+        return data
+    logger.warning("calc_results: no output for %s after cr", d.name)
+    return None
+
+
+def calc_results(dirs: list[Path], cwd: Path) -> list[dict[str, Any]]:
+    """Run ``pydefect_vasp cr`` per directory in parallel and collect
+    result dicts (order matches *dirs*; failures skipped with a warning)."""
+    out = _map_parallel(dirs, lambda d: _cr_one(d, cwd), desc="pydefect_vasp cr")
+    return [r for r in out if r is not None]
+
+
+def _efnv_one(d: Path, cwd: Path, pcr_q: str, u_q: str, force: bool) -> dict[str, Any] | None:
+    """``pydefect efnv`` for one dir; returns the correction dict or None."""
+    corr_file = d / "correction.json"
+    if corr_file.is_file() and not force:
+        data = _read_json(corr_file)
+        if data is not None:
+            return data
+        logger.warning("efnv: unreadable %s, re-running", corr_file)
+    run_local(
+        f"pydefect efnv -d {shlex.quote(d.name)} -pcr {pcr_q} -u {u_q}",
+        cwd=cwd,
+    )
+    data = _read_json(corr_file)
+    if data is not None:
+        return data
+    logger.warning("efnv: no correction.json for %s after run", d.name)
+    return None
 
 
 def efnv(
@@ -244,48 +247,16 @@ def efnv(
     *,
     force: bool = False,
 ) -> list[dict[str, Any]]:
-    """Run ``pydefect efnv`` for each directory and collect correction dicts.
-
-    Directories that already contain ``correction.json`` are read directly
-    unless ``force`` is set (the analyze pipeline re-runs efnv on every pass).
-    Returns one dict per successfully corrected directory.
-
-    Parameters
-    ----------
-    dirs:
-        Defect calculation directories that have ``calc_results.json``.
-    cwd:
-        Working directory for the subprocess (typically the ``defect/`` root).
-    perfect_calc_results:
-        Path to the perfect-cell ``calc_results.json``.
-    unitcell_yaml:
-        Path to ``unitcell.yaml``.
-    """
+    """Run ``pydefect efnv`` per directory in parallel; collect correction
+    dicts (order matches *dirs*; failures skipped with a warning)."""
     pcr_q = shlex.quote(str(perfect_calc_results))
     u_q = shlex.quote(str(unitcell_yaml))
-    results: list[dict[str, Any]] = []
-    for d in dirs:
-        corr_file = d / "correction.json"
-        if corr_file.is_file() and not force:
-            data = _read_json(corr_file)
-            if data is not None:
-                results.append(data)
-                continue
-            logger.warning("efnv: unreadable %s, re-running", corr_file)
-        try:
-            run_local(
-                f"pydefect efnv -d {shlex.quote(d.name)} -pcr {pcr_q} -u {u_q}",
-                cwd=cwd,
-            )
-        except Exception as exc:
-            logger.warning("pydefect efnv failed for %s: %s", d.name, exc)
-            continue
-        data = _read_json(corr_file)
-        if data is not None:
-            results.append(data)
-        else:
-            logger.warning("efnv: no correction.json for %s after run", d.name)
-    return results
+    out = _map_parallel(
+        dirs,
+        lambda d: _efnv_one(d, cwd, pcr_q, u_q, force),
+        desc="pydefect efnv",
+    )
+    return [r for r in out if r is not None]
 
 
 def defect_energy_summary(
@@ -381,6 +352,41 @@ def _quote_names(dirs: list[Path]) -> str:
     return " ".join(shlex.quote(d.name) for d in dirs)
 
 
+def _parallel_workers() -> int:
+    """Per-dir pydefect subprocesses each use ~2-3 cores; keep headroom."""
+    n = os.cpu_count() or 4
+    return max(2, min(8, n // 3))
+
+
+def _map_parallel(dirs: list[Path], fn, *, desc: str) -> list:
+    """Run ``fn(d)`` per dir in parallel, preserving dir order.
+
+    Failures are logged and yield ``None`` entries (callers skip them),
+    matching the serial loop's per-dir isolation.
+    """
+    workers = _parallel_workers()
+    if len(dirs) <= 1 or workers <= 1:
+        out: list = []
+        for d in dirs:
+            try:
+                out.append(fn(d))
+            except Exception as exc:
+                logger.warning("%s failed for %s: %s", desc, d.name, exc)
+                out.append(None)
+        return out
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(fn, d): i for i, d in enumerate(dirs)}
+        out = [None] * len(dirs)
+        for fut, i in futures.items():
+            try:
+                out[i] = fut.result()
+            except Exception as exc:
+                logger.warning("%s failed for %s: %s", desc, dirs[i].name, exc)
+        return out
+
+
 def _run_batches(
     command_prefix: str,
     dirs: list[Path],
@@ -393,13 +399,26 @@ def _run_batches(
     """Run ``command_prefix {names}{command_suffix}`` per batch of *dirs*.
 
     Slices *dirs* into batches of *batch_size* and runs one shell command per
-    batch.  Per-dir artifacts remain on disk, so a failed batch resumes on the
-    next run.
+    batch, batches in parallel (worker-capped).  Per-dir artifacts remain on
+    disk, so a failed batch resumes on the next run.
     """
-    for i in range(0, len(dirs), batch_size):
-        batch = dirs[i : i + batch_size]
+    batches = [
+        dirs[i : i + batch_size] for i in range(0, len(dirs), batch_size)
+    ]
+    workers = _parallel_workers()
+    if len(batches) <= 1 or workers <= 1:
+        for batch in batches:
+            cmd = f"{command_prefix} {_quote_names(batch)}{command_suffix}"
+            run_local(cmd, cwd=cwd, timeout=timeout)
+        return
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _one(batch: list[Path]) -> None:
         cmd = f"{command_prefix} {_quote_names(batch)}{command_suffix}"
         run_local(cmd, cwd=cwd, timeout=timeout)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(_one, batches))
 
 
 # ══════════════════════════════════════════════════════════════════════════

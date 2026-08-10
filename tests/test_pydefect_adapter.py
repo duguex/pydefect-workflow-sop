@@ -275,3 +275,47 @@ class TestOverrideIonicConv:
         assert result is False
         written = json.loads((d / "calc_results.json").read_text())
         assert written["ionic_conv"] is False
+
+class TestParallelMap:
+    """_map_parallel: parallel execution, order preservation, isolation."""
+
+    def _dirs(self, tmp_path: Path, names: list[str]) -> list[Path]:
+        out = []
+        for n in names:
+            d = tmp_path / n
+            d.mkdir()
+            out.append(d)
+        return out
+
+    def test_preserves_order(self, tmp_path: Path):
+        import time
+        from vasp_sop.defect import pydefect_adapter as pa
+
+        dirs = self._dirs(tmp_path, ["a", "b", "c", "d"])
+
+        def fn(d):
+            time.sleep(0.01)
+            return d.name
+
+        out = pa._map_parallel(dirs, fn, desc="t")
+        assert out == ["a", "b", "c", "d"], out
+
+    def test_failure_isolated_as_none(self, tmp_path: Path):
+        from vasp_sop.defect import pydefect_adapter as pa
+
+        dirs = self._dirs(tmp_path, ["a", "b", "c"])
+
+        def fn(d):
+            if d.name == "b":
+                raise RuntimeError("boom")
+            return d.name
+
+        out = pa._map_parallel(dirs, fn, desc="t")
+        assert out == ["a", None, "c"], out
+
+    def test_serial_when_single_dir(self, tmp_path: Path):
+        from vasp_sop.defect import pydefect_adapter as pa
+
+        dirs = self._dirs(tmp_path, ["a"])
+        out = pa._map_parallel(dirs, lambda d: d.name, desc="t")
+        assert out == ["a"]
