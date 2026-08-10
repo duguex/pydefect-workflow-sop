@@ -28,6 +28,47 @@ def input_ready(path: Path) -> bool:
     return _vasp_input_ready(path)
 
 
+def _strip_incar_tags(path: Path, *tags: str) -> None:
+    """Remove INCAR lines whose tag matches any of *tags* (case-insensitive)."""
+    incar = path / "INCAR"
+    if not incar.is_file():
+        return
+    wanted = {t.upper() for t in tags}
+    kept = []
+    for line in incar.read_text().splitlines():
+        tag = line.strip().split()[0].rstrip("=").strip().upper() if line.strip() else ""
+        if tag in wanted:
+            continue
+        kept.append(line)
+    incar.write_text("\n".join(kept) + "\n")
+
+
+def _apply_soc_tags(work_dir: Path, config: PipelineConfig, task_type: str) -> None:
+    """Apply INCAR protocol for SOC systems and DFPT tasks.
+
+    Dielectric (DFPT, IBRION=8/LEPSILON) has a fixed protocol regardless
+    of the plan ``soc`` flag:
+    - **NSW=1**: DFPT is a single-step perturbative evaluation — NSW>1
+      re-runs the linear response every ionic step (50x compute waste).
+      vise's template default is 1; the batch CLI path overrides it to 50
+      (regression 2026-08-10, La2Zr2O7) and this heals it back.
+    - **LREAL=.FALSE.**: VASP strongly recommends it for DFPT (real-space
+      projection is insufficiently accurate).
+    - **no LSORBIT/ISYM**: VASP's DFPT does not support spin-orbit
+      coupling — the spinor wavefunction doubles memory (rank-0
+      allocation failures) and the linear-response kernel errors out
+      (LRF_COMMUTATOR internal error).
+    All other SOC-system tasks get LSORBIT/ISYM.
+    """
+    if task_type == "dielectric":
+        patch_incar(work_dir, NSW=1, LREAL=".FALSE.")
+        _strip_incar_tags(work_dir, "LSORBIT", "ISYM")
+        return
+    if not getattr(config, "soc", False) or getattr(config, "stage2_soc", False):
+        return
+    patch_incar(work_dir, LSORBIT=".TRUE.", ISYM=-1)
+
+
 def prepare_inputs(
     work_dir: Path,
     config: PipelineConfig,
@@ -57,8 +98,7 @@ def prepare_inputs(
     # patch_incar is read-modify-write, so existing non-SOC tags are preserved.
     if input_ready(work_dir):
         logger.debug("VASP input already ready in %s", work_dir)
-        if config.soc and not config.stage2_soc:
-            patch_incar(work_dir, LSORBIT=".TRUE.", ISYM=-1)
+        _apply_soc_tags(work_dir, config, task_type)
         return
 
     if charge is not None:
@@ -95,8 +135,7 @@ def prepare_inputs(
     run_local(cmd, cwd=work_dir, timeout=300)
     # vise never sets SOC tags — patch AFTER run_local so freshly
     # generated INCAR inherits LSORBIT/ISYM without clobbering other tags.
-    if config.soc and not config.stage2_soc:
-        patch_incar(work_dir, LSORBIT=".TRUE.", ISYM=-1)
+    _apply_soc_tags(work_dir, config, task_type)
 
 
 def _prepare_inputs_vise_api(

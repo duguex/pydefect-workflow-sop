@@ -1,6 +1,8 @@
 """Tests for vasp_sop.vasp.io — check_converged, check_task_complete."""
 
 from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 
 
@@ -229,3 +231,57 @@ class TestPatchIncarU:
         assert "LDAUU = 5.0 0" in txt
         assert "LDAUL = 3 -1" in txt
         assert "LMAXMIX = 6" in txt
+
+
+class TestDielectricProtocol:
+    """DFPT dielectric INCAR protocol: NSW=1, LREAL=.FALSE., no SOC tags —
+    unconditional (VASP DFPT is single-step; no SOC support)."""
+
+    def _incar_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / "dielectric"
+        d.mkdir()
+        (d / "INCAR").write_text(
+            "NSW = 50\nLREAL = Auto\nLSORBIT = .TRUE.\nISYM = -1\nIBRION = 8\n"
+        )
+        for f in ("POSCAR", "POTCAR", "KPOINTS"):
+            (d / f).write_text("x\n")
+        return d
+
+    def test_dielectric_gets_nsw1_lreal_false_no_soc(self, tmp_path: Path):
+        from vasp_sop.vasp.io import prepare_inputs
+
+        d = self._incar_dir(tmp_path)
+        cfg = SimpleNamespace(soc=True, stage2_soc=False, functional="pbesol",
+                              potcar_overrides=[], encut=None)
+        prepare_inputs(d, cfg, task_type="dielectric")
+        txt = (d / "INCAR").read_text()
+        assert "NSW = 1" in txt
+        assert "LREAL = .FALSE." in txt
+        assert "LSORBIT" not in txt
+        assert "ISYM" not in txt
+
+    def test_dielectric_nsw1_even_without_soc_plan(self, tmp_path: Path):
+        """The NSW=50 regression hit non-SOC systems too — the DFPT caps
+        must not depend on the soc flag."""
+        from vasp_sop.vasp.io import prepare_inputs
+
+        d = self._incar_dir(tmp_path)
+        cfg = SimpleNamespace(soc=False, stage2_soc=False, functional="pbesol",
+                              potcar_overrides=[], encut=None)
+        prepare_inputs(d, cfg, task_type="dielectric")
+        assert "NSW = 1" in (d / "INCAR").read_text()
+
+    def test_band_still_gets_soc_tags(self, tmp_path: Path):
+        from vasp_sop.vasp.io import prepare_inputs
+
+        d = tmp_path / "band"
+        d.mkdir()
+        (d / "INCAR").write_text("NSW = 1\nIBRION = -1\n")
+        for f in ("POSCAR", "POTCAR", "KPOINTS"):
+            (d / f).write_text("x\n")
+        cfg = SimpleNamespace(soc=True, stage2_soc=False, functional="pbesol",
+                              potcar_overrides=[], encut=None)
+        prepare_inputs(d, cfg, task_type="band")
+        txt = (d / "INCAR").read_text()
+        assert "LSORBIT = .TRUE." in txt
+        assert "NSW = 1" in txt  # untouched

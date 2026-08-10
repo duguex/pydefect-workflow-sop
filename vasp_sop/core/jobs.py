@@ -286,6 +286,10 @@ def _crisp_submit(work_dir: Path, priority: int = 0,
             _nats = 0
         if _nats > 150:
             tags.append("long")
+    # Dielectric (DFPT) is a slow single-step evaluation (~2h, vs 20 min
+    # short-QOS limits) — always route it to a long-QOS cluster.
+    if "/unitcell/dielectric" in str(work_dir) and "long" not in tags:
+        tags.append("long")
     for t in tags:
         submit_cmd += ["--tag", t]
     result = subprocess.run(
