@@ -143,11 +143,11 @@ def _prepare_inputs_vise_api(
     vise_task = _VISE_TASK_MAP.get(task_type, task_type)
 
     # Parse the CLI-style "KEY VALUE KEY VALUE" flags into overrides.
-    # NELM=50 is the protocol cap (operator decision 2026-08-10): the
-    # typical defect cell converges electronically in 16-30 steps, so
-    # vise's 100 just burns compute on genuinely slow SCF (and the ADR
-    # 0016 gate flags NELM exhaustion as unconverged anyway).
-    overrides: dict[str, str] = {"NSW": "100", "NELM": "50"}
+    # NELM=30 / EDIFF=1e-4 is the defect protocol cap (operator decision
+    # 2026-08-11): typical defect cells converge electronically in 16-30
+    # steps, so vise's 100 just burns compute on genuinely slow SCF (and
+    # the ADR 0016 gate flags NELM exhaustion as unconverged anyway).
+    overrides: dict[str, str] = {"NSW": "100", "NELM": "30", "EDIFF": "1e-4"}
     tokens = extra_uis.split()
     for i in range(0, len(tokens) - 1, 2):
         overrides[tokens[i]] = tokens[i + 1]
@@ -166,8 +166,9 @@ def _prepare_inputs_vise_api(
     vif = VaspInputFiles(options, overridden_incar_settings=overrides)
     vif.create_input_files(work_dir)
     # Belt and braces: overrides can drift with vise releases.
-    patch_incar(work_dir, NSW=100, NELM=50,
-                **{k: v for k, v in overrides.items() if k not in ("NSW", "NELM")})
+    patch_incar(work_dir, NSW=100, NELM=30, EDIFF="1e-4",
+                **{k: v for k, v in overrides.items()
+                   if k not in ("NSW", "NELM", "EDIFF")})
     if config.soc and not config.stage2_soc:
         patch_incar(work_dir, LSORBIT=".TRUE.", ISYM=-1)
 
