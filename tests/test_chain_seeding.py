@@ -202,12 +202,11 @@ class TestWave2ChainUnlock:
         assert "ISTART = 0" in (df / "Va_O1_0" / "INCAR").read_text()
         assert "ISTART = 0" in (df / "Va_O1_-2" / "INCAR").read_text()
 
-    def test_terminal_failed_sibling_blocks_chain(
+    def test_failed_root_restarts_from_contcar(
         self, tmp_path: Path, monkeypatch
     ):
-        """A terminal-failed sibling does NOT unlock the chain: non-root
-        charges wait for a converged sibling (operator repairs the failed
-        dir via `batch retry` instead)."""
+        """A failed root (even after auto_retry) is restarted from its own
+        CONTCAR — never abandoned to lock the chain (ADR 0010 revision)."""
         root = _make_unitcell_system(tmp_path / "p")
         plan = {
             "project": {"formula": "NaCl", "poscar_src": "MP mp-1"},
@@ -216,25 +215,20 @@ class TestWave2ChainUnlock:
         (root / "plan.yaml").write_text(yaml.dump(plan))
         from vasp_sop.core.job_store import JobStore
 
+        d = root / "defect" / "Va_O1_-1"
+        (d / "CONTCAR").write_text("partial geometry\n")
         js = JobStore()
         try:
-            js.record(str((root / "defect" / "Va_O1_-1").resolve()), "failed")
-            js.record(
-                str((root / "defect" / "Va_O1_-1").resolve()),
-                "failed",
-                source="auto_retry",
-            )
+            js.record(str(d.resolve()), "failed")
+            js.record(str(d.resolve()), "failed", source="auto_retry")
         finally:
             js.close()
         self._run_wave2(root, monkeypatch, lambda p: False)
         defect_calls = [c for c in self.calls if "defect" in str(c)]
         names = {c.name for c in defect_calls if c.name != "perfect"}
-        # root is terminal-failed: not resubmitted, chain stays locked
-        assert names == set()
-        # pristine POSCAR untouched
-        assert (root / "defect" / "Va_O1_0" / "POSCAR").read_text().startswith(
-            "seed\n"
-        )
+        # root restarts from its own CONTCAR, chain stays open
+        assert names == {"Va_O1_-1"}, names
+        assert (d / "POSCAR").read_text() == "partial geometry\n"
 
     def test_ran_before_sibling_seeded_when_sibling_converged(
         self, tmp_path: Path, monkeypatch
@@ -311,6 +305,42 @@ class TestWave2ChainUnlock:
         # median failed once (auto_retry armed by --retry-failed) -> root is
         # retried, but the chain stays locked for its neighbors
         assert names == {"Va_O1_-1"}
+
+    def test_retry_after_history_restarts_own_contcar(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """A dir that already ran (js history) never re-seeds from a
+        sibling — it restarts from its own partial CONTCAR (ADR 0010 rev:
+        seeding applies only to the first submission)."""
+        root = _make_unitcell_system(tmp_path / "p")
+        plan = {
+            "project": {"formula": "NaCl", "poscar_src": "MP mp-1"},
+            "parameters": {"functional": "pbesol"},
+        }
+        (root / "plan.yaml").write_text(yaml.dump(plan))
+        df = root / "defect"
+        (df / "Va_O1_0" / "CONTCAR").write_text("own partial geometry\n")
+        (df / "Va_O1_0" / "INCAR").write_text("SYSTEM = test\nISTART = 0\n")
+        # root converged with a real CONTCAR (a sibling exists)
+        (df / "Va_O1_-1" / "CONTCAR").write_text("converged geometry\n")
+        (df / "Va_O1_-1" / "vasprun.xml").write_text("<vasprun/>\n")
+        from vasp_sop.core.job_store import JobStore
+
+        js = JobStore()
+        try:
+            js.record(str((df / "Va_O1_0").resolve()), "failed")
+        finally:
+            js.close()
+        self._run_wave2(root, monkeypatch, lambda p: "Va_O1_-1" in p)
+        defect_calls = [c for c in self.calls if "defect" in str(c)]
+        names = {c.name for c in defect_calls if c.name != "perfect"}
+        # -2 (no history) seeds from the sibling; 0 (has history) restarts
+        assert names == {"Va_O1_-2", "Va_O1_0"}, names
+        # restarted from its OWN CONTCAR, not the converged sibling's
+        assert (df / "Va_O1_0" / "POSCAR").read_text() == "own partial geometry\n"
+        assert "ISTART = 1" in (df / "Va_O1_0" / "INCAR").read_text()
+        # -2 was seeded from the sibling (first submission)
+        assert (df / "Va_O1_-2" / "POSCAR").read_text() == "converged geometry\n"
 
 
 class TestPollExcludesAntisite:

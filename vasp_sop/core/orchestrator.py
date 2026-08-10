@@ -509,53 +509,49 @@ def wave2_submit(
                 continue
 
             # ── Charge-state chain (ADR 0010) ─────────────────────────
-            # A non-root charge submits only when a converged sibling can
-            # seed its geometry.  Without one it waits — a terminal-failed
-            # sibling does NOT unlock the chain (operator intervention via
-            # `batch retry` repairs the failed dir instead), and its own
-            # stale geometry is never a substitute.
+            # Seeding applies ONLY to the first submission of a non-root
+            # charge: a dir with submission history never re-seeds from a
+            # sibling (its own partial CONTCAR is a better continuation —
+            # see the restart branch below).  A dir with no history waits
+            # for a converged sibling to seed its geometry.
             q = _defect_charge(child.name)
             g = groups.get(_defect_group_key(child.name)) if q is not None else None
             if g is not None and q not in g["roots"]:
-                conv_siblings = [
-                    c for c in g["dirs"]
-                    if c is not child and verdicts.get(str(c.resolve()), False)
-                ]
-                if not conv_siblings:
-                    logger.debug(
-                        "%s: waiting for chain sibling (ADR 0010)", child.name
+                if not js.history(str(child.resolve())):
+                    conv_siblings = [
+                        c for c in g["dirs"]
+                        if c is not child and verdicts.get(str(c.resolve()), False)
+                    ]
+                    if not conv_siblings:
+                        logger.debug(
+                            "%s: waiting for chain sibling (ADR 0010)", child.name
+                        )
+                        continue
+                    src = min(
+                        conv_siblings,
+                        key=lambda c: abs((_defect_charge(c.name) or 0) - q),
+                    )
+                    if not seed_geometry_from_contcar(child, src):
+                        # converged sibling without a usable CONTCAR — keep
+                        # waiting rather than run from the pristine structure
+                        continue
+                    logger.info(
+                        "%s: seeded geometry from %s (ADR 0010)",
+                        child.name, src.name,
+                    )
+                    _submit_or_skip(
+                        child, f"df-{child.name}", sys.name, dry_run, info, js=js,
+                        source=f"seeded_from_{src.name}",
+                        priority=priority,
                     )
                     continue
-                src = min(
-                    conv_siblings,
-                    key=lambda c: abs((_defect_charge(c.name) or 0) - q),
-                )
-                if not seed_geometry_from_contcar(child, src):
-                    # converged sibling without a usable CONTCAR — keep
-                    # waiting rather than run from the pristine structure
-                    continue
-                logger.info(
-                    "%s: seeded geometry from %s (ADR 0010)",
-                    child.name, src.name,
-                )
-                _submit_or_skip(
-                    child, f"df-{child.name}", sys.name, dry_run, info, js=js,
-                    source=f"seeded_from_{src.name}",
-                    priority=priority,
-                )
-                continue
 
-            if latest in ("failed", "unconverged"):
-                # One-shot auto-rerun (ADR 0007): terminal defect dirs get
-                # exactly one machine resubmit, marked auto_retry; a second
-                # failure is terminal forever. Armed only by an explicit
-                # `batch run --retry-failed`.
-                if not retry_failed:
-                    continue
-                if any(r.get("source") == "auto_retry"
-                       for r in js.history(str(child.resolve()))):
-                    continue
-                if latest == "unconverged":
+            if latest in ("failed", "unconverged", "pending"):
+                # ADR 0010 revision: any dir that already ran once
+                # continues from its own partial CONTCAR instead of
+                # re-seeding from a sibling (or starting over).  Auto
+                # restarts every cycle until convergence.
+                if (child / "CONTCAR").is_file():
                     from vasp_sop.vasp.io import restart_from_contcar
                     try:
                         restart_from_contcar(child)
@@ -563,7 +559,7 @@ def wave2_submit(
                         pass
                 _submit_or_skip(
                     child, f"df-{child.name}", sys.name, dry_run, info,
-                    js=js, source="auto_retry",
+                    js=js, source="restart",
                     priority=priority,
                 )
                 continue

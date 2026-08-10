@@ -2403,9 +2403,10 @@ class TestAutoRerunFailed:
         (defect / "CONTCAR").write_text("c\n")
         return str(defect.resolve())
 
-    def test_armed_flag_resubmits_failed_once(
+    def test_failed_restarts_from_contcar(
             self, tmp_path: Path, monkeypatch):
-        """--retry-failed: failed dir resubmitted; marker makes 2nd failure terminal."""
+        """ADR 0010 rev: a failed dir restarts from its own CONTCAR —
+        no flag needed, no one-shot terminal limit."""
         from vasp_sop.core.job_store import JobStore
         from vasp_sop.core.paths import override_cache_root
         from vasp_sop.core.orchestrator import advance_one_system
@@ -2413,6 +2414,7 @@ class TestAutoRerunFailed:
         override_cache_root(tmp_path / ".vasp_sop")
         root = self._ucdf(tmp_path)
         defect = self._defect_crash(root / "defect" / "Va_Na_0")
+        (Path(defect) / "CONTCAR").write_text("partial geometry\n")
 
         js = JobStore()
         js.record(defect, "failed", source="test", reason="vasp_crash")
@@ -2425,25 +2427,20 @@ class TestAutoRerunFailed:
                        type("J", (), {"task_name": "t"})()),
         )
         s = _make_system_dict(root)
-        advance_one_system(s, dry_run=False, retry_failed=True)
-        assert calls.count(defect) == 1, "failed defect should be auto-retried once"
+        advance_one_system(s, dry_run=False)
+        assert calls.count(defect) == 1, "failed dir must restart automatically"
+        assert (Path(defect) / "POSCAR").read_text() == "partial geometry\n", \
+            "restart must continue from its own CONTCAR"
 
-        js = JobStore()
-        try:
-            hist = js.history(defect)
-            assert any(r["source"] == "auto_retry" for r in hist), \
-                "retry must be marked auto_retry"
-        finally:
-            js.close()
-
-        # retry runs again and fails → terminal forever
+        # retry runs again and fails → restarts again (no terminal limit)
         js = JobStore()
         js.record(defect, "failed", source="test", reason="vasp_crash")
         js.close()
-        advance_one_system(s, dry_run=False, retry_failed=True)
-        assert calls.count(defect) == 1, "second failure must be terminal"
+        advance_one_system(s, dry_run=False)
+        assert calls.count(defect) == 2, "restart repeats until convergence"
 
-    def test_no_flag_keeps_failed_terminal(self, tmp_path: Path, monkeypatch):
+    def test_failed_restarts_without_flag(self, tmp_path: Path, monkeypatch):
+        """No --retry-failed needed: failed dirs always restart."""
         from vasp_sop.core.job_store import JobStore
         from vasp_sop.core.paths import override_cache_root
         from vasp_sop.core.orchestrator import advance_one_system
@@ -2463,7 +2460,8 @@ class TestAutoRerunFailed:
         )
         advance_one_system(_make_system_dict(root), dry_run=False,
                            retry_failed=False)
-        assert calls.count(defect) == 0, "un-armed run must not retry failed dirs"
+        assert calls.count(defect) == 1, \
+            "failed dirs restart even without --retry-failed (ADR 0010 rev)"
 
 
 class TestUnitcellBuildFailureSelfHeal:
