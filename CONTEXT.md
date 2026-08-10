@@ -119,3 +119,6 @@ _Avoid_: 间隙位 vs 反位混用, reading `O_Ga1` as an O interstitial
 **Anion-cation antisite**:
 A single substitution `X_Yn` where exactly one side is an anion-role element (O/S/Se/Te/F/Cl/Br/I/N/P) — an anion on a cation site or a cation on an anion site. Excluded from the defect set at the directory validity gate (ADR 0013): never submitted or analyzed, but left on disk. Metalloids (Sb, Ge) count as cations in these oxide hosts. Complex defects and metal↔metal substitutions are unaffected.
 _Avoid_: 阴-阳错位, 反位全筛
+**Cluster tag**:
+A label on a crisp cluster (`clusters.json` `tags`) that gates which clusters a job may dispatch to (`--tag long` = only clusters carrying `long`). Today cluster-level only: `duguex_113/101` = `short`, `ckduan_167/duguex_5` = `long`. Deliberately *not* moved to partition level (crisp_light#137 kept open, decision 2026-08-10); `duguex_101`'s 1917 idle nodes (CPU-* partitions) stay unconfigured by decision — the `test` partition remains the only submittable queue on 113/101, so submit→start queueing of hours is an accepted constraint.
+_Avoid_: calling the `test` partition "the short queue" as if it were a time limit — `qos_test` has not killed any job (no TIME-LIMIT observed); queueing comes from capacity, not from the tag.
