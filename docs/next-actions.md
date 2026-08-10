@@ -1,3 +1,19 @@
+# Next Actions — 2026-08-11 阶段收尾
+
+> **CaAl4O7 全流程 COMPLETE**（08-10 22:34）：72/72 defect 收敛 → 22 缺陷形成能 + transition_levels + 互动 HTML（修复后补生成）。analyze full。
+> **SrAl4O7 推进中**（08-10 22:38 解除 exclude）：196 defect，154 已收敛（旧参数结果保留），112/185 INCAR 已更新 NELM=30/EDIFF=1e-4；cpd Fe 相已收敛。
+> **本阶段修复链**（commit a417f59→5fceedc）：stale-converged 重判 / sidecar schema v2 / cr 一致性门 / NELM=30+EDIFF=1e-4 协议 / 互动 HTML 凸包+耳切（N≥3）/ HTML 失败降级 partial。459 passed。
+> **已验证结论**：perfect 参数漂移（SIGMA 0.1→0.02 重算）能量差 3e-8 eV——零影响；主流 defect 单步电子 16-30（LOOP/LOOP+ 计数，勿用 grep "F="——误匹配 NGXF=）。
+> **待办**（详见 /tmp/handoff-vasp-sop-2026-08-11.md）：
+> 1. 监控 SrAl4O7 NELM=30 收敛行为（耗尽循环目录按 Va_Ca1_0 模式诊断）
+> 2. 两阶段 SOC（ADR 0014 机制已实现，5 个 SOC 体系排到时启用）
+> 3. Y2Ti2O7 Bi 缺陷重建（defect_in 早于 plan dopant Bi）
+> 4. CaAl4O7 perfect/calc_results.json 缺失（无害，analyze 短路不补）
+> 5. 2025 恢复：11 个 NELM 警告目录重算 + perfect 参数漂移检查（INCAR↔OUTCAR 回显）
+> 6. poll giving-up 语义残留（不影响收敛，纯清理）
+> 7. 填隙：全部 10 体系 plan `interstitials: false`——需要时开 plan + 重建（用户未定）
+> 8. 缓存停用（用户搁置）
+
 # Next Actions — +U/SOC 批次（2026-08-10，**已执行** 13:30）
 
 > **批次已完成**（2026-08-10 13:30）：INCAR 重生成 1559+17+80 目录（+U Fe=3/Zn=5、SOC LSORBIT）、续算重置 471 已收敛（清输出+CONTCAR→POSCAR+retry）、failed 重提 733、verify_nelect 修复（ADR 0013 门跳过被筛目录，commit 已落）。
