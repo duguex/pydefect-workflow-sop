@@ -85,3 +85,59 @@ class TestCrispSubmitCached:
         monkeypatch.setattr(subprocess, "run", fake_run)
         with _pt.raises(RuntimeError, match="missing task_name"):
             _crisp_submit(work)
+
+
+class TestCrispSubmitDefectFlags:
+    """Operator decision 2026-08-10: defect calcs skip crisp cache; big
+    defect supercells (>150 atoms) pin to long-QOS clusters."""
+
+    def _submit_cmd(self, tmp_path: Path, monkeypatch, *, leg: str,
+                    natoms: int) -> list[str]:
+        from types import SimpleNamespace
+        from vasp_sop.core.jobs import _crisp_submit, _poscar_natoms
+
+        work = tmp_path / leg
+        work.mkdir(parents=True, exist_ok=True)
+        for f in ("INCAR", "POSCAR", "POTCAR", "KPOINTS"):
+            (work / f).write_text("x\n")
+        monkeypatch.setattr(
+            "vasp_sop.core.jobs._poscar_natoms", lambda p: natoms
+        )
+        captured: dict = {}
+
+        def fake_run(cmd, **k):
+            captured["cmd"] = cmd
+            return SimpleNamespace(
+                returncode=0,
+                stdout='{"data": {"task_name": "t1"}}',
+                stderr="",
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        _crisp_submit(work)
+        return captured["cmd"]
+
+    def test_big_defect_gets_no_cache_and_long_tag(
+        self, tmp_path: Path, monkeypatch
+    ):
+        cmd = self._submit_cmd(
+            tmp_path, monkeypatch, leg="defect/Va_O1_0", natoms=288
+        )
+        assert "--no-cache" in cmd
+        assert "--tag" in cmd and cmd[cmd.index("--tag") + 1] == "long"
+
+    def test_small_defect_gets_no_cache_only(
+        self, tmp_path: Path, monkeypatch
+    ):
+        cmd = self._submit_cmd(
+            tmp_path, monkeypatch, leg="defect/Va_O1_0", natoms=88
+        )
+        assert "--no-cache" in cmd
+        assert "--tag" not in cmd
+
+    def test_cpd_gets_no_flags(self, tmp_path: Path, monkeypatch):
+        cmd = self._submit_cmd(
+            tmp_path, monkeypatch, leg="cpd/phase_mp-1", natoms=288
+        )
+        assert "--no-cache" not in cmd
+        assert "--tag" not in cmd

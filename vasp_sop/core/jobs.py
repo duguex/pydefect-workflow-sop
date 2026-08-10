@@ -43,6 +43,19 @@ def lattice_too_large(src_dir: Path) -> bool:
     return False
 
 
+def _poscar_natoms(src_dir: Path) -> int:
+    """Atom count from a POSCAR/CONTCAR (0 if unreadable)."""
+    try:
+        from pymatgen.core.structure import Structure
+
+        for cand in (Path(src_dir) / "POSCAR", Path(src_dir) / "CONTCAR"):
+            if cand.is_file():
+                return len(Structure.from_file(str(cand)))
+    except Exception:
+        pass
+    return 0
+
+
 def crisp_active_dirs(*, skip: bool = False) -> set[str]:
     """Return work dirs of crisp jobs currently in a live status.
 
@@ -256,6 +269,20 @@ def _crisp_submit(work_dir: Path, priority: int = 0) -> CrispVaspJob:
     submit_cmd = ["crisp", "submit"]
     if priority:
         submit_cmd += ["--priority", str(priority)]
+    # Defect calculations: disable crisp result-cache (a cached
+    # *unconverged* result is accepted terminal and never re-runs —
+    # operator decision 2026-08-10), and pin big defect supercells
+    # (>150 atoms) to long-QOS clusters via the "long" cluster tag so
+    # long relaxations are not killed by short-QOS time limits.
+    _is_defect = "/defect/" in str(work_dir)
+    if _is_defect:
+        submit_cmd += ["--no-cache"]
+        try:
+            _nats = _poscar_natoms(work_dir)
+        except Exception:
+            _nats = 0
+        if _nats > 150:
+            submit_cmd += ["--tag", "long"]
     result = subprocess.run(
         submit_cmd,
         cwd=str(work_dir),
