@@ -194,3 +194,37 @@ class TestVerdictSidecar:
 
         # Reload must also keep the band verdict per task type.
         assert conv.convergence_verdict(d, "band") == v_band
+
+    def test_sidecar_schema_bump_invalidates_stale_verdicts(self, tmp_path):
+        """Pre-gate sidecars (schema 1) must not replay after verdict logic
+        changes — a stale 'converged' memo would skip the ADR 0016 NELM
+        gate forever (same OUTCAR mtime)."""
+        from vasp_sop.core.paths import override_cache_root
+        import vasp_sop.vasp.convergence as conv
+
+        override_cache_root(tmp_path / ".vasp_sop")
+        conv._verdict_cache.clear()
+        conv._verdict_loaded = False
+        conv._verdict_dirty.clear()
+
+        d = tmp_path / "calc"
+        d.mkdir()
+        # NELM-exhausted OUTCAR: real verdict is electronic_not_conv, but
+        # the stale schema-1 sidecar says force_gate converged.
+        (d / "OUTCAR").write_text(
+            "NSW = 50\nIBRION = 2\nEDIFFG = -0.03\n"
+            "TOTAL-FORCE (eV/Angst)\n ---\n"
+            " 0.001 0.001 0.001 0.001 0.001 0.001\n"
+            "|     spurious results, we suggest increasing NELM, if you were "
+            "close to      |\n"
+            " General timing and accounting informations for this job:\n")
+        (d / "INCAR").write_text("NSW = 50\nIBRION = 2\nEDIFFG = -0.03\n")
+        # Poison: a stale schema-1 sidecar with a converged relaxation verdict.
+        sp = conv._sidecar_path()
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text('{"%s": {"structure_opt": {"mtime": %d, "verdict": {"converged": true, "reason": "force_gate"}}}}' % (d / "OUTCAR", (d / "OUTCAR").stat().st_mtime))
+
+        conv._verdict_cache.clear()
+        conv._verdict_loaded = False
+        v = conv.convergence_verdict(d)
+        assert not v.converged, "schema-1 stale memo must be discarded"

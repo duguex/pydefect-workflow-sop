@@ -96,6 +96,10 @@ _verdict_cache: dict[Path, dict[str, tuple[float, "ConvergenceVerdict"]]] = {}
 _verdict_dirty: set[tuple[Path, str]] = set()
 _verdict_loaded = False
 _VERDICT_FLUSH_EVERY = 250
+# Bump whenever verdict *logic* changes (not just per-file data): stale
+# sidecars produced by older code must not be replayed.  v2 = ADR 0016
+# electronic (NELM) gate — pre-gate verdicts were written without it.
+_VERDICT_SCHEMA = 2
 
 
 def _sidecar_path() -> Path:
@@ -114,9 +118,11 @@ def _load_sidecar() -> None:
         raw = _json.loads(_sidecar_path().read_text())
     except (OSError, _json.JSONDecodeError, ValueError):
         return
-    if not isinstance(raw, dict):
+    if not isinstance(raw, dict) or raw.get("schema") != _VERDICT_SCHEMA:
         return
     for path_str, by_task in raw.items():
+        if path_str == "schema":
+            continue
         if not isinstance(by_task, dict):
             continue
         entries: dict[str, tuple[float, ConvergenceVerdict]] = {}
@@ -159,6 +165,7 @@ def _flush_sidecar() -> None:
                     },
                 }
             payload[str(outcar)] = entries
+        payload["schema"] = _VERDICT_SCHEMA
         target = _sidecar_path()
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(".json.tmp")
