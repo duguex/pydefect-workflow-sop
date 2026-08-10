@@ -346,6 +346,51 @@ def patch_incar(path: Path, **kwargs: str | int | float) -> None:
 
 
 
+# ── DFT+U patch (ADR 0012) ──────────────────────────────────────────────
+# vise's CLI path applies set_hubbard_u only to defect tasks; cpd and
+# structure_opt templates come out without LDAU tags.  We patch those
+# INCARs directly.  U values follow vise's u_parameter_set.yaml
+# (vise/input_set/datasets/u_parameter_set.yaml).  Ti stays out on purpose:
+# the defect pipeline generates Ti without U (3d Mn-Ni subset), so patching
+# cpd Ti would create an inconsistency.
+_U_TABLE: dict[str, tuple[float, int]] = {
+    # element -> (U [eV], L quantum number)
+    "Mn": (3.0, 2), "Fe": (3.0, 2), "Co": (3.0, 2), "Ni": (3.0, 2),
+    "Cu": (5.0, 2), "Zn": (5.0, 2),
+    "Ce": (5.0, 3), "Pr": (5.0, 3), "Nd": (5.0, 3), "Sm": (5.0, 3),
+    "Eu": (5.0, 3), "Gd": (5.0, 3), "Tb": (5.0, 3), "Dy": (5.0, 3),
+    "Ho": (5.0, 3), "Er": (5.0, 3), "Tm": (5.0, 3), "Yb": (5.0, 3),
+    "Lu": (5.0, 3),
+}
+
+
+def patch_incar_u(work_dir: Path) -> None:
+    """Add DFT+U tags to an INCAR that lacks them (vise CLI gap for
+    non-defect tasks, e.g. cpd structure_opt templates).
+
+    No-op when LDAU is already present, the INCAR is missing, or no
+    species maps to a U.  A patched INCAR also forces ISPIN=2, matching
+    the vise defect template.
+    """
+    incar = work_dir / "INCAR"
+    if not incar.is_file():
+        return
+    if "LDAU" in incar.read_text(errors="ignore"):
+        return
+    species = _poscar_species(work_dir / "POSCAR") or []
+    if not species:
+        return
+    uu = [str(_U_TABLE[s][0]) if s in _U_TABLE else "0" for s in species]
+    ul = [str(_U_TABLE[s][1]) if s in _U_TABLE else "-1" for s in species]
+    if all(u == "0" for u in uu):
+        return
+    lmaxmix = max(_U_TABLE[s][1] for s in species if s in _U_TABLE)
+    lmaxmix = 6 if lmaxmix == 3 else 4
+    patch_incar(work_dir, LDAU=True, LDAUTYPE=2, LDAUPRINT=1,
+                LMAXMIX=lmaxmix, LDAUU=" ".join(uu), LDAUL=" ".join(ul),
+                ISPIN=2)
+
+
 # ── POTCAR restore (ADR 0007: input restore) ─────────────────────────────
 
 _DEFAULT_PSP_DIR = "/mnt/shared/VASP_POT/POT_GGA_PAW_PBE"

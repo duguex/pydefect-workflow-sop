@@ -152,3 +152,52 @@ class TestRestorePotcar:
         assert (blocked / "POTCAR").is_file()
         assert not (done / "POTCAR").is_file(), \
             "done-on-disk dir must not get a POTCAR restored"
+
+
+class TestPatchIncarU:
+    """patch_incar_u: DFT+U for INCARs from the vise CLI gap (ADR 0012)."""
+
+    def _dir(self, tmp_path: Path, species: str) -> Path:
+        d = tmp_path / "calc"
+        d.mkdir()
+        (d / "INCAR").write_text("NSW = 50\n")
+        (d / "POSCAR").write_text(
+            "title\n1.0\n"
+            "10.0 0.0 0.0\n0.0 10.0 0.0\n0.0 0.0 10.0\n"
+            f"{species}\n1 1\nDirect\n0 0 0\n0.5 0.5 0.5\n")
+        return d
+
+    def test_adds_ldau_for_fe(self, tmp_path: Path):
+        from vasp_sop.vasp.io import patch_incar_u
+        d = self._dir(tmp_path, "Fe O")
+        patch_incar_u(d)
+        txt = (d / "INCAR").read_text()
+        assert "LDAU = True" in txt
+        assert "LDAUU = 3.0 0" in txt
+        assert "LDAUL = 2 -1" in txt
+        assert "LMAXMIX = 4" in txt
+        assert "ISPIN = 2" in txt
+        assert "NSW = 50" in txt, "existing tags must survive"
+
+    def test_noop_without_u_element(self, tmp_path: Path):
+        from vasp_sop.vasp.io import patch_incar_u
+        d = self._dir(tmp_path, "Ca O")
+        patch_incar_u(d)
+        assert "LDAU" not in (d / "INCAR").read_text()
+
+    def test_noop_when_ldau_present(self, tmp_path: Path):
+        from vasp_sop.vasp.io import patch_incar_u
+        d = self._dir(tmp_path, "Fe O")
+        (d / "INCAR").write_text("LDAU = True\nLDAUU = 5 0\n")
+        patch_incar_u(d)
+        assert "LDAUU = 5 0" in (d / "INCAR").read_text(), \
+            "existing U must not be overwritten"
+
+    def test_f_element_lmaxmix6(self, tmp_path: Path):
+        from vasp_sop.vasp.io import patch_incar_u
+        d = self._dir(tmp_path, "Gd O")
+        patch_incar_u(d)
+        txt = (d / "INCAR").read_text()
+        assert "LDAUU = 5.0 0" in txt
+        assert "LDAUL = 3 -1" in txt
+        assert "LMAXMIX = 6" in txt

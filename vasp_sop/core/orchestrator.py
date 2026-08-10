@@ -297,10 +297,24 @@ def wave2_submit(
     p = sys.derive_phase(js)
     if p == "COMPETING":
         for cd in sys.competing_dirs(js):
-            if js.latest(str(cd.resolve())) == "submitted":
+            cp = str(cd.resolve())
+            latest = js.latest(cp)
+            if latest == "submitted":
                 continue
-            _submit_or_skip(cd, f"phase:{cd.name}", sys.name, dry_run, info, js=js,
-                            priority=priority)
+            if latest in ("failed", "unconverged"):
+                # One-shot auto-rerun (ADR 0007, same policy as defect
+                # dirs): a second failure is terminal forever, armed only
+                # by an explicit `batch run --retry-failed`.
+                if not retry_failed:
+                    continue
+                if any(r.get("source") == "auto_retry"
+                       for r in js.history(cp)):
+                    continue
+                _submit_or_skip(cd, f"phase:{cd.name}", sys.name, dry_run, info,
+                                js=js, source="auto_retry", priority=priority)
+                continue
+            _submit_or_skip(cd, f"phase:{cd.name}", sys.name, dry_run, info,
+                            js=js, priority=priority)
         return
 
     # ── UNITCELL_DEFECT: submit UC tasks + defect dirs ───────────────

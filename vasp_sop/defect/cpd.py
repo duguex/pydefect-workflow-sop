@@ -18,7 +18,7 @@ import yaml
 from pymatgen.core import Composition
 
 from vasp_sop.materials import list_phases
-from vasp_sop.vasp.io import check_complete, prepare_inputs
+from vasp_sop.vasp.io import check_complete, patch_incar_u, prepare_inputs
 from vasp_sop.defect import pydefect_adapter as _pdad
 from vasp_sop.core.jobs import VaspJob, submit_vasp
 
@@ -203,6 +203,7 @@ def _submit_cpd_batch(
     for d in dirnames:
         work_dir = cpd_root / d
         prepare_inputs(work_dir, config)
+        patch_incar_u(work_dir)  # vise CLI skips set_hubbard_u for cpd tasks
         outcar = work_dir / "OUTCAR"
         if outcar.is_file():
             logger.info("Skipping %s: OUTCAR exists", d)
