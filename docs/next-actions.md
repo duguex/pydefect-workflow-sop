@@ -2,7 +2,8 @@
 
 > **批次已完成**（2026-08-10 13:30）：INCAR 重生成 1559+17+80 目录（+U Fe=3/Zn=5、SOC LSORBIT）、续算重置 471 已收敛（清输出+CONTCAR→POSCAR+retry）、failed 重提 733、verify_nelect 修复（ADR 0013 门跳过被筛目录，commit 已落）。
 > **BaAl2B2O7 Fe 缺陷修复**：fingerprint 触发重建（dopant Fe 生效——Fe_Al1/Fe_Ba1 等保留类已生成带 U；Fe_O* 35 个被 ADR 0013 门排除）。
-> **剩余**：观察 +U/SOC 重算收敛（Fe 磁矩 ~4-5μB 抽查）、形成能对比、链播种恢复（根收敛后自动）。
+> **晚间补充（16:30）**：**cpd 无 U 发现并修复**——vise CLI 的 set_hubbard_u 只对 defect task 生效，cpd（structure_opt 模板）INCAR 无 LDAU → Fe/Gd 相能量与 defect 不一致（形成能偏移）。`patch_incar_u`（io.py，U 表 Fe=3/Gd=5/Zn=5…）+ cpd 生成接入 + 存量 15 个 SrGa4O7:Fe 含 Fe cpd 已补丁（CONTCAR 续算起点）；COMPETING 提交改 ADR 0007 terminal 语义（failed cpd 只 auto_retry 一次，杜绝 ZBRENT 目录每 poll 重提——FeO 曾 56 次）。430 passed。已重启 loop。
+> **剩余**：观察 +U/SOC 重算收敛（Fe 磁矩 ~4-5μB 抽查）、形成能对比、链播种恢复（根收敛后自动）；**Y2Ti2O7 cpd 含旧版 vise 的 Ti U=4 而 defect 无 U——不一致待用户拍板（Ti 政策）**。
 
 # Next Actions — +U/SOC 批次（2026-08-10，等 2026 根播种结束）
 
