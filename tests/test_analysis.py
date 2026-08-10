@@ -407,3 +407,176 @@ class TestClassifyAnalyzeStatus:
         from vasp_sop.defect.analysis import classify_analyze_status
 
         assert classify_analyze_status(tmp_path) == "failed"
+
+
+class TestEarClip:
+    def test_convex_quad(self):
+        from vasp_sop.report.interactive import _ear_clip
+        poly = [[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]]
+        tris = _ear_clip(poly)
+        assert len(tris) == 2
+        # area conservation: sum of triangle areas == polygon area (4.0)
+        def area(t):
+            a, b, c = (poly[i] for i in t)
+            return abs((b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0])) / 2
+        assert abs(sum(area(t) for t in tris) - 4.0) < 1e-9
+
+    def test_concave_pentagon_caal4o7(self):
+        """The real CaAl4O7 CPD projection (Fe-doped): raw vertex order
+        self-intersects in 2D; hull reordering makes the polygon simple
+        and area-conserving."""
+        from vasp_sop.report.interactive import _convex_hull, _ear_clip
+        poly = [
+            [-8.12876, -6.42133], [-8.02237, -6.25112],
+            [-0.77178, -1.41738], [-0.0, -1.00216], [0.0, -0.97213],
+        ]
+        idx = _convex_hull(poly)
+        assert len(idx) == 5, "all 5 vertices are hull vertices here"
+        hull = [poly[i] for i in idx]
+        tris = _ear_clip(hull)
+        assert len(tris) == 3
+        shoelace = 0.0
+        for i in range(len(hull)):
+            x1, y1 = hull[i]
+            x2, y2 = hull[(i + 1) % len(hull)]
+            shoelace += x1 * y2 - x2 * y1
+        poly_area = abs(shoelace) / 2
+        def area(t):
+            a, b, c = (hull[i] for i in t)
+            return abs((b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0])) / 2
+        assert abs(sum(area(t) for t in tris) - poly_area) < 1e-6
+
+    def test_convex_hull_reorders_self_intersecting_ring(self):
+        from vasp_sop.report.interactive import _convex_hull
+        poly = [
+            [-8.12876, -6.42133], [-8.02237, -6.25112],
+            [-0.77178, -1.41738], [-0.0, -1.00216], [0.0, -0.97213],
+        ]
+        idx = _convex_hull(poly)
+        # hull ring must be simple: no crossing edges (all cross products
+        # share the same sign for a strictly convex hull)
+        def cross(o, a, b):
+            return (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0])
+        ring = [poly[i] for i in idx]
+        signs = [cross(ring[i], ring[(i+1) % 5], ring[(i+2) % 5]) for i in range(5)]
+        assert all(s > 0 for s in signs) or all(s < 0 for s in signs), signs
+
+    def test_canvas_js_supports_pentagon(self):
+        from vasp_sop.report.interactive import _cpd_canvas_js
+        poly = [
+            [-8.12876, -6.42133], [-8.02237, -6.25112],
+            [-0.77178, -1.41738], [-0.0, -1.00216], [0.0, -0.97213],
+        ]
+        mu = [
+            {"Al": -8.12876, "Ca": -6.42133, "O": -0.47967},
+            {"Al": -8.02237, "Ca": -6.25112, "O": -0.56478},
+            {"Al": -0.77178, "Ca": -1.41738, "O": -5.39851},
+            {"Al": -0.0, "Ca": -1.00216, "O": -5.89885},
+            {"Al": 0.0, "Ca": -0.97213, "O": -5.90314},
+        ]
+        from vasp_sop.report.interactive import _convex_hull
+        idx = _convex_hull(poly)
+        poly = [poly[i] for i in idx]
+        mu = [mu[i] for i in idx]
+        js = _cpd_canvas_js(5, poly, mu, ["V%d" % i for i in range(5)],
+                            "Al", "Ca", (-9.0, 0.5), (-7.0, 0.5))
+        import re
+        assert "var BARYS" in js
+        m = re.search(r"var TRIS = (\[\[.*?\]\]);", js)
+        assert m, "TRIS list missing"
+        tris = eval(m.group(1))
+        assert len(tris) == 3
+        assert set(sum(tris, [])) == {0, 1, 2, 3, 4}, "all 5 vertices covered"
+        assert "var EDGES" in js
+        assert js.count("function(px,py)") == 3  # 3 bary fns for 5-gon
+        assert "Unsupported" not in js
+
+    def test_triangle_and_quad_still_work(self):
+        from vasp_sop.report.interactive import _cpd_canvas_js
+        tri = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]
+        mu = [{"A": 0.0}, {"A": 1.0}, {"A": 0.0}]
+        j3 = _cpd_canvas_js(3, tri, mu, list("ABC"), "A", "B", (0, 1), (0, 1))
+        assert "var TRIS" in j3 and "Unsupported" not in j3
+        quad = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+        j4 = _cpd_canvas_js(4, quad, mu * 2, list("ABCD"), "A", "B", (0, 1), (0, 1))
+        assert "var TRIS" in j4 and "Unsupported" not in j4
+
+
+class TestAnalyzeHtmlFailure:
+    """Interactive HTML failure must demote full → partial (missing
+    deliverable must not silently claim completeness)."""
+
+    def test_html_failure_demotes_to_partial(self, tmp_path: Path, monkeypatch):
+        from vasp_sop.defect.analysis import analyze
+
+        d = tmp_path / "Va_Ga_0"
+        d.mkdir()
+        (d / "OUTCAR").write_text("x\n")
+        (d / "correction.json").write_text("{}\n")
+        (d / "calc_results.json").write_text("{}\n")
+        perfect = tmp_path / "perfect"
+        perfect.mkdir()
+        (perfect / "OUTCAR").write_text("x\n")
+        (perfect / "calc_results.json").write_text("{}\n")
+        (perfect / "perfect_band_edge_state.json").write_text("{}\n")
+        _force_converged(monkeypatch)
+        for name in ("u.yaml", "se.yaml", "tv.yaml"):
+            (tmp_path / name).write_text("x: 1\n")
+        cpd = tmp_path / "cpd"
+        cpd.mkdir()
+        (cpd / "chem_pot_diag.json").write_text("{}\n")
+        (cpd / "target_vertices.yaml").write_text("x: 1\n")
+        # full flow: fake pydefect CLI; "des" writes the summary file
+        def fake_run(cmd, cwd=None, **kw):
+            if " pydefect des " in cmd or cmd.startswith("pydefect des "):
+                (Path(cwd) / "defect_energy_summary.json").write_text("{}\n")
+        monkeypatch.setattr(
+            "vasp_sop.defect.pydefect_adapter.run_local", fake_run)
+        monkeypatch.setattr(
+            "vasp_sop.report.interactive.generate_interactive_html",
+            lambda *a, **kw: (_ for _ in ()).throw(
+                ValueError("Unsupported vertex count: 7")),
+        )
+        status = analyze(
+            tmp_path, tmp_path, _cfg(),
+            tmp_path / "u.yaml", tmp_path / "se.yaml", tmp_path / "tv.yaml",
+        )
+        assert status == "partial"
+        assert not (tmp_path / "defect_energy_summary.json").is_file()
+        assert (tmp_path / "defect_energy_summary.partial.json").is_file()
+
+    def test_html_ok_keeps_full(self, tmp_path: Path, monkeypatch):
+        from vasp_sop.defect.analysis import analyze
+
+        d = tmp_path / "Va_Ga_0"
+        d.mkdir()
+        (d / "OUTCAR").write_text("x\n")
+        (d / "correction.json").write_text("{}\n")
+        (d / "calc_results.json").write_text("{}\n")
+        perfect = tmp_path / "perfect"
+        perfect.mkdir()
+        (perfect / "OUTCAR").write_text("x\n")
+        (perfect / "calc_results.json").write_text("{}\n")
+        (perfect / "perfect_band_edge_state.json").write_text("{}\n")
+        _force_converged(monkeypatch)
+        for name in ("u.yaml", "se.yaml", "tv.yaml"):
+            (tmp_path / name).write_text("x: 1\n")
+        cpd = tmp_path / "cpd"
+        cpd.mkdir()
+        (cpd / "chem_pot_diag.json").write_text("{}\n")
+        (cpd / "target_vertices.yaml").write_text("x: 1\n")
+        def fake_run(cmd, cwd=None, **kw):
+            if " pydefect des " in cmd or cmd.startswith("pydefect des "):
+                (Path(cwd) / "defect_energy_summary.json").write_text("{}\n")
+        monkeypatch.setattr(
+            "vasp_sop.defect.pydefect_adapter.run_local", fake_run)
+        monkeypatch.setattr(
+            "vasp_sop.report.interactive.generate_interactive_html",
+            lambda *a, **kw: tmp_path / "formation_energy_interactive.html",
+        )
+        status = analyze(
+            tmp_path, tmp_path, _cfg(),
+            tmp_path / "u.yaml", tmp_path / "se.yaml", tmp_path / "tv.yaml",
+        )
+        assert status == "full"
+        assert (tmp_path / "defect_energy_summary.json").is_file()

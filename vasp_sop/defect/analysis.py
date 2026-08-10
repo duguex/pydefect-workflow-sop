@@ -563,7 +563,10 @@ def analyze(
                         vertex, exc,
                     )
 
-    # ── interactive HTML report (best-effort) ──
+    # ── interactive HTML report (best-effort, but a hard failure is a
+    #    missing deliverable: demote full → partial so the pipeline does
+    #    not silently claim completeness) ──
+    html_failed = False
     try:
         if (defect_root / _SUMMARY).is_file():
             cpd_json = project_root / "cpd" / "chem_pot_diag.json"
@@ -573,9 +576,12 @@ def analyze(
                 generate_interactive_html(project_root)
                 logger.info("Interactive formation-energy report generated.")
     except Exception as exc:
+        html_failed = True
         logger.warning("Interactive HTML generation failed: %s", exc)
 
     status = classify_analyze_status(defect_root)
+    if html_failed and status == "full":
+        status = "partial"
     if status != "full":
         _demote_incomplete_summary(defect_root, status)
         status = classify_analyze_status(defect_root)

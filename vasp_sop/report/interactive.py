@@ -211,6 +211,90 @@ def _bary_js(
 # CPD widget JS (per vertex count)
 # ═════════════════════════════════════════════════════════════════════
 
+def _convex_hull(points: list[list[float]]) -> list[int]:
+    """Convex-hull vertex indices (CCW) via monotone chain.
+
+    The 3D chemical-potential polytope's vertices, projected onto the 2D
+    display axes, are not necessarily in boundary order — the raw
+    target_vertices order can self-intersect in 2D (observed with 5
+    vertices on Fe-doped CaAl4O7).  The hull order is the correct 2D
+    boundary, and its triangulation is the valid interpolation domain.
+    """
+    pts = sorted((tuple(p), i) for i, p in enumerate(points))
+    if len(pts) <= 1:
+        return [i for _, i in pts]
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower: list[tuple[tuple[float, float], int]] = []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2][0], lower[-1][0], p[0]) <= 0:
+            lower.pop()
+        lower.append(p)
+    upper: list[tuple[tuple[float, float], int]] = []
+    for p in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2][0], upper[-1][0], p[0]) <= 0:
+            upper.pop()
+        upper.append(p)
+    return [i for _, i in lower[:-1] + upper[:-1]]
+
+
+def _ear_clip(poly: list[list[float]]) -> list[tuple[int, int, int]]:
+    """Ear-clipping triangulation of a simple polygon (concave OK).
+
+    Returns triangle vertex-index tuples (N-2 for N>=3).  Falls back to a
+    fan when no ear is found (numerically degenerate input) rather than
+    raising, so the widget stays functional.
+    """
+    n = len(poly)
+    if n < 3:
+        return []
+    idx = list(range(n))
+    tris: list[tuple[int, int, int]] = []
+    area2 = 0.0
+    for i in range(n):
+        x1, y1 = poly[i]
+        x2, y2 = poly[(i + 1) % n]
+        area2 += x1 * y2 - x2 * y1
+    orient = 1.0 if area2 >= 0 else -1.0
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    def in_tri(p, a, b, c):
+        d1 = cross(a, b, p)
+        d2 = cross(b, c, p)
+        d3 = cross(c, a, p)
+        has_neg = d1 < -1e-9 or d2 < -1e-9 or d3 < -1e-9
+        has_pos = d1 > 1e-9 or d2 > 1e-9 or d3 > 1e-9
+        return not (has_neg and has_pos)
+
+    while len(idx) > 3:
+        ear = None
+        for i in range(len(idx)):
+            i0, i1, i2 = idx[i - 1], idx[i], idx[(i + 1) % len(idx)]
+            a, b, c = poly[i0], poly[i1], poly[i2]
+            if cross(a, b, c) * orient <= 0:
+                continue  # reflex (or degenerate) corner
+            if any(
+                in_tri(poly[j], a, b, c) for j in idx if j not in (i0, i1, i2)
+            ):
+                continue
+            ear = i
+            break
+        if ear is None:
+            for i in range(1, len(idx) - 1):
+                tris.append((idx[0], idx[i], idx[i + 1]))
+            break
+        i0, i1, i2 = idx[ear - 1], idx[ear], idx[(ear + 1) % len(idx)]
+        tris.append((i0, i1, i2))
+        del idx[ear]
+    if len(idx) == 3:
+        tris.append((idx[0], idx[1], idx[2]))
+    return tris
+
+
 def _cpd_canvas_js(
     n_vertices: int,
     poly_2d: list[list[float]],
@@ -310,18 +394,30 @@ cc.addEventListener("pointermove",function(e){{if(!e.buttons)return;var t=ptrT(e
 var curMu=getMu(0.5);
 """
 
-    if n_vertices == 3:
-        bary = _bary_js(poly_2d, (0, 1, 2))
+    if n_vertices >= 3:
+        # General N-gon (N>=3): ear-clip into triangles, barycentric in
+        # each, edge projection outside.  Replaces the former 3/4-vertex
+        # special cases — CPDs grow extra vertices when dopant phases
+        # (Fe/Bi) enter the chemical-potential diagram (e.g. 5 vertices
+        # for CaAl4O7 with Fe), and the 2D projection can be concave, so
+        # a plain fan is not safe.
+        tris = _ear_clip(poly_2d)
+        edges = [[i, (i + 1) % n_vertices] for i in range(n_vertices)]
+        barys = "[" + ",".join(_bary_js(poly_2d, t) for t in tris) + "]"
         return common + f"""
-var bary01 = {bary};
+var BARYS = {barys};
+var TRIS = {js(tris)};
+var EDGES = {js(edges)};
 function getMu(px,py){{
-  var bc=bary01(px,py);
-  if(bc[3]){{
-    var mu={{}};var v0=VERTEX_MU[0],v1=VERTEX_MU[1],v2=VERTEX_MU[2];
-    for(var e in v0){{mu[e]=bc[0]*v0[e]+bc[1]*v1[e]+bc[2]*v2[e];}}
-    return mu;
+  for(var k=0;k<TRIS.length;k++){{
+    var bc=BARYS[k](px,py);
+    if(bc[3]){{
+      var mu={{}};var t=TRIS[k];var v0=VERTEX_MU[t[0]],v1=VERTEX_MU[t[1]],v2=VERTEX_MU[t[2]];
+      for(var e in v0){{mu[e]=bc[0]*v0[e]+bc[1]*v1[e]+bc[2]*v2[e];}}
+      return mu;
+    }}
   }}
-  var e=projectToEdge(px,py,[[0,1],[1,2],[2,0]]);
+  var e=projectToEdge(px,py,EDGES);
   var mu={{}},v0=VERTEX_MU[e.i],v1=VERTEX_MU[e.j];
   for(var k in v0){{mu[k]=v0[k]+e.t*(v1[k]-v0[k]);}}
   return mu;
@@ -343,43 +439,7 @@ function drawCPD(mu){{
 function ptrPos(e){{var r=cc.getBoundingClientRect();return[invX((e.clientX-r.left)*cc.width/r.width),invY((e.clientY-r.top)*cc.height/r.height)];}}
 cc.addEventListener("pointerdown",function(e){{cc.setPointerCapture(e.pointerId);var p=ptrPos(e);var mu=getMu(p[0],p[1]);if(mu)update(mu);}});
 cc.addEventListener("pointermove",function(e){{if(!e.buttons)return;var p=ptrPos(e);var mu=getMu(p[0],p[1]);if(mu)update(mu);}});
-var cx0=(POLY[0][0]+POLY[1][0]+POLY[2][0])/3,cy0=(POLY[0][1]+POLY[1][1]+POLY[2][1])/3;
-var curMu=getMu(cx0,cy0);
-"""
-
-    if n_vertices == 4:
-        bary12 = _bary_js(poly_2d, (0, 1, 2))
-        bary23 = _bary_js(poly_2d, (0, 2, 3))
-        return common + f"""
-var bary12 = {bary12};
-var bary23 = {bary23};
-function getMu(px,py){{
-  var bc1=bary12(px,py),bc2=bary23(px,py);
-  if(bc1[3]){{var mu={{}};var v0=VERTEX_MU[0],v1=VERTEX_MU[1],v2=VERTEX_MU[2];for(var e in v0)mu[e]=bc1[0]*v0[e]+bc1[1]*v1[e]+bc1[2]*v2[e];return mu;}}
-  if(bc2[3]){{var mu={{}};var v0=VERTEX_MU[0],v1=VERTEX_MU[2],v2=VERTEX_MU[3];for(var e in v0)mu[e]=bc2[0]*v0[e]+bc2[1]*v1[e]+bc2[2]*v2[e];return mu;}}
-  var e=projectToEdge(px,py,[[0,1],[1,2],[2,3],[3,0]]);
-  var mu={{}},v0=VERTEX_MU[e.i],v1=VERTEX_MU[e.j];
-  for(var k in v0){{mu[k]=v0[k]+e.t*(v1[k]-v0[k]);}}
-  return mu;
-}}
-function drawCPD(mu){{
-  cctx.clearRect(0,0,cW,cH);
-  cctx.strokeStyle="#ccc";cctx.lineWidth=0.5;cctx.fillStyle="#666";cctx.font="9px Arial";cctx.textAlign="center";
-  for(var i=0;i<=4;i++){{var v=a0R[0]+i/4*(a0R[1]-a0R[0]);cctx.beginPath();cctx.moveTo(cX(v),cP.t);cctx.lineTo(cX(v),cH-cP.b);cctx.stroke();cctx.fillText(v.toFixed(2),cX(v),cH-cP.b+12);}}
-  cctx.textAlign="right";
-  for(var i=0;i<=4;i++){{var v=a1R[0]+i/4*(a1R[1]-a1R[0]);cctx.beginPath();cctx.moveTo(cP.l,cY(v));cctx.lineTo(cW-cP.r,cY(v));cctx.stroke();cctx.fillText(v.toFixed(2),cP.l-4,cY(v)+3);}}
-  cctx.strokeStyle="#d63031";cctx.lineWidth=2;cctx.beginPath();
-  POLY.forEach(function(v,i){{i==0?cctx.moveTo(cX(v[0]),cY(v[1])):cctx.lineTo(cX(v[0]),cY(v[1]));}});
-  cctx.closePath();cctx.stroke();cctx.fillStyle="rgba(214,48,49,0.08)";cctx.fill();
-  POLY.forEach(function(v,i){{cctx.fillStyle="#d63031";cctx.font="bold 12px Arial";cctx.fillText(VNAMES[i],cX(v[0])+5,cY(v[1])-5);}});
-  if(mu){{cctx.beginPath();cctx.arc(cX(mu["{ax0}"]),cY(mu["{ax1}"]),6,0,2*Math.PI);cctx.fillStyle="#16c79a";cctx.fill();cctx.strokeStyle="#fff";cctx.lineWidth=2;cctx.stroke();}}
-  cctx.fillStyle="#555";cctx.font="11px Arial";cctx.textAlign="center";cctx.fillText("μ_{ax0} (eV)",cW/2,cH-2);
-  cctx.save();cctx.translate(10,cH/2);cctx.rotate(-Math.PI/2);cctx.fillText("μ_{ax1} (eV)",0,0);cctx.restore();
-}}
-function ptrPos(e){{var r=cc.getBoundingClientRect();return[invX((e.clientX-r.left)*cc.width/r.width),invY((e.clientY-r.top)*cc.height/r.height)];}}
-cc.addEventListener("pointermove",function(e){{if(!e.buttons)return;var p=ptrPos(e);var mu=getMu(p[0],p[1]);if(mu)update(mu);}});
-cc.addEventListener("pointerdown",function(e){{cc.setPointerCapture(e.pointerId);var p=ptrPos(e);var mu=getMu(p[0],p[1]);if(mu)update(mu);}});
-var cx0=(POLY[0][0]+POLY[1][0]+POLY[2][0]+POLY[3][0])/4,cy0=(POLY[0][1]+POLY[1][1]+POLY[2][1]+POLY[3][1])/4;
+var cx0=0,cy0=0;POLY.forEach(function(v){{cx0+=v[0];cy0+=v[1];}});cx0/=POLY.length;cy0/=POLY.length;
 var curMu=getMu(cx0,cy0);
 """
 
@@ -692,6 +752,19 @@ def generate_interactive_html(system_dir: Path) -> Path | None:
     poly_2d: list[list[float]] = [
         [v.get(ax0, 0.0), v.get(ax1, 0.0)] for v in vertex_mu
     ]
+
+    # 2D projection of a 3D polytope: order the vertices along the hull
+    # so the display polygon is simple (raw order can self-intersect).
+    hull_idx = _convex_hull(poly_2d)
+    if len(hull_idx) < len(poly_2d):
+        logger.warning(
+            "CPD 2D projection: %d vertices collapse to %d hull vertices",
+            len(poly_2d), len(hull_idx),
+        )
+    poly_2d = [poly_2d[i] for i in hull_idx]
+    vertex_mu = [vertex_mu[i] for i in hull_idx]
+    vertex_names = [vertex_names[i] for i in hull_idx]
+    n_vertices = len(hull_idx)
 
     all_ax0 = [p[0] for p in poly_2d]
     all_ax1 = [p[1] for p in poly_2d]
