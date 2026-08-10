@@ -60,7 +60,7 @@ def _call_wave2(system, js, monkeypatch, *, retry_failed: bool = False):
     submitted = []
     monkeypatch.setattr(
         "vasp_sop.core.jobs.submit_vasp",
-        lambda path, priority=0: type(
+        lambda path, priority=0, tags=None: type(
             "Job", (), {"task_name": "t-1234"})())
     original = orchestrator._submit_or_skip
 

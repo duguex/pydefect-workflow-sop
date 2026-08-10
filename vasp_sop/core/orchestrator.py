@@ -80,11 +80,14 @@ def _chain_roots(charges: list[int]) -> set[int]:
 
 
 # Reasons that justify an automatic ionic restart from CONTCAR for a cpd
-# phase: the structure simply needs more ionic steps.  Electronic NELM
-# exhaustion is deliberately excluded — identical inputs reproduce the
-# same failure, so blind retries would only burn core-hours.
+# phase: the structure simply needs more ionic steps.  ``truncated`` is a
+# TIME-LIMIT / killed run — transient, the CONTCAR keeps advancing every
+# round, so it is retried (with a long-QOS tag) instead of capped.
+# Electronic NELM exhaustion is deliberately excluded — identical inputs
+# reproduce the same failure, so blind retries would only burn core-hours.
 _IONIC_RETRY_REASONS = frozenset(
-    {"force_gate_fail", "nsw_exhausted", "nsw_early_exit", "missing_forces"}
+    {"force_gate_fail", "nsw_exhausted", "nsw_early_exit", "missing_forces",
+     "truncated"}
 )
 
 # Cap on automatic CONTCAR restarts per cpd phase.  A phase whose forces
@@ -141,6 +144,7 @@ def _submit_or_skip(
     js: Any = None,
     source: str | None = None,
     priority: int = 0,
+    tags: list[str] | None = None,
 ) -> Any:
     """Submit a VASP job via crisp, or skip in dry-run mode."""
     from vasp_sop.core.jobs import submit_vasp
@@ -151,7 +155,10 @@ def _submit_or_skip(
             info_fn(f"  [dry-run] {sys_name:<18} would submit: {label}")
         return None
     try:
-        job = submit_vasp(path.resolve(), priority=priority)
+        if tags:
+            job = submit_vasp(path.resolve(), priority=priority, tags=tags)
+        else:
+            job = submit_vasp(path.resolve(), priority=priority)
         owned = js is None
         store = js if not owned else JobStore()
         try:
@@ -342,25 +349,33 @@ def wave2_submit(
                 continue
             if not (cd / "CONTCAR").is_file():
                 continue
-            # Stop resubmitting a phase whose restarts are not converging
-            # (force stalled at a too-strict EDIFFG): parameter work needed.
-            n_restarts = sum(
-                1 for r in js.history(str(cd.resolve()))
-                if r.get("source") == "ionic_restart"
-            )
-            if n_restarts >= _CPD_MAX_IONIC_RESTARTS:
-                logger.warning(
-                    "%s/%s: %d ionic restart(s) without convergence — "
-                    "auto-restart capped, needs a parameter decision",
-                    sys.name, cd.name, n_restarts,
+            # The restart cap guards the force-stall case (every round
+            # burns NSW steps with no progress).  A TIME-LIMIT truncation
+            # ADVANCES the CONTCAR every round — capping it would stall a
+            # converging calc, so it is exempt and resubmitted on a
+            # long-QOS cluster instead.
+            truncated = verdict.reason == "truncated"
+            if not truncated:
+                n_restarts = sum(
+                    1 for r in js.history(str(cd.resolve()))
+                    if r.get("source") == "ionic_restart"
                 )
-                continue
+                if n_restarts >= _CPD_MAX_IONIC_RESTARTS:
+                    logger.warning(
+                        "%s/%s: %d ionic restart(s) without convergence — "
+                        "auto-restart capped, needs a parameter decision",
+                        sys.name, cd.name, n_restarts,
+                    )
+                    continue
             try:
                 restart_from_contcar(cd)
             except Exception:
                 pass
-            _submit_or_skip(cd, f"phase:{cd.name}", sys.name, dry_run, info,
-                            js=js, source="ionic_restart", priority=priority)
+            _submit_or_skip(
+                cd, f"phase:{cd.name}", sys.name, dry_run, info,
+                js=js, source="ionic_restart", priority=priority,
+                tags=["long"] if truncated else None,
+            )
 
     # ── Prepare: build defect structures ─────────────────────────────
     # Chemical-environment systems (ADR 0005) have no defect leg.

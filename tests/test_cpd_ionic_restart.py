@@ -17,6 +17,7 @@ from vasp_sop.vasp.convergence import (
     REASON_FORCE_GATE_FAIL,
     REASON_MISSING_OUTCAR,
     REASON_NSW_EXHAUSTED,
+    REASON_TRUNCATED,
     ConvergenceVerdict,
 )
 
@@ -69,7 +70,7 @@ def _call_wave2(system, js, monkeypatch, *, retry_failed: bool = False):
     submitted = []
     monkeypatch.setattr(
         "vasp_sop.core.jobs.submit_vasp",
-        lambda path, priority=0: type("Job", (), {"task_name": "t-1234"})())
+        lambda path, priority=0, tags=None: type("Job", (), {"task_name": "t-1234"})())
     monkeypatch.setattr(
         "vasp_sop.vasp.io.input_ready", lambda d: True, raising=False)
     monkeypatch.setattr(
@@ -77,10 +78,10 @@ def _call_wave2(system, js, monkeypatch, *, retry_failed: bool = False):
     original = orchestrator._submit_or_skip
 
     def _patched(path, label, sys_name, dry_run, info, *, js=None,
-                 source=None, priority=0):
-        submitted.append((str(path), source))
+                 source=None, priority=0, tags=None):
+        submitted.append((str(path), source, tags))
         return original(path, label, sys_name, dry_run, info, js=js,
-                        source=source, priority=priority)
+                        source=source, priority=priority, tags=tags)
 
     monkeypatch.setattr(orchestrator, "_submit_or_skip", _patched)
     orchestrator.wave2_submit(system, js, False, retry_failed=retry_failed)
@@ -250,3 +251,47 @@ def test_already_submitted_not_retried(tmp_path: Path, monkeypatch):
             False, REASON_FORCE_GATE_FAIL))
     submitted = _call_wave2(sys, js, monkeypatch)
     assert submitted == [], submitted
+
+
+def test_truncated_restarts_with_long_tag(tmp_path: Path, monkeypatch):
+    """A TIME-LIMIT truncation is transient — the CONTCAR advanced, so it
+    continues from CONTCAR on a long-QOS cluster (not capped)."""
+    d = tmp_path / "cpd" / "SrFeO2_mp-1"
+    d.mkdir(parents=True)
+    (d / "INCAR").write_text("NSW = 50\n")
+    (d / "CONTCAR").write_text("contcar\n")
+    js = FakeJobStore()
+    sys = FakeSystem(tmp_path / "cpd")
+
+    import vasp_sop.vasp.convergence as conv_mod
+    monkeypatch.setattr(
+        conv_mod, "convergence_verdict",
+        lambda d, task_type="": ConvergenceVerdict(
+            False, REASON_TRUNCATED))
+    submitted = _call_wave2(sys, js, monkeypatch)
+    assert len(submitted) == 1, submitted
+    assert submitted[0][1] == "ionic_restart", submitted
+    assert submitted[0][2] == ["long"], submitted
+
+
+def test_truncated_exempt_from_restart_cap(tmp_path: Path, monkeypatch):
+    """Truncated restarts keep advancing the CONTCAR — the force-stall cap
+    must not stop them, even past _CPD_MAX_IONIC_RESTARTS."""
+    d = tmp_path / "cpd" / "SrFeO2_mp-1"
+    d.mkdir(parents=True)
+    (d / "INCAR").write_text("NSW = 50\n")
+    (d / "CONTCAR").write_text("contcar\n")
+    js = FakeJobStore()
+    from vasp_sop.core.orchestrator import _CPD_MAX_IONIC_RESTARTS
+    for _ in range(_CPD_MAX_IONIC_RESTARTS + 2):
+        js.record(str(d), "unconverged", source="ionic_restart")
+    sys = FakeSystem(tmp_path / "cpd")
+
+    import vasp_sop.vasp.convergence as conv_mod
+    monkeypatch.setattr(
+        conv_mod, "convergence_verdict",
+        lambda d, task_type="": ConvergenceVerdict(
+            False, REASON_TRUNCATED))
+    submitted = _call_wave2(sys, js, monkeypatch)
+    assert len(submitted) == 1, submitted
+    assert submitted[0][2] == ["long"], submitted
