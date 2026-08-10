@@ -122,3 +122,7 @@ _Avoid_: 阴-阳错位, 反位全筛
 **Cluster tag**:
 A label on a crisp cluster (`clusters.json` `tags`) that gates which clusters a job may dispatch to (`--tag long` = only clusters carrying `long`). Today cluster-level only: `duguex_113/101` = `short`, `ckduan_167/duguex_5` = `long`. Deliberately *not* moved to partition level (crisp_light#137 kept open, decision 2026-08-10); `duguex_101`'s 1917 idle nodes (CPU-* partitions) stay unconfigured by decision — the `test` partition remains the only submittable queue on 113/101, so submit→start queueing of hours is an accepted constraint.
 _Avoid_: calling the `test` partition "the short queue" as if it were a time limit — `qos_test` has not killed any job (no TIME-LIMIT observed); queueing comes from capacity, not from the tag.
+
+**CPD phase refresh**:
+The competing-phase set must cover every element in the defect chemistry — intrinsic elements plus dopants (ADR 0015). `ensure_cpd_phases` compares `cpd/mp_state.json` `elements` (recorded at fetch time) against the current plan; on mismatch it fetches the new phase set into a temp dir, moves only new dirs in (existing converged phases untouched), submits them, and rewrites mp_state.json. Fixes the failure mode where a dopant is added to plan.yaml after cpd was fetched — `standard_energies.yaml` then lacks the dopant's chemical potential and pydefect `dei` crashes (`KeyError` on formation-energy composition).
+_Avoid_: 手动补 standard_energies, cpd 全量重建
