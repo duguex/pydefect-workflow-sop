@@ -505,7 +505,10 @@ def wave2_submit(
                     )
                 continue
 
-            if latest == "converged":
+            # ADR 0016: a stale "converged" record (e.g. backfilled before
+            # the electronic gate existed) must not skip a dir whose
+            # current verdict is unconverged (NELM-exhausted runs).
+            if latest == "converged" and verdicts.get(str(child.resolve()), False):
                 continue
 
             # ── Charge-state chain (ADR 0010) ─────────────────────────
@@ -546,11 +549,16 @@ def wave2_submit(
                     )
                     continue
 
-            if latest in ("failed", "unconverged", "pending"):
+            if latest in ("failed", "unconverged", "pending") or (
+                latest == "converged"
+                and not verdicts.get(str(child.resolve()), False)
+            ):
                 # ADR 0010 revision: any dir that already ran once
                 # continues from its own partial CONTCAR instead of
                 # re-seeding from a sibling (or starting over).  Auto
-                # restarts every cycle until convergence.
+                # restarts every cycle until convergence.  ADR 0016: a
+                # stale converged record (pre-electronic-gate backfill)
+                # whose verdict is now unconverged restarts too.
                 if (child / "CONTCAR").is_file():
                     from vasp_sop.vasp.io import restart_from_contcar
                     try:

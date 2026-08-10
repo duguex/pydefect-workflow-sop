@@ -104,6 +104,12 @@ class TestWave2Stage2Trigger:
     def test_trigger_submits_converged_dirs(self, tmp_path, monkeypatch):
         df = tmp_path / "defect"
         conv = _mkdir(tmp_path, "Va_O1_0")
+        (conv / "OUTCAR").write_text(
+            "NSW = 50\nIBRION = 2\nEDIFFG = -0.03\n"
+            "TOTAL-FORCE (eV/Angst)\n ---\n"
+            " 0.001 0.001 0.001 0.001 0.001 0.001\n"
+            " General timing and accounting informations for this job:\n")
+        (conv / "vasprun.xml").write_text("<vasprun/>\n")
         js = FakeJobStore()
         js.record(str(conv), "converged")
         sub = _mkdir(tmp_path, "Va_O2_0")
@@ -125,6 +131,12 @@ class TestWave2Stage2Trigger:
 
     def test_disabled_config_no_trigger(self, tmp_path, monkeypatch):
         conv = _mkdir(tmp_path, "Va_O1_0")
+        (conv / "OUTCAR").write_text(
+            "NSW = 50\nIBRION = 2\nEDIFFG = -0.03\n"
+            "TOTAL-FORCE (eV/Angst)\n ---\n"
+            " 0.001 0.001 0.001 0.001 0.001 0.001\n"
+            " General timing and accounting informations for this job:\n")
+        (conv / "vasprun.xml").write_text("<vasprun/>\n")
         js = FakeJobStore()
         js.record(str(conv), "converged")
         submitted = []
