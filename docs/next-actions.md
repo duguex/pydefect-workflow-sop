@@ -189,3 +189,10 @@ Plus: deterministic composition selection (lowest energy-per-atom), `cpd_exclude
 - **执行纪律**：单体系串行（按完成度）：CaAl4O7 → SrAl4O7 → Gd2GaSbO7:Bi → La2Zr2O7 → Y2Sn2O7 → La2SrSc2O7 → Y2Ti2O7（含 Bi 缺陷重建）；不破坏已算成果
 - **遗留**：5 个 SOC 体系 INCAR 曾去 SOC（605 个）+ cancel 36 个——按用户指示保持现状；实施两阶段时统一处理（已算的补记 soc_done 避免重算）
 - **Y2Ti2O7**：defect_in.yaml 早于 plan dopant Bi——含 Bi 缺陷缺失，实施时重建（BaAl2B2O7 同型案例）
+
+## 单体系串行执行（2026-08-10 18:25 起）
+
+- loop 已隔离：`vasp-sop-loop.service` ExecStart 加 `--exclude` 其余 9 体系——**只推进 CaAl4O7**（Batch run: 1 systems）
+- CaAl4O7：72 有效 67 收敛 + Va_Al3_-3 running（最后一个）——收敛后 wave3 自动收尾（cpd 后处理已跑、unitcell 全收敛）→ COMPLETE
+- 切换下一个体系：改 service（去掉目标体系的 --exclude）→ daemon-reload → restart
+- 其他体系在跑的 8 个尾巴（Y2Ti2O7 4/BaAl2B2O7 1/La2Zr2O7 1/SrAl4O7 1）跑完自然结束，不 cancel
