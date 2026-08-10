@@ -54,6 +54,7 @@ DEFAULT_PLAN: dict = {
         "encut": None,
         "hubbard_u": False,
         "soc": False,
+        "stage2_soc": False,   # ADR 0014: two-phase SOC (non-SOC first, SOC supplement)
         "pp": [],
     },
     "supercell": {"tool": "doped", "min_distance": 10.0},
@@ -100,6 +101,7 @@ class PipelineConfig:
     encut: Optional[float] = None
     hubbard_u: bool = False
     soc: bool = False
+    stage2_soc: bool = False  # ADR 0014: auto SOC supplement
     potcar_overrides: list[str] = field(default_factory=list)
 
     supercell_tool: str = "doped"
@@ -194,6 +196,7 @@ class PipelineConfig:
             functional=params.get("functional", "pbesol"),
             encut=params.get("encut"),
             soc=params.get("soc", False),
+            stage2_soc=params.get("stage2_soc", False),
             hubbard_u=params.get("hubbard_u", False),
             potcar_overrides=params.get("pp", []),
             supercell_min_atoms=sc.get("min_atoms", 200),
@@ -231,6 +234,7 @@ class PipelineConfig:
                 "encut": self.encut,
                 "hubbard_u": self.hubbard_u,
                 "soc": self.soc,
+                "stage2_soc": self.stage2_soc,
                 "pp": list(self.potcar_overrides),
             },
             "supercell": {

@@ -57,7 +57,7 @@ def prepare_inputs(
     # patch_incar is read-modify-write, so existing non-SOC tags are preserved.
     if input_ready(work_dir):
         logger.debug("VASP input already ready in %s", work_dir)
-        if config.soc:
+        if config.soc and not config.stage2_soc:
             patch_incar(work_dir, LSORBIT=".TRUE.", ISYM=-1)
         return
 
@@ -95,7 +95,7 @@ def prepare_inputs(
     run_local(cmd, cwd=work_dir, timeout=300)
     # vise never sets SOC tags — patch AFTER run_local so freshly
     # generated INCAR inherits LSORBIT/ISYM without clobbering other tags.
-    if config.soc:
+    if config.soc and not config.stage2_soc:
         patch_incar(work_dir, LSORBIT=".TRUE.", ISYM=-1)
 
 
@@ -163,7 +163,7 @@ def _prepare_inputs_vise_api(
     vif.create_input_files(work_dir)
     # Belt and braces: overrides can drift with vise releases.
     patch_incar(work_dir, NSW=100, **{k: v for k, v in overrides.items() if k != "NSW"})
-    if config.soc:
+    if config.soc and not config.stage2_soc:
         patch_incar(work_dir, LSORBIT=".TRUE.", ISYM=-1)
 
 

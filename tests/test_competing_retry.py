@@ -38,7 +38,7 @@ class FakeSystem:
         self.cpd_dir = Path("/nonexistent/cpd")
         self.uc_dir = Path("/nonexistent/uc")
         self.defect_dir = Path("/nonexistent/defect")
-        self.config = None
+        self.config = type("C", (), {"stage2_soc": False})()
         self._dirs = dirs
 
     def derive_phase(self, js) -> str:

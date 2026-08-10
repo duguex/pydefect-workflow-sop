@@ -204,6 +204,40 @@ def wave1_optimize(
 # ── Wave 2 ─────────────────────────────────────────────────────────────────
 
 
+def _stage2_soc_pending(child: Path, js: Any) -> bool:
+    """ADR 0014: dir converged in stage 1 (non-SOC) and never supplemented.
+
+    A ``soc_stage2`` record anywhere in the dir's history means stage 2
+    was already armed — do not resubmit (covers in-flight, done, failed).
+    """
+    cp = str(child.resolve())
+    if js.latest(cp) != "converged":
+        return False
+    return not any(r.get("source") == "soc_stage2" for r in js.history(cp))
+
+
+def _submit_stage2_soc(child: Path, sys: Any, js: Any, dry_run: bool,
+                       info_fn: Any, *, priority: int = 0) -> None:
+    """Submit the ADR 0014 SOC supplement for one converged dir.
+
+    ``Bi_*`` dirs continue from CONTCAR with LSORBIT (structure also
+    relaxes under SOC); everything else gets an NSW=0 single point —
+    an SOC energy correction on the non-SOC-optimized structure.
+    """
+    from vasp_sop.vasp.io import patch_incar
+
+    is_bi = child.name.startswith("Bi_")
+    patch_incar(child, LSORBIT=".TRUE.", ISYM=-1)
+    if not is_bi:
+        patch_incar(child, NSW=0)
+    else:
+        cont = child / "CONTCAR"
+        if cont.is_file() and cont.stat().st_size > 0:
+            (child / "POSCAR").write_text(cont.read_text(errors="ignore"))
+    _submit_or_skip(child, f"soc2:{child.name}", sys.name, dry_run, info_fn,
+                    js=js, source="soc_stage2", priority=priority)
+
+
 def wave2_submit(
     sys: System, js: Any, dry_run: bool, *, log_to_logger: bool = False,
     retry_failed: bool = False, priority: int = 0,
@@ -315,6 +349,16 @@ def wave2_submit(
                 continue
             _submit_or_skip(cd, f"phase:{cd.name}", sys.name, dry_run, info,
                             js=js, priority=priority)
+        # ADR 0014: SOC supplement for converged competing phases.
+        if sys.config.stage2_soc:
+            cpd_dir = sys.cpd_dir
+            if cpd_dir.is_dir():
+                for pd in sorted(cpd_dir.iterdir()):
+                    if not pd.is_dir() or not input_ready(pd):
+                        continue
+                    if _stage2_soc_pending(pd, js):
+                        _submit_stage2_soc(pd, sys, js, dry_run, info,
+                                           priority=priority)
         return
 
     # ── UNITCELL_DEFECT: submit UC tasks + defect dirs ───────────────
@@ -525,6 +569,17 @@ def wave2_submit(
                 continue
             _submit_or_skip(child, f"df-{child.name}", sys.name, dry_run, info, js=js,
                             priority=priority)
+
+    # ADR 0014: two-phase SOC — supplement converged non-SOC dirs.
+    # Stage 1 converges without LSORBIT; stage 2 adds it (Bi_* dirs
+    # continue from CONTCAR, everything else gets an NSW=0 single point).
+    if sys.config.stage2_soc and df_root.is_dir():
+        for child in sorted(df_root.iterdir()):
+            if not child.is_dir() or not input_ready(child):
+                continue
+            if _stage2_soc_pending(child, js):
+                _submit_stage2_soc(child, sys, js, dry_run, info,
+                                   priority=priority)
 
 
 # ── Wave 3 ─────────────────────────────────────────────────────────────────
