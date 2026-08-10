@@ -129,7 +129,7 @@ def prepare_inputs(
     # DFT+U always on (ADR 0012): vise auto-adapts per element — U-table
     # elements (3d Mn-Ni, Cu, Zn, lanthanides) get U, others none.
     cmd += " --options set_hubbard_u True"
-    uis_flags = f"NSW 50 NELM 50 EDIFF 1e-4 {extra_uis} {encut_opt}".strip()
+    uis_flags = f"NSW 50 NELM 50 EDIFF 1e-4 EDIFFG -0.01 {extra_uis} {encut_opt}".strip()
     cmd += f" -uis {uis_flags}"
 
     run_local(cmd, cwd=work_dir, timeout=300)
@@ -144,6 +144,12 @@ def prepare_inputs(
     # goes through the API path, which already enforces NELM=30 /
     # EDIFF=1e-4.)
     patch_incar(work_dir, NELM=50, EDIFF="1e-4")
+    # Global EDIFFG=-0.01 for relaxations (operator decision 2026-08-11;
+    # vise template default is -0.005, Sr[FeO2]2 was the pilot).  Only
+    # structure_opt relaxes — band/dos/dielectric are single-point and
+    # keep whatever the template gives.
+    if task_type == "structure_opt":
+        patch_incar(work_dir, EDIFFG=-0.01)
     # DFT+U: vise CLI applies set_hubbard_u to defect tasks only; patch
     # U-table species (incl. Ti, missing from the libs/vise fork's table)
     # for cpd/band/dos/dielectric too — idempotent.

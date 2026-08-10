@@ -398,3 +398,38 @@ class TestCpdEdiffProtocol:
         txt = (d / "INCAR").read_text()
         assert "EDIFF = 1e-4" in txt, txt
         assert "NELM = 50" in txt
+
+
+class TestEdiffgProtocol:
+    """Global EDIFFG=-0.01 for relaxations (operator decision 2026-08-11)."""
+
+    def test_structure_opt_gets_ediffg_001(self, tmp_path: Path, monkeypatch):
+        from vasp_sop.vasp import io as io_mod
+
+        d = tmp_path / "cpd"
+        d.mkdir()
+        (d / "INCAR").write_text("NSW = 50\nEDIFFG = -0.005\n")
+        for f in ("POSCAR", "POTCAR", "KPOINTS"):
+            (d / f).write_text("x\n")
+        cfg = SimpleNamespace(soc=False, stage2_soc=False, functional="pbesol",
+                              potcar_overrides=[], encut=None)
+        monkeypatch.setattr(io_mod, "input_ready", lambda d: False)
+        monkeypatch.setattr(io_mod, "run_local", lambda *a, **kw: None)
+        io_mod.prepare_inputs(d, cfg, task_type="structure_opt")
+        assert "EDIFFG = -0.01" in (d / "INCAR").read_text()
+
+    def test_single_point_tasks_keep_template_ediffg(self, tmp_path: Path,
+                                                     monkeypatch):
+        from vasp_sop.vasp import io as io_mod
+
+        d = tmp_path / "band"
+        d.mkdir()
+        (d / "INCAR").write_text("NSW = 50\nEDIFFG = -0.005\n")
+        for f in ("POSCAR", "POTCAR", "KPOINTS"):
+            (d / f).write_text("x\n")
+        cfg = SimpleNamespace(soc=False, stage2_soc=False, functional="pbesol",
+                              potcar_overrides=[], encut=None)
+        monkeypatch.setattr(io_mod, "input_ready", lambda d: False)
+        monkeypatch.setattr(io_mod, "run_local", lambda *a, **kw: None)
+        io_mod.prepare_inputs(d, cfg, task_type="band")
+        assert "EDIFFG = -0.005" in (d / "INCAR").read_text()
