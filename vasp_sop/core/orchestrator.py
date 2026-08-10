@@ -879,6 +879,20 @@ def advance_one_system(
     sys_obj = System(s["root"], s["config"])
     js = JobStore()
 
+    # ADR 0015: refresh competing phases when plan elements changed
+    # (e.g. dopant added after cpd was fetched).  Cheap local check per
+    # cycle; fetch+submit only on mismatch.
+    if not dry_run:
+        try:
+            from vasp_sop.defect.cpd import ensure_cpd_phases
+            n = ensure_cpd_phases(sys_obj.cpd_dir, sys_obj.config)
+            if n:
+                _logger.info("%s: cpd refresh submitted %d new phase(s).",
+                             s["name"], n)
+        except Exception as exc:
+            _logger.warning("%s: cpd refresh failed (non-fatal): %s",
+                            s["name"], exc)
+
     p = sys_obj.phase(js)
 
     # ── Failure gate ─────────────────────────────────────────────────

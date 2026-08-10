@@ -7,6 +7,7 @@ code; these tests guard against regressions.
 - issues/0002-skip-4d-cpd-diagram.md
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -321,3 +322,63 @@ class TestWriteBinaryTargetVertices:
         se = yaml.safe_load((cpd / "standard_energies.yaml").read_text())
         assert "GaN" in se
         assert se["GaN"]["energy"] == -15.0
+
+class TestEnsureCpdPhases:
+    """ADR 0015: refresh competing phases on plan element change."""
+
+    def _setup(self, tmp_path: Path, elements: list[str], phase_dirs: list[str]):
+        from vasp_sop.defect import cpd as cpd_mod
+        cpd = tmp_path / "cpd"
+        cpd.mkdir()
+        for name in phase_dirs:
+            (cpd / name).mkdir()
+        (cpd / "mp_state.json").write_text(json.dumps({
+            "schema": 2, "molecule_resource_version": "diatomic-reference-v2",
+            "status": "completed", "elements": sorted(elements),
+            "phase_dirs": phase_dirs,
+        }))
+        return cpd
+
+    def _config(self, formula: str = "CaAl4O7", dopants: list[str] | None = None):
+        from vasp_sop.core.config import PipelineConfig
+        return PipelineConfig(formula=formula, dopant_elements=dopants or [])
+
+    def test_no_mismatch_no_refresh(self, tmp_path: Path):
+        from vasp_sop.defect import cpd as cpd_mod
+        cpd = self._setup(tmp_path, ["Al", "Ca", "O"], ["Al_mp-1"])
+        # CaAl4O7 intrinsic = Al/Ca/O, no dopants
+        assert cpd_mod.ensure_cpd_phases(cpd, self._config()) == 0
+
+    def test_mismatch_fetches_and_submits(self, tmp_path: Path, monkeypatch):
+        from vasp_sop.defect import cpd as cpd_mod
+        cpd = self._setup(tmp_path, ["Al", "Ca", "O"], ["Al_mp-1"])
+        calls: list[str] = []
+
+        def fake_fetch(elements, target, use_cache=True):
+            calls.append(("fetch", sorted(elements)))
+            (target / "FeO_mp-9").mkdir()
+
+        def fake_submit(cpd_root, names, config):
+            calls.append(("submit", sorted(names)))
+            return [object() for _ in names]
+
+        monkeypatch.setattr("vasp_sop.materials.fetch_candidate_phases", fake_fetch)
+        monkeypatch.setattr(cpd_mod, "_submit_cpd_batch", fake_submit)
+        monkeypatch.setattr(
+            "vasp_sop.materials.mp._write_mp_state",
+            lambda *a, **kw: calls.append(("write", sorted(a[1]))))
+        n = cpd_mod.ensure_cpd_phases(cpd, self._config(dopants=["Fe"]))
+        assert n == 1
+        assert ("fetch", ["Al", "Ca", "Fe", "O"]) in calls
+        assert ("submit", ["FeO_mp-9"]) in calls
+        # existing phase untouched, new phase moved in
+        assert (cpd / "Al_mp-1").is_dir()
+        assert (cpd / "FeO_mp-9").is_dir()
+        # mp_state rewritten with merged element set
+        assert ("write", ["Al", "Ca", "Fe", "O"]) in calls
+
+    def test_dry_run_returns_minus_one(self, tmp_path: Path):
+        from vasp_sop.defect import cpd as cpd_mod
+        cpd = self._setup(tmp_path, ["Al", "Ca", "O"], ["Al_mp-1"])
+        assert cpd_mod.ensure_cpd_phases(
+            cpd, self._config(dopants=["Fe"]), dry_run=True) == -1

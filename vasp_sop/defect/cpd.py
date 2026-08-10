@@ -6,6 +6,7 @@ for each, and constructs the chemical-potential diagram with pydefect.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -167,6 +168,66 @@ def _split_target(
             len(candidates), formula, target.name, energies_str,
         )
     return target, others
+
+
+def ensure_cpd_phases(
+    cpd_root: Path,
+    config: PipelineConfig,
+    *,
+    dry_run: bool = False,
+) -> int:
+    """ADR 0015: refresh competing phases when the plan's element set changed.
+
+    Compares ``mp_state.json`` elements (intrinsic + dopant at fetch time)
+    against the current plan; on mismatch, fetches the new phase set into a
+    temp directory, moves only new phase dirs in (existing converged phases
+    are kept untouched), submits them via crisp, and rewrites ``mp_state.json``.
+
+    Returns the number of newly submitted phases (``-1`` when a refresh is
+    needed but skipped in dry-run).
+    """
+    from vasp_sop.materials import fetch_candidate_phases, get_intrinsic_elements
+    from vasp_sop.materials.mp import _write_mp_state
+
+    expected = sorted(
+        set(get_intrinsic_elements(config.formula))
+        | set(config.dopant_elements or [])
+    )
+    state_path = cpd_root / "mp_state.json"
+    try:
+        state = json.loads(state_path.read_text())
+        if state.get("elements") == expected:
+            return 0
+    except (OSError, ValueError):
+        state = None
+    if state is None:
+        return 0  # never fetched (init flow owns first fetch)
+    logger.info(
+        "cpd element set changed (mp_state %s → plan %s); refreshing phases.",
+        state.get("elements"), expected,
+    )
+    if dry_run:
+        return -1
+
+    import shutil
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        fetch_candidate_phases(expected, tmp, use_cache=True)
+        new_dirs = [
+            p for p in sorted(tmp.iterdir())
+            if p.is_dir() and not (cpd_root / p.name).exists()
+        ]
+        for p in new_dirs:
+            shutil.move(str(p), str(cpd_root / p.name))
+        names = [p.name for p in new_dirs]
+        n_submitted = 0
+        if names:
+            jobs = _submit_cpd_batch(cpd_root, names, config)
+            n_submitted = len(jobs)
+    _write_mp_state(cpd_root, expected, source="vasp-sop refresh", cache=False)
+    return n_submitted
 
 
 def _submit_remaining(
