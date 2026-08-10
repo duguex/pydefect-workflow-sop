@@ -692,8 +692,11 @@ def wave3_postprocess(
     )
 
     # Defect VASP finished: converged, failed, or not a calc dir.
+    # ADR 0013-excluded dirs never run, so they must not block wave3.
+    from vasp_sop.defect import is_valid_defect_dir as _valid_df
+
     def _df_job_finished(child: Path) -> bool:
-        if not input_ready(child):
+        if not input_ready(child) or not _valid_df(child):
             return True
         st = js.latest(str(child.resolve()))
         return st in ("converged", "failed", "unconverged")
@@ -706,7 +709,7 @@ def wave3_postprocess(
 
     # On-disk readiness for pydefect: need OUTCAR (or failed/non-calc).
     def _df_ondisk_ok(child: Path) -> bool:
-        if not input_ready(child):
+        if not input_ready(child) or not _valid_df(child):
             return True
         if js.latest(str(child.resolve())) in ("failed", "unconverged"):
             return True
