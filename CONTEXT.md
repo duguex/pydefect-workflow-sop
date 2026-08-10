@@ -109,7 +109,7 @@ The charge state(s) a chain starts from — the median charge for odd-length ran
 _Avoid_: 起点价态, seed source
 
 **Seeded geometry**:
-The starting structure of a defect directory that was replaced by a converged sibling's CONTCAR (charge-state chain, ADR 0010). Geometry only — the WAVECAR is charge-specific and never carried over (`ISTART=0`); pydefect post-processing is unaffected because it reads the initial structure from `defect_entry.json`, not the on-disk POSCAR.
+The starting structure of a defect directory that was replaced by a converged sibling's CONTCAR (charge-state chain, ADR 0010). Geometry only — the WAVECAR is charge-specific and never carried over (`ISTART=0`); pydefect post-processing is unaffected because it reads the initial structure from `defect_entry.json`, not the on-disk POSCAR. **Seeding applies only to the first submission** (no JobStore history); any later retry restarts from the directory's own partial CONTCAR (ADR 0010 rev 2026-08-10) — re-seeding on every retry discarded hundreds of partially relaxed ionic steps.
 _Avoid_: 播种, CONTCAR reuse, 复用结构
 
 **Defect name**:

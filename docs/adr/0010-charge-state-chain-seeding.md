@@ -17,3 +17,8 @@ Seeding is safe for post-processing because pydefect's initial-structure referen
 - Chain unlock delays a charge until its sibling converges; defects remain parallel across chains, so cluster utilization is preserved.
 - A chain root that terminal-fails degrades the chain to pristine-structure starts (with unlock), never blocks it permanently.
 - Seeds are recorded in JobStore as `source="seeded_from_<sibling>"`; POSCAR divergence from `defect_entry.json` is expected and harmless for analysis (post-processing reads the entry structure).
+
+
+## 修订（2026-08-10）
+
+播种只适用于**第一次提交**（JobStore 无历史）：后续任何重试（failed/unconverged/pending）一律 `restart_from_contcar`（从目录自己的部分收敛 CONTCAR 续，`ISTART=1`），直到收敛——不再重新从兄弟播种。动机：Va_Al3_-3 每次重提都从 Va_Al3_-2 重新播种，丢弃自己 100 步的部分收敛（ZBRENT 线搜索振荡 4 轮不收敛）。失败重提也不再依赖 `--retry-failed` 与 auto_retry 一次性限制。
