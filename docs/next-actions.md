@@ -1,3 +1,9 @@
+# Next Actions — +U/SOC 批次（2026-08-10，**已执行** 13:30）
+
+> **批次已完成**（2026-08-10 13:30）：INCAR 重生成 1559+17+80 目录（+U Fe=3/Zn=5、SOC LSORBIT）、续算重置 471 已收敛（清输出+CONTCAR→POSCAR+retry）、failed 重提 733、verify_nelect 修复（ADR 0013 门跳过被筛目录，commit 已落）。
+> **BaAl2B2O7 Fe 缺陷修复**：fingerprint 触发重建（dopant Fe 生效——Fe_Al1/Fe_Ba1 等保留类已生成带 U；Fe_O* 35 个被 ADR 0013 门排除）。
+> **剩余**：观察 +U/SOC 重算收敛（Fe 磁矩 ~4-5μB 抽查）、形成能对比、链播种恢复（根收敛后自动）。
+
 # Next Actions — +U/SOC 批次（2026-08-10，等 2026 根播种结束）
 
 > Last updated: 2026-08-10. 触发点：2026 根 submit 队列接近 0（链式播种消化完）。
