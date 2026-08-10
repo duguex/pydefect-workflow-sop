@@ -336,6 +336,28 @@ def analyze(
         d for d in converged_now
         if not (d / "calc_results.json").is_file() and _has_vasprun(d)
     ]
+    from vasp_sop.vasp.convergence import convergence_verdict
+    # Stale calc_results.json (written when the dir was wrongly judged
+    # converged pre-electronic-gate, then crisp-fetch refreshed its mtime)
+    # silently poisons efnv — electronic_conv=False makes pydefect refuse
+    # and correction.json never appears.  Re-extract whenever the stored
+    # electronic_conv contradicts the current OUTCAR verdict (ADR 0016).
+    for _d in converged_now:
+        _cr = _d / "calc_results.json"
+        if not _cr.is_file():
+            continue
+        try:
+            _stored = json.loads(_cr.read_text()).get("electronic_conv")
+        except Exception:
+            _stored = None
+        _conv = convergence_verdict(_d).converged
+        if _stored is not None and _stored != _conv and _d not in need_cr:
+            logger.warning(
+                "calc_results.json for %s disagrees with verdict "
+                "(electronic_conv=%s vs converged=%s); re-extracting",
+                _d.name, _stored, _conv,
+            )
+            need_cr.append(_d)
     perfect_cr = perfect_dir / "calc_results.json"
     if not perfect_cr.is_file():
         if _has_vasprun(perfect_dir):
