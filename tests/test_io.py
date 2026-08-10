@@ -179,6 +179,23 @@ class TestPatchIncarU:
         assert "ISPIN = 2" in txt
         assert "NSW = 50" in txt, "existing tags must survive"
 
+    def test_duplicate_atom_species_deduped(self, tmp_path: Path):
+        """VASP LDAUU/LDAUL rows are per species, not per atom."""
+        from vasp_sop.vasp.io import patch_incar_u
+        d = tmp_path / "calc"
+        d.mkdir()
+        (d / "INCAR").write_text("NSW = 50\n")
+        (d / "POSCAR").write_text(
+            "title\n1.0\n"
+            "10.0 0.0 0.0\n0.0 10.0 0.0\n0.0 0.0 10.0\n"
+            "Fe O\n4 4\nDirect\n"
+            "0 0 0\n0.5 0.5 0.5\n0.25 0.25 0.25\n0.75 0.75 0.75\n"
+            "0.1 0.1 0.1\n0.2 0.2 0.2\n0.3 0.3 0.3\n0.4 0.4 0.4\n")
+        patch_incar_u(d)
+        txt = (d / "INCAR").read_text()
+        assert "LDAUU = 3.0 0" in txt
+        assert "LDAUL = 2 -1" in txt
+
     def test_noop_without_u_element(self, tmp_path: Path):
         from vasp_sop.vasp.io import patch_incar_u
         d = self._dir(tmp_path, "Ca O")

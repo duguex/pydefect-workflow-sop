@@ -380,6 +380,10 @@ def patch_incar_u(work_dir: Path) -> None:
     species = _poscar_species(work_dir / "POSCAR") or []
     if not species:
         return
+    # _poscar_species returns per-atom symbols (pymatgen iterates the
+    # structure); VASP's LDAUU/LDAUL rows are per POTCAR species, so
+    # dedupe keeping order.
+    species = list(dict.fromkeys(species))
     uu = [str(_U_TABLE[s][0]) if s in _U_TABLE else "0" for s in species]
     ul = [str(_U_TABLE[s][1]) if s in _U_TABLE else "-1" for s in species]
     if all(u == "0" for u in uu):
