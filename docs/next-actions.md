@@ -214,3 +214,17 @@ Plus: deterministic composition selection (lowest energy-per-atom), `cpd_exclude
 - CaAl4O7：72 有效 67 收敛 + Va_Al3_-3 running（最后一个）——收敛后 wave3 自动收尾（cpd 后处理已跑、unitcell 全收敛）→ COMPLETE
 - 切换下一个体系：改 service（去掉目标体系的 --exclude）→ daemon-reload → restart
 - 其他体系在跑的 8 个尾巴（Y2Ti2O7 4/BaAl2B2O7 1/La2Zr2O7 1/SrAl4O7 1）跑完自然结束，不 cancel
+
+## 输入参数全面审计（2026-08-11，Q3 INCAR↔OUTCAR 漂移）
+
+- **Q3 扫描**：全批次 10 体系 defect/cpd/unitcell，INCAR mtime > OUTCAR mtime + 60s → **419 漂移目录**（重生成后未重跑 = 结果与磁盘输入不一致）：
+  - Y2Ti2O7 defect 252（08-09 重生成后未重跑，无 U/SOC）
+  - Gd2GaSbO7:Bi defect 115（+U 批次后未重跑，Gd U=5 丢失）
+  - La2Zr2O7 34（defect + cpd + **band/dos 无 SOC 能带**）
+  - La2SrSc2O7 cpd 11、SrAl4O7 perfect 等 5、CaAl4O7 反位 2（忽略）
+- **用户决策**：① 漂移只检查给 warning（不加自动重跑门）；② 更新输入文件 + 从 CONTCAR 续算准备，**先不提交**
+- **代码**（commit）：`orchestrator._warn_incar_drift`（每进程每目录 warn 一次，挂 cpd/defect-backfill/UC 三处 converged 判定）；`io.prepare_inputs` CLI 路径 run_local 后 `patch_incar(NELM=50)` 兜底（vise 0.9.5 吞 -uis NELM；vise_log 只记录 NSW）——测试 +3
+- **批量执行**：`/tmp/drift-regenerate.py`（幂等，TSV 进度）——418 目录重生成 INCAR（defect API 路径自动 Ti U=4/Gd U=5/SOC + NSW=100/NELM=30；cpd/unitcell CLI 路径 + NELM=50）+ `restart_from_contcar`（POSCAR←CONTCAR + ISTART=1），**不提交**
+- **Sr[FeO2]2 保护**：重生成后恢复 `EDIFFG=-0.01`（用户决策，防 vise 模板回 -0.005）
+- **遗留**：切体系时漂移目录自然重提（POSCAR=CONTCAR 续算）；CpD 存量 211 个 NELM=100 不动（用户决策，正常收敛相无影响）
+- **Ti U=4 根因修复**（commit）：`libs/vise` fork 的 U 表**缺 Ti**（官方 vise 表有 Ti:4）→ 生产（.venv/loop）生成 Y2Ti2O7 defect **从来无 LDAU**（08-10 +U 批次同病）；cpd 的 Ti U=4 是 conda env 旧 vise 产物。修复：`_U_TABLE` 纳入 Ti(4,2)（此前注释 "Ti stays out on purpose" 已过时）+ API/CLI 路径生成后 `patch_incar_u` 兜底（幂等）——Y2Ti2O7 277 个 defect 重生成 100% LDAU（`0 4.0 0`），测试 +2

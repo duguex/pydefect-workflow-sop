@@ -295,3 +295,39 @@ def test_truncated_exempt_from_restart_cap(tmp_path: Path, monkeypatch):
     submitted = _call_wave2(sys, js, monkeypatch)
     assert len(submitted) == 1, submitted
     assert submitted[0][2] == ["long"], submitted
+
+
+def test_drift_warning_once(tmp_path: Path, caplog):
+    """INCAR newer than OUTCAR warns once per dir (advisory, no rerun)."""
+    import logging
+    from vasp_sop.core import orchestrator
+    orchestrator._drift_warned.clear()
+
+    d = tmp_path / "cpd" / "FeO_mp-1"
+    d.mkdir(parents=True)
+    (d / "INCAR").write_text("NSW = 50\n")
+    (d / "OUTCAR").write_text("x\n")
+    import os, time
+    old = time.time() - 1000
+    os.utime((d / "OUTCAR"), (old, old))  # OUTCAR older than INCAR
+
+    with caplog.at_level(logging.WARNING, logger="vasp_sop.core.orchestrator"):
+        orchestrator._warn_incar_drift(d, "TestSys/cpd/FeO_mp-1")
+        orchestrator._warn_incar_drift(d, "TestSys/cpd/FeO_mp-1")
+    warns = [r.message for r in caplog.records if "newer than OUTCAR" in r.message]
+    assert len(warns) == 1, warns
+
+
+def test_no_warning_when_incar_older(tmp_path: Path, caplog):
+    import logging
+    from vasp_sop.core import orchestrator
+    orchestrator._drift_warned.clear()
+
+    d = tmp_path / "cpd" / "FeO_mp-1"
+    d.mkdir(parents=True)
+    (d / "INCAR").write_text("NSW = 50\n")
+    (d / "OUTCAR").write_text("x\n")
+    with caplog.at_level(logging.WARNING, logger="vasp_sop.core.orchestrator"):
+        orchestrator._warn_incar_drift(d, "TestSys/cpd/FeO_mp-1")
+    warns = [r.message for r in caplog.records if "newer than OUTCAR" in r.message]
+    assert warns == [], warns

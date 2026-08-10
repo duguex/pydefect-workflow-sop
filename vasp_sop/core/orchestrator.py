@@ -96,6 +96,38 @@ _IONIC_RETRY_REASONS = frozenset(
 # parameter decision, not more iterations.
 _CPD_MAX_IONIC_RESTARTS = 3
 
+# Once-per-process set of dirs already warned about INCAR/OUTCAR drift.
+_drift_warned: set[str] = set()
+
+
+def _warn_incar_drift(path: Path, label: str) -> None:
+    """Warn (once per dir per process) when INCAR is newer than OUTCAR.
+
+    A regenerated INCAR after a finished run means the on-disk result may
+    no longer match the inputs on disk (e.g. +U/SOC/NELM protocol
+    changes) — the verdict still reads the old OUTCAR as converged, so
+    this is advisory only: the operator decides whether to rerun.
+    """
+    key = str(path.resolve())
+    if key in _drift_warned:
+        return
+    inc = path / "INCAR"
+    out = path / "OUTCAR"
+    try:
+        drifted = (
+            inc.is_file() and out.is_file()
+            and inc.stat().st_mtime > out.stat().st_mtime + 60
+        )
+    except OSError:
+        return
+    if drifted:
+        _drift_warned.add(key)
+        logger.warning(
+            "%s: INCAR newer than OUTCAR — on-disk result may be stale "
+            "(inputs changed after the run), rerun recommended",
+            label,
+        )
+
 
 def _refresh_stale_cpd_diagram(
     sys: Any, js: Any, log_to_logger: bool = False
@@ -343,6 +375,7 @@ def wave2_submit(
                 continue
             verdict = convergence_verdict(cd)
             if verdict.converged:
+                _warn_incar_drift(cd, f"{sys.name}/cpd/{cd.name}")
                 continue
             # Mocks in tests may omit reason; treat missing as non-retryable.
             if getattr(verdict, "reason", None) not in _IONIC_RETRY_REASONS:
@@ -504,6 +537,7 @@ def wave2_submit(
         if check_task_complete(task_dir, task):
             if js.latest(str(task_dir.resolve())) != "converged":
                 js.record(str(task_dir.resolve()), "converged", source="backfill")
+            _warn_incar_drift(task_dir, f"{sys.name}/unitcell/{task}")
             continue
         # Stale JobStore "converged" without required outputs must resubmit.
         if js.latest(str(task_dir.resolve())) == "submitted":
@@ -595,6 +629,7 @@ def wave2_submit(
                         js.record(
                             str(child.resolve()), "converged", source="backfill"
                         )
+                    _warn_incar_drift(child, f"{sys.name}/defect/{child.name}")
                     continue
                 # Still no vasprun: single-point from CONTCAR
                 if latest in ("failed",) and "vasprun_recovery" not in (

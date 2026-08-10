@@ -285,3 +285,67 @@ class TestDielectricProtocol:
         txt = (d / "INCAR").read_text()
         assert "LSORBIT = .TRUE." in txt
         assert "NSW = 1" in txt  # untouched
+
+
+class TestNelmFallback:
+    """vise 0.9.5 drops NELM from -uis — the CLI path must enforce the
+    NELM=50 protocol after generation (regression guard)."""
+
+    def test_cli_generation_gets_nelm50(self, tmp_path: Path, monkeypatch):
+        from vasp_sop.vasp import io as io_mod
+
+        d = tmp_path / "cpd"
+        d.mkdir()
+        (d / "INCAR").write_text("NSW = 50\nNELM = 100\n")  # vise template value
+        for f in ("POSCAR", "POTCAR", "KPOINTS"):
+            (d / f).write_text("x\n")
+        cfg = SimpleNamespace(soc=False, stage2_soc=False, functional="pbesol",
+                              potcar_overrides=[], encut=None)
+        # Force the regeneration path: input_ready must be False — INCAR
+        # missing triggers generation, but we keep it simple by patching
+        # input_ready to False and run_local to no-op.
+        monkeypatch.setattr(io_mod, "input_ready", lambda d: False)
+        monkeypatch.setattr(io_mod, "run_local", lambda *a, **kw: None)
+        io_mod.prepare_inputs(d, cfg, task_type="structure_opt")
+        txt = (d / "INCAR").read_text()
+        assert "NELM = 50" in txt, txt
+        assert "NSW = 50" in txt
+
+
+class TestTiHubbardUFallback:
+    """libs/vise fork's U table lacks Ti — the API path must patch U=4
+    for Ti-containing defect cells (operator decision 2026-08-11)."""
+
+    def test_api_path_patches_ti_u(self, tmp_path: Path):
+        from pymatgen.core import Lattice, Structure
+        from vasp_sop.vasp import io as io_mod
+
+        struct = Structure(Lattice.cubic(5.0), ["Y", "Ti", "O"],
+                           [[0, 0, 0], [0.5, 0.5, 0.5], [0.25, 0.25, 0.25]])
+        struct.to(filename=str(tmp_path / "POSCAR"))
+        cfg = SimpleNamespace(soc=False, stage2_soc=False,
+                              functional="pbesol", encut=None)
+        io_mod.prepare_inputs(tmp_path, cfg, kspacing=0.1, task_type="defect",
+                              extra_uis="SIGMA 0.02 LORBIT 11", charge=0.0)
+        txt = (tmp_path / "INCAR").read_text()
+        assert "LDAU" in txt
+        uu = next(l for l in txt.splitlines() if "LDAUU" in l)
+        assert "4" in uu, uu
+
+    def test_cli_path_patches_ti_u(self, tmp_path: Path, monkeypatch):
+        from pymatgen.core import Lattice, Structure
+        from vasp_sop.vasp import io as io_mod
+
+        struct = Structure(Lattice.cubic(5.0), ["Y", "Ti", "O"],
+                           [[0, 0, 0], [0.5, 0.5, 0.5], [0.25, 0.25, 0.25]])
+        struct.to(filename=str(tmp_path / "POSCAR"))
+        monkeypatch.setattr(io_mod, "run_local", lambda *a, **kw: None)
+        cfg = SimpleNamespace(soc=False, stage2_soc=False, functional="pbesol",
+                              encut=None, potcar_overrides=[])
+        io_mod.prepare_inputs(tmp_path, cfg, task_type="structure_opt")
+        txt = (tmp_path / "INCAR").read_text()
+        # CLI path with mocked run_local skips vise entirely; the
+        # fallback patches must still land Ti U=4.
+        assert "LDAU" in txt
+        uu = next(l for l in txt.splitlines() if "LDAUU" in l)
+        assert "4" in uu, uu

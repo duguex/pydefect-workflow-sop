@@ -136,6 +136,16 @@ def prepare_inputs(
     # vise never sets SOC tags — patch AFTER run_local so freshly
     # generated INCAR inherits LSORBIT/ISYM without clobbering other tags.
     _apply_soc_tags(work_dir, config, task_type)
+    # vise 0.9.5 drops `NELM` from -uis (vise_log records NSW only): the
+    # CLI-path protocol (cpd/band/dos/dielectric/structure_opt) is
+    # NELM=50 — enforce it here so regenerated INCARs cannot drift to
+    # vise's template default (100).  (defect goes through the API path,
+    # which already enforces NELM=30.)
+    patch_incar(work_dir, NELM=50)
+    # DFT+U: vise CLI applies set_hubbard_u to defect tasks only; patch
+    # U-table species (incl. Ti, missing from the libs/vise fork's table)
+    # for cpd/band/dos/dielectric too — idempotent.
+    patch_incar_u(work_dir)
 
 
 def _prepare_inputs_vise_api(
@@ -210,6 +220,10 @@ def _prepare_inputs_vise_api(
                    if k not in ("NSW", "NELM", "EDIFF")})
     if config.soc and not config.stage2_soc:
         patch_incar(work_dir, LSORBIT=".TRUE.", ISYM=-1)
+    # libs/vise fork's U table lacks Ti (official vise has U=4): rely on
+    # set_hubbard_u for the rest, then patch any U-table species that the
+    # fork dropped (idempotent — no-op when LDAU already present).
+    patch_incar_u(work_dir)
 
 
 def check_complete(path: Path) -> bool:
@@ -395,11 +409,14 @@ def patch_incar(path: Path, **kwargs: str | int | float) -> None:
 # vise's CLI path applies set_hubbard_u only to defect tasks; cpd and
 # structure_opt templates come out without LDAU tags.  We patch those
 # INCARs directly.  U values follow vise's u_parameter_set.yaml
-# (vise/input_set/datasets/u_parameter_set.yaml).  Ti stays out on purpose:
-# the defect pipeline generates Ti without U (3d Mn-Ni subset), so patching
-# cpd Ti would create an inconsistency.
+# (vise/input_set/datasets/u_parameter_set.yaml).  Ti (U=4) is included:
+# the official vise table has it, and the 2026 batch unified on U=4 for
+# Y2Ti2O7 (operator decision 2026-08-11) — the libs/vise fork's table
+# lacks Ti, so set_hubbard_u alone silently drops the tag; patching here
+# keeps cpd/defect/band/dos consistent.
 _U_TABLE: dict[str, tuple[float, int]] = {
     # element -> (U [eV], L quantum number)
+    "Ti": (4.0, 2),
     "Mn": (3.0, 2), "Fe": (3.0, 2), "Co": (3.0, 2), "Ni": (3.0, 2),
     "Cu": (5.0, 2), "Zn": (5.0, 2),
     "Ce": (5.0, 3), "Pr": (5.0, 3), "Nd": (5.0, 3), "Sm": (5.0, 3),
