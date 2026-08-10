@@ -182,3 +182,10 @@ Plus: deterministic composition selection (lowest energy-per-atom), `cpd_exclude
 - `libs/` forks are canonical; integrate via Python import, not subprocess
 - Wave decoupling = independent invocability, not just file moves
 - Phase state → explicit `state.json`, filesystem as migration fallback
+
+## 两阶段 SOC（ADR 0014，2026-08-10 决策）
+
+- **机制已实现**（commit）：`stage2_soc` plan 开关（默认 False）——阶段 1 非 SOC 收敛后自动补算（Bi_* 续算 / 其余 NSW=0 单点）；prepare_inputs 在 stage2_soc 模式下不加 LSORBIT
+- **执行纪律**：单体系串行（按完成度）：CaAl4O7 → SrAl4O7 → Gd2GaSbO7:Bi → La2Zr2O7 → Y2Sn2O7 → La2SrSc2O7 → Y2Ti2O7（含 Bi 缺陷重建）；不破坏已算成果
+- **遗留**：5 个 SOC 体系 INCAR 曾去 SOC（605 个）+ cancel 36 个——按用户指示保持现状；实施两阶段时统一处理（已算的补记 soc_done 避免重算）
+- **Y2Ti2O7**：defect_in.yaml 早于 plan dopant Bi——含 Bi 缺陷缺失，实施时重建（BaAl2B2O7 同型案例）
