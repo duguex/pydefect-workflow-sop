@@ -228,3 +228,15 @@ Plus: deterministic composition selection (lowest energy-per-atom), `cpd_exclude
 - **Sr[FeO2]2 保护**：重生成后恢复 `EDIFFG=-0.01`（用户决策，防 vise 模板回 -0.005）
 - **遗留**：切体系时漂移目录自然重提（POSCAR=CONTCAR 续算）；CpD 存量 211 个 NELM=100 不动（用户决策，正常收敛相无影响）
 - **Ti U=4 根因修复**（commit）：`libs/vise` fork 的 U 表**缺 Ti**（官方 vise 表有 Ti:4）→ 生产（.venv/loop）生成 Y2Ti2O7 defect **从来无 LDAU**（08-10 +U 批次同病）；cpd 的 Ti U=4 是 conda env 旧 vise 产物。修复：`_U_TABLE` 纳入 Ti(4,2)（此前注释 "Ti stays out on purpose" 已过时）+ API/CLI 路径生成后 `patch_incar_u` 兜底（幂等）——Y2Ti2O7 277 个 defect 重生成 100% LDAU（`0 4.0 0`），测试 +2
+
+### 切体系时提交漂移重算（用户决策：先不提交）
+
+漂移目录已就绪（新 INCAR + POSCAR=CONTCAR + ISTART=1），但**未提交**——loop 的 verdict 只看 OUTCAR，会接受旧结果为收敛，**不会自动重跑**。切到下列体系时需强制重提（`vasp-sop batch retry` 或清 OUTCAR 后等 loop 重提）：
+
+| 体系 | 目录数 | 必跑原因 |
+|---|---|---|
+| Y2Ti2O7 | 277 defect | Ti U=4 + SOC（08-09 重生成后未重跑）|
+| Gd2GaSbO7:Bi | 115 defect + cpd | +U 批次后未重跑 |
+| La2Zr2O7 | 20 defect + band/dos + cpd | +U/SOC 批次后未重跑；**band/dos 旧结果无 SOC 能带** |
+| La2SrSc2O7 | 11 cpd | 重生成后未重跑 |
+| SrAl4O7 | perfect + 2 反位 | perfect 协议更新（能量差预期 3e-8 级，2025 先例）|
