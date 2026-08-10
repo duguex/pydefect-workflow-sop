@@ -202,8 +202,11 @@ def _submit_cpd_batch(
     jobs: list[VaspJob] = []
     for d in dirnames:
         work_dir = cpd_root / d
-        prepare_inputs(work_dir, config)
-        patch_incar_u(work_dir)  # vise CLI skips set_hubbard_u for cpd tasks
+        # Explicit -t structure_opt: vise 0.9.5's set_hubbard_u is only
+        # honoured on explicit tasks (bare `vise vs` skips it, leaving
+        # cpd INCARs without LDAU tags).
+        prepare_inputs(work_dir, config, task_type="structure_opt")
+        patch_incar_u(work_dir)  # ISPIN fallback; LDAU no-op when present
         outcar = work_dir / "OUTCAR"
         if outcar.is_file():
             logger.info("Skipping %s: OUTCAR exists", d)

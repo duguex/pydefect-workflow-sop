@@ -210,6 +210,17 @@ class TestPatchIncarU:
         assert "LDAUU = 5 0" in (d / "INCAR").read_text(), \
             "existing U must not be overwritten"
 
+    def test_ispin_added_when_ldau_present_but_spin_missing(self, tmp_path: Path):
+        """vise's cpd template emits LDAU (with -t structure_opt) but no
+        ISPIN — spin polarization must still be forced for U species."""
+        from vasp_sop.vasp.io import patch_incar_u
+        d = self._dir(tmp_path, "Fe O")
+        (d / "INCAR").write_text("LDAU = True\nLDAUU = 3 0\nLDAUL = 2 -1\n")
+        patch_incar_u(d)
+        txt = (d / "INCAR").read_text()
+        assert "ISPIN = 2" in txt
+        assert "LDAUU = 3 0" in txt, "existing U values untouched"
+
     def test_f_element_lmaxmix6(self, tmp_path: Path):
         from vasp_sop.vasp.io import patch_incar_u
         d = self._dir(tmp_path, "Gd O")

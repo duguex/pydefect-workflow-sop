@@ -375,8 +375,6 @@ def patch_incar_u(work_dir: Path) -> None:
     incar = work_dir / "INCAR"
     if not incar.is_file():
         return
-    if "LDAU" in incar.read_text(errors="ignore"):
-        return
     species = _poscar_species(work_dir / "POSCAR") or []
     if not species:
         return
@@ -384,6 +382,12 @@ def patch_incar_u(work_dir: Path) -> None:
     # structure); VASP's LDAUU/LDAUL rows are per POTCAR species, so
     # dedupe keeping order.
     species = list(dict.fromkeys(species))
+    # ISPIN=2 for any U-table species: vise's cpd template leaves spin
+    # polarization out even for magnetic FeO.
+    if any(s in _U_TABLE for s in species):
+        patch_incar(work_dir, ISPIN=2)
+    if "LDAU" in incar.read_text(errors="ignore"):
+        return
     uu = [str(_U_TABLE[s][0]) if s in _U_TABLE else "0" for s in species]
     ul = [str(_U_TABLE[s][1]) if s in _U_TABLE else "-1" for s in species]
     if all(u == "0" for u in uu):
