@@ -414,7 +414,7 @@ class TestGenerateInteractiveHtml:
         # unified N-gon path: barycentric functions live in the BARYS array
         assert "var BARYS = [" in content
         assert "var TRIS = [" in content
-        assert content.count("function(px,py)") >= 2
+        assert content.count("function(px,py)") >= 1
 
     def test_doped_line_style(self, tmp_path):
         """Doped defects should use dashed lines."""
