@@ -120,3 +120,41 @@ def test_fresh_cpd_submits_normally(tmp_path: Path, monkeypatch):
     submitted = _call_wave2(sys, js, monkeypatch)
     assert [s[1] for s in submitted] == [None], submitted
     assert js.latest(str(d)) == "submitted"
+
+
+def test_electronic_not_conv_excluded_from_auto_retry(
+    tmp_path: Path, monkeypatch
+):
+    """A deterministic NELM exhaustion reproduces with identical inputs —
+    auto_retry must not burn a rerun on it (needs a parameter decision)."""
+    from vasp_sop.vasp.convergence import (
+        REASON_ELECTRONIC_NOT_CONV,
+        ConvergenceVerdict,
+    )
+    d = tmp_path / "cpd" / "Al13Fe4_mp-1"
+    d.mkdir(parents=True)
+    (d / "INCAR").write_text("NSW = 50\n")
+    js = FakeJobStore()
+    js.record(str(d), "failed", reason="vasp_crash")
+    sys = FakeSystem([d])
+
+    import vasp_sop.vasp.convergence as conv_mod
+    monkeypatch.setattr(
+        conv_mod, "convergence_verdict",
+        lambda d, task_type="": ConvergenceVerdict(
+            False, REASON_ELECTRONIC_NOT_CONV))
+    submitted = _call_wave2(sys, js, monkeypatch, retry_failed=True)
+    assert submitted == [], submitted
+
+
+def test_transient_failure_still_auto_retried(tmp_path: Path, monkeypatch):
+    """A vasp_crash (no electronic evidence on disk) keeps the one-shot
+    auto_retry — the crash may be transient (node/limits)."""
+    d = tmp_path / "cpd" / "FeO_mp-1"
+    d.mkdir(parents=True)
+    (d / "INCAR").write_text("NSW = 50\n")
+    js = FakeJobStore()
+    js.record(str(d), "failed", reason="vasp_crash")
+    sys = FakeSystem([d])
+    submitted = _call_wave2(sys, js, monkeypatch, retry_failed=True)
+    assert [s[1] for s in submitted] == ["auto_retry"], submitted

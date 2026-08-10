@@ -439,6 +439,13 @@ def wave2_submit(
                 if any(r.get("source") == "auto_retry"
                        for r in js.history(cp)):
                     continue
+                # ADR 0017: a deterministic electronic failure (NELM
+                # exhaustion) reproduces with identical inputs — a rerun
+                # from the pristine POSCAR fails identically, so it is
+                # excluded from auto_retry (needs a parameter decision).
+                if getattr(convergence_verdict(cd), "reason", None) \
+                        == "electronic_not_conv":
+                    continue
                 _submit_or_skip(cd, f"phase:{cd.name}", sys.name, dry_run, info,
                                 js=js, source="auto_retry", priority=priority)
                 continue

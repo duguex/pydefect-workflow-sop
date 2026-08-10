@@ -22,6 +22,8 @@ SrAl4O7 推进中暴露四个相互纠缠的缺口，导致 loop 每 2 分钟空
 
 wave2（任何相位）对 cpd 相：verdict 未收敛 且 reason ∈ {force_gate_fail, nsw_exhausted, nsw_early_exit, missing_forces} 且 JobStore 非 submitted → `restart_from_contcar` + 提交（source=`ionic_restart`）。**上限 3 次**（`_CPD_MAX_IONIC_RESTARTS`）——力停滞（EDIFFG 过严）时停止盲重提，转人工参数决策。`electronic_not_conv`/`truncated`/`missing_outcar` 不自动重提（同参数重算无意义）。
 
+补充（2026-08-11）：COMPETING 段的 `--retry-failed` auto_retry（ADR 0007，原 POSCAR 一次重试）同样排除 `electronic_not_conv`——SCF 确定性复现，重跑必败；transient 类（vasp_crash/TIME-LIMIT 截断）保留一次重试。
+
 ### 3. 化学势图 stale 检测 + 自动重建
 
 - `cpd_diagram_stale(cpd_root, config)`：plan 元素（formula + dopant_elements）⊄ standard_energies.yaml 元素 → stale。
