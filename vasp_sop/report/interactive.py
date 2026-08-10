@@ -31,7 +31,10 @@ instead of silently blanking the page.
 from __future__ import annotations
 
 import json
+import logging
 import math
+
+logger = logging.getLogger(__name__)
 from pathlib import Path
 from typing import Any
 
