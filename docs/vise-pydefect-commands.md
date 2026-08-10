@@ -29,6 +29,8 @@ vise vs -x pbesol -t dielectric_dfpt -k 2
 ```
 
 > defect 目录的输入生成走 vise Python API（`CategorizedInputOptions(charge=q)`，NELECT 由 vise 计算），无 CLI 命令。
+> **kspacing 恒为 0.1**（`builder.py:271` 显式传参，与旧脚本 `-k 0.1` 一致）→ 缺陷超胞（最小边长 ~10Å）无条件 1×1×1 Gamma 单 k 点。
+> CLI 路径的 `-k 2.0`（默认）只作用于 band/dos/dielectric/cpd/structure_opt。
 
 ## pydefect（22 条）
 
