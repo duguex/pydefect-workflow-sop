@@ -314,6 +314,10 @@ def verify_nelect(defect_root: Path, config: PipelineConfig) -> list[str]:
     for wd in sorted(defect_root.iterdir()):
         if not wd.is_dir():
             continue
+        # ADR 0013: excluded dirs are never submitted or analyzed — their
+        # inputs (possibly absent) are not part of the defect set.
+        if wd.name != "perfect" and not is_valid_defect_dir(wd):
+            continue
         if not (wd / "POSCAR").is_file():
             continue
         comp = _poscar_composition(wd)
