@@ -47,6 +47,35 @@ REASON_FORCE_GATE_FAIL = "force_gate_fail"
 REASON_MISSING_FORCES = "missing_forces"
 REASON_NSW_EARLY_EXIT = "nsw_early_exit"
 REASON_NSW_EXHAUSTED = "nsw_exhausted"
+REASON_ELECTRONIC_NOT_CONV = "electronic_not_conv"
+
+# VASP prints "reached required accuracy" even when the final electronic
+# step hit NELM — with a warning that forces/energies may be spurious
+# ("increasing NELM, if you were close to").  pydefect's electronic_conv
+# reads the vasprun scsteps and calls this unconverged; so do we (ADR 0016).
+_NELM_WARN_MARK = "increasing NELM"
+
+_nelm_cache: dict[tuple[str, int], bool] = {}
+
+
+def _has_nelm_warning(outcar: Path) -> bool:
+    """True when OUTCAR contains VASP's NELM-exhaustion warning anywhere
+    (it can be MBs before EOF when more ionic steps followed)."""
+    try:
+        key = (str(outcar), outcar.stat().st_mtime)
+    except OSError:
+        return False
+    cached = _nelm_cache.get(key)
+    if cached is not None:
+        return cached
+    try:
+        hit = _NELM_WARN_MARK in outcar.read_text(errors="ignore")
+    except OSError:
+        hit = False
+    if len(_nelm_cache) > 4096:
+        _nelm_cache.clear()
+    _nelm_cache[key] = hit
+    return hit
 
 _FORCE_HDR = "TOTAL-FORCE (eV/Angst)"
 _TIMING_MARK = "General timing and accounting"
@@ -215,6 +244,19 @@ def convergence_verdict(path: Path, task_type: str = "") -> ConvergenceVerdict:
         verdict = ConvergenceVerdict(
             False, REASON_TRUNCATED, max_f=_last_max_force(outcar)
         )
+        _verdict_cache.setdefault(outcar, {})[task_type] = (mtime, verdict)
+        _mark_dirty(outcar, task_type)
+        return verdict
+
+    # Electronic convergence gate (ADR 0016): VASP's own "reached required
+    # accuracy" can be a false positive when the last electronic step hit
+    # NELM (VASP warns "spurious results ... increasing NELM").  pydefect
+    # reads vasprun scsteps and marks electronic_conv=False — the energy is
+    # unreliable, so the verdict must be unconverged too.  The warning can
+    # sit MBs before EOF (later ionic steps follow), so check the tail
+    # window first, then the whole file.
+    if _NELM_WARN_MARK in tail or _has_nelm_warning(outcar):
+        verdict = ConvergenceVerdict(False, REASON_ELECTRONIC_NOT_CONV)
         _verdict_cache.setdefault(outcar, {})[task_type] = (mtime, verdict)
         _mark_dirty(outcar, task_type)
         return verdict

@@ -126,3 +126,7 @@ _Avoid_: calling the `test` partition "the short queue" as if it were a time lim
 **CPD phase refresh**:
 The competing-phase set must cover every element in the defect chemistry — intrinsic elements plus dopants (ADR 0015). `ensure_cpd_phases` compares `cpd/mp_state.json` `elements` (recorded at fetch time) against the current plan; on mismatch it fetches the new phase set into a temp dir, moves only new dirs in (existing converged phases untouched), submits them, and rewrites mp_state.json. Fixes the failure mode where a dopant is added to plan.yaml after cpd was fetched — `standard_energies.yaml` then lacks the dopant's chemical potential and pydefect `dei` crashes (`KeyError` on formation-energy composition).
 _Avoid_: 手动补 standard_energies, cpd 全量重建
+
+**Electronic convergence gate**:
+The convergence verdict refuses an OUTCAR that contains VASP's NELM-exhaustion warning (`increasing NELM`/`spurious results`) — VASP can print "reached required accuracy" on a false positive when the last electronic step hit NELM and the forces happen to fall below EDIFFG, but the energy is unreliable (ADR 0016). This aligns vasp-sop's verdict with pydefect's `electronic_conv` (read from vasprun scsteps). The warning can sit MBs before EOF, so the check falls back to a full-file scan with an mtime cache.
+_Avoid_: 只信 "reached required accuracy", 忽略 NELM 警告
