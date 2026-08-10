@@ -1,15 +1,15 @@
 # Next Actions — 2026-08-11 阶段收尾
 
-> **CaAl4O7 全流程 COMPLETE**（08-10 22:34）：72/72 defect 收敛 → 22 缺陷形成能 + transition_levels + 互动 HTML（修复后补生成）。analyze full。
-> **SrAl4O7 推进中**（08-10 22:38 解除 exclude）：196 defect，154 已收敛（旧参数结果保留），112/185 INCAR 已更新 NELM=30/EDIFF=1e-4；cpd Fe 相已收敛。
-> **本阶段修复链**（commit a417f59→5fceedc）：stale-converged 重判 / sidecar schema v2 / cr 一致性门 / NELM=30+EDIFF=1e-4 协议 / 互动 HTML 凸包+耳切（N≥3）/ HTML 失败降级 partial。459 passed。
-> **已验证结论**：perfect 参数漂移（SIGMA 0.1→0.02 重算）能量差 3e-8 eV——零影响；主流 defect 单步电子 16-30（LOOP/LOOP+ 计数，勿用 grep "F="——误匹配 NGXF=）。
+> **CaAl4O7 相位 COMPLETE**（08-11 01:41 修复后）：72/72 defect → 22 形成能 + transition_levels + HTML；analyze full。
+> **SrAl4O7 analyze full 72/72（22 类型含 5 个 Fe）**——Fe 形成能补齐（化学势图自动重建）；相位差最后 1 个 cpd 相 Sr[FeO2]2（自动 ionic restart 中，3 次上限后需参数决策：EDIFFG=-0.005 过严，力停在 0.03-0.04）。
+> **本阶段修复链**（commit a417f59→**662e7d9**）：stale-converged 重判 / sidecar v2→v3（NELM 门只认最后离子步）/ cr 一致性门 / NELM=30 协议 / HTML 凸包+耳切 / **相位门反位过滤（ADR 0013）** / **cpd 相 ionic 自动续算（上限 3）** / **化学势图 stale 自动重建+重 analyze** / **analyze 类型覆盖门（防假 full）** / dei 接受 .yaml。480 passed。
+> **已验证结论**：perfect 参数漂移（SIGMA 0.1→0.02 重算）能量差 3e-8 eV——零影响；主流 defect 单步电子 16-30（LOOP/LOOP+ 计数，勿用 grep "F="——误匹配 NGXF=）；Al13Fe4 的 NELM 警告在早期离子步（后续收敛）→ 自动转 converged，**无需重算**。
 > **待办**（详见 /tmp/handoff-vasp-sop-2026-08-11.md）：
-> 1. 监控 SrAl4O7 NELM=30 收敛行为（耗尽循环目录按 Va_Ca1_0 模式诊断）
+> 1. **Sr[FeO2]2**（SrAl4O7）：3 次 ionic restart 上限耗尽后需参数决策——建议 EDIFFG 放宽（-0.005→-0.03，与 defect 一致）或接受其不收敛（若不在 Fe 凸包顶点）
 > 2. 两阶段 SOC（ADR 0014 机制已实现，5 个 SOC 体系排到时启用）
 > 3. Y2Ti2O7 Bi 缺陷重建（defect_in 早于 plan dopant Bi）
-> 4. CaAl4O7 perfect/calc_results.json 缺失（无害，analyze 短路不补）
-> 5. 2025 恢复：11 个 NELM 警告目录重算 + perfect 参数漂移检查（INCAR↔OUTCAR 回显）
+> 4. CaAl4O7 perfect/calc_results.json 缺失（无害，analyze 短路不补；将来完整 analyze 自动补）
+> 5. 2025 恢复：11 个 NELM 警告目录重算 + perfect 参数漂移检查（INCAR↔OUTCAR 回显）——**注意 NELM 门 refine 后部分目录可能自动转 converged（先重判再重算）**
 > 6. poll giving-up 语义残留（不影响收敛，纯清理）
 > 7. 填隙：全部 10 体系 plan `interstitials: false`——需要时开 plan + 重建（用户未定）
 > 8. 缓存停用（用户搁置）
