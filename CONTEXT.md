@@ -37,7 +37,10 @@ pydefect's per-calculation result record, including whether the calculation ioni
 _Avoid_: results json
 
 **Result reuse**:
-The capability of answering "has this calculation been run, what was its result" for previously-computed calculations. Owned by crisp (`crisp cache`, wrapping the `vasp-cache` library); vasp-sop never touches the result store — crisp caches completed results and materializes cached outputs back into the worktree.
+The capability of manually admitting a converged structural-relaxation result
+and using its CONTCAR to prefill a later normal run. Owned by crisp (`crisp
+cache`, wrapping the `vasp-cache` library); vasp-sop never reads or writes the
+result store and never skips a submission because of a cache entry.
 _Avoid_: vasp-cache (as a vasp-sop concept), results cache, cache lookup
 
 **Calculation state**:

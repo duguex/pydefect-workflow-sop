@@ -19,7 +19,8 @@ import yaml
 from pymatgen.core import Composition
 
 from vasp_sop.materials import list_phases
-from vasp_sop.vasp.io import check_complete, patch_incar_u, prepare_inputs
+from vasp_sop.vasp.io import (check_complete, patch_incar_magmom,
+                              patch_incar_u, prepare_inputs)
 from vasp_sop.defect import pydefect_adapter as _pdad
 from vasp_sop.core.jobs import VaspJob, submit_vasp
 
@@ -331,6 +332,7 @@ def _submit_cpd_batch(
         # cpd INCARs without LDAU tags).
         prepare_inputs(work_dir, config, task_type="structure_opt")
         patch_incar_u(work_dir)  # ISPIN fallback; LDAU no-op when present
+        patch_incar_magmom(work_dir)  # SCF moment lock (input_ready early-exit path)
         outcar = work_dir / "OUTCAR"
         if outcar.is_file():
             logger.info("Skipping %s: OUTCAR exists", d)

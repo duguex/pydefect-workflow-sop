@@ -129,23 +129,26 @@ def prepare_inputs(
     # DFT+U always on (ADR 0012): vise auto-adapts per element — U-table
     # elements (3d Mn-Ni, Cu, Zn, lanthanides) get U, others none.
     cmd += " --options set_hubbard_u True"
-    uis_flags = f"NSW 50 NELM 50 {extra_uis} {encut_opt}".strip()
+    uis_flags = f"NSW 50 NELM 50 EDIFF 1e-4 {extra_uis} {encut_opt}".strip()
     cmd += f" -uis {uis_flags}"
 
     run_local(cmd, cwd=work_dir, timeout=300)
     # vise never sets SOC tags — patch AFTER run_local so freshly
     # generated INCAR inherits LSORBIT/ISYM without clobbering other tags.
     _apply_soc_tags(work_dir, config, task_type)
-    # vise 0.9.5 drops `NELM` from -uis (vise_log records NSW only): the
-    # CLI-path protocol (cpd/band/dos/dielectric/structure_opt) is
-    # NELM=50 — enforce it here so regenerated INCARs cannot drift to
-    # vise's template default (100).  (defect goes through the API path,
-    # which already enforces NELM=30.)
-    patch_incar(work_dir, NELM=50)
+    # vise 0.9.5 drops `NELM`/`EDIFF` from -uis (vise_log records NSW
+    # only): the CLI-path protocol (cpd/band/dos/dielectric/
+    # structure_opt) is NELM=50 + EDIFF=1e-4 (operator decisions
+    # 2026-08-11 — the vise template's 1e-7 burned ~2x electronic steps
+    # for no force-level gain; EDIFFG governs ionic accuracy).  (defect
+    # goes through the API path, which already enforces NELM=30 /
+    # EDIFF=1e-4.)
+    patch_incar(work_dir, NELM=50, EDIFF="1e-4")
     # DFT+U: vise CLI applies set_hubbard_u to defect tasks only; patch
     # U-table species (incl. Ti, missing from the libs/vise fork's table)
     # for cpd/band/dos/dielectric too — idempotent.
     patch_incar_u(work_dir)
+    patch_incar_magmom(work_dir)
 
 
 def _prepare_inputs_vise_api(
@@ -224,6 +227,7 @@ def _prepare_inputs_vise_api(
     # set_hubbard_u for the rest, then patch any U-table species that the
     # fork dropped (idempotent — no-op when LDAU already present).
     patch_incar_u(work_dir)
+    patch_incar_magmom(work_dir)
 
 
 def check_complete(path: Path) -> bool:
@@ -432,7 +436,8 @@ def patch_incar_u(work_dir: Path) -> None:
 
     No-op when LDAU is already present, the INCAR is missing, or no
     species maps to a U.  A patched INCAR also forces ISPIN=2, matching
-    the vise defect template.
+    the vise defect template, and initial magnetic moments via
+    patch_incar_magmom.
     """
     incar = work_dir / "INCAR"
     if not incar.is_file():
@@ -459,6 +464,36 @@ def patch_incar_u(work_dir: Path) -> None:
     patch_incar(work_dir, LDAU=True, LDAUTYPE=2, LDAUPRINT=1,
                 LMAXMIX=lmaxmix, LDAUU=" ".join(uu), LDAUL=" ".join(ul),
                 ISPIN=2)
+
+
+# Initial SCF moments (μB) per species, high-spin d-shell values (VASP
+# recommendation).  Only species with a settled decision get entries;
+# non-magnetic atoms default to 0.0.
+_MAGMOM_TABLE: dict[str, float] = {
+    "Fe": 5.0,
+}
+
+
+def patch_incar_magmom(work_dir: Path) -> None:
+    """Set MAGMOM in POSCAR atom order (0 for non-magnetic species).
+
+    Without explicit moments every restart re-runs SCF from VASP's
+    default 1.0/site, which can land in a metastable magnetic basin —
+    Sr[FeO2]2 drifted 80→72→56 μB across TIME-LIMIT restarts (~5 eV
+    above the ferromagnetic ground state) while NSW was burned on the
+    wrong spin state.  Idempotent (MAGMOM overwritten only when the
+    species set contains a magnetic element).
+    """
+    incar = work_dir / "INCAR"
+    if not incar.is_file():
+        return
+    species = _poscar_species(work_dir / "POSCAR") or []
+    if not species:
+        return
+    if not any(s in _MAGMOM_TABLE for s in species):
+        return
+    moments = " ".join(str(_MAGMOM_TABLE.get(s, 0.0)) for s in species)
+    patch_incar(work_dir, MAGMOM=moments)
 
 
 # ── POTCAR restore (ADR 0007: input restore) ─────────────────────────────

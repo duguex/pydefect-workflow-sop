@@ -38,15 +38,18 @@ export MP_API_KEY="your-api-key-here"
 
 > 也支持 `PMG_MAPI_KEY` 环境变量（pymatgen 格式）。
 
-### CRISP 集成的结果复用检查
+### CRISP 集成的结构预填检查
 
-结果复用是 CRISP 的集成能力（`crisp cache` 子命令包装 `vasp-cache` 库）——vasp-sop 不直接读写结果缓存，只把结果当作磁盘上的文件。确认 CRISP 缓存可用：
+结构缓存是 CRISP 的可选手动能力（`crisp cache` 包装 `vasp-cache`）——
+vasp-sop 不直接读写结果缓存，只把 `CONTCAR` 当作磁盘上的普通输入。已登记
+且通过共享收敛判定的条目可在 `crisp submit` 时预填结构，但作业仍会正常提交：
 
 ```bash
 crisp cache status
 ```
 
-首次使用时缓存为空，这是正常的。缓存数据存储在 `$VASP_CACHE_ROOT` 指定的目录（默认 `~/.cache/vasp_cache`）。
+首次使用时缓存为空，这是正常的。缓存数据存储在 `$VASP_CACHE_ROOT` 指定的
+目录（默认 `/mnt/shared/vasp_cache`）。
 
 ### HPC 环境（可选）
 

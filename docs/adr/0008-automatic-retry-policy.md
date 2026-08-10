@@ -1,6 +1,11 @@
 # Automatic retry policy: track failures and resubmit until converged or terminal
 
 **Status**: Supersedes ADR 0007
+>
+> **2026-08-11 cache addendum** — crisp's automatic submit-restore and
+> daemon auto-write paths were retired. `crisp cache put` remains the manual
+> admission gate, while vasp-sop has no cache-hit materialization path; retry
+> decisions operate only on files and diagnostics in the worktree.
 
 ## Context
 
@@ -56,13 +61,13 @@ by a long-running batch loop:
    exclusion is a scope decision, not a failure bucket — CONTEXT.md).
    Never skips a failed phase to finish CPD (ADR 0004: COMPLETE requires
    every engaged calculation converged).
-6. **vasp-cache poison defense** — two layers:
-   - crisp: `vasp_cache.api.put` must reject non-converged runs (route to
-     `discarded_candidates` instead of `entries`);
-   - vasp-sop: retry path refuses to materialize non-converged cache hits.
+6. **vasp-cache admission defense** — `crisp cache put` must reject
+   non-converged runs (route them to `discarded_candidates` instead of
+   `entries`). vasp-sop has no result-cache restore path; its retry logic
+   operates on the calculation files it finds on disk.
    (2026-08-08: a crashed run was cached, collided on composition-based
-   identity across defect sites, and produced an infinite
-   `vasp_crash` retry loop until manually purged.)
+   identity across defect sites, and produced an infinite `vasp_crash` retry
+   loop until manually purged.)
 7. **`--retry-failed` retained** — unchanged semantics: the human reset
    channel for already-terminal directories (complements automatic retry,
    which only covers not-yet-terminal failures).

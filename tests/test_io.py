@@ -349,3 +349,52 @@ class TestTiHubbardUFallback:
         assert "LDAU" in txt
         uu = next(l for l in txt.splitlines() if "LDAUU" in l)
         assert "4" in uu, uu
+
+
+class TestMagmomPatch:
+    """SCF moment lock: MAGMOM per POSCAR atom order (Fe=5.0, others 0)."""
+
+    def test_fe_moments_in_atom_order(self, tmp_path: Path):
+        from pymatgen.core import Lattice, Structure
+        from vasp_sop.vasp import io as io_mod
+
+        struct = Structure(Lattice.cubic(5.0), ["Sr", "Fe", "O"],
+                           [[0, 0, 0], [0.5, 0.5, 0.5], [0.25, 0.25, 0.25]])
+        struct.to(filename=str(tmp_path / "POSCAR"))
+        (tmp_path / "INCAR").write_text("ISPIN = 2\n")
+        io_mod.patch_incar_magmom(tmp_path)
+        txt = (tmp_path / "INCAR").read_text()
+        mag = next(l for l in txt.splitlines() if "MAGMOM" in l)
+        assert mag == "MAGMOM = 0.0 5.0 0.0", mag
+
+    def test_no_magmom_without_magnetic_species(self, tmp_path: Path):
+        from pymatgen.core import Lattice, Structure
+        from vasp_sop.vasp import io as io_mod
+
+        struct = Structure(Lattice.cubic(5.0), ["Sr", "Al", "O"],
+                           [[0, 0, 0], [0.5, 0.5, 0.5], [0.25, 0.25, 0.25]])
+        struct.to(filename=str(tmp_path / "POSCAR"))
+        (tmp_path / "INCAR").write_text("ISPIN = 2\n")
+        io_mod.patch_incar_magmom(tmp_path)
+        assert "MAGMOM" not in (tmp_path / "INCAR").read_text()
+
+
+class TestCpdEdiffProtocol:
+    """CLI-path EDIFF=1e-4 (operator decision 2026-08-11, incl. cpd)."""
+
+    def test_cli_generation_gets_ediff_1e4(self, tmp_path: Path, monkeypatch):
+        from vasp_sop.vasp import io as io_mod
+
+        d = tmp_path / "cpd"
+        d.mkdir()
+        (d / "INCAR").write_text("NSW = 50\nNELM = 100\nEDIFF = 1e-7\n")
+        for f in ("POSCAR", "POTCAR", "KPOINTS"):
+            (d / f).write_text("x\n")
+        cfg = SimpleNamespace(soc=False, stage2_soc=False, functional="pbesol",
+                              potcar_overrides=[], encut=None)
+        monkeypatch.setattr(io_mod, "input_ready", lambda d: False)
+        monkeypatch.setattr(io_mod, "run_local", lambda *a, **kw: None)
+        io_mod.prepare_inputs(d, cfg, task_type="structure_opt")
+        txt = (d / "INCAR").read_text()
+        assert "EDIFF = 1e-4" in txt, txt
+        assert "NELM = 50" in txt

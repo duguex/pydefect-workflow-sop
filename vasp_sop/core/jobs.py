@@ -276,8 +276,7 @@ def _crisp_submit(work_dir: Path, priority: int = 0,
     tags = list(tags or [])
     # Pin big defect supercells (>150 atoms) to long-QOS clusters via the
     # "long" cluster tag so long relaxations are not killed by short-QOS
-    # time limits. (crisp's result-cache auto paths were retired 2026-08-11
-    # — there is no --no-cache flag anymore.)
+    # time limits.
     _is_defect = "/defect/" in str(work_dir)
     if _is_defect and "long" not in tags:
         try:

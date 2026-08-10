@@ -6,7 +6,7 @@ Given a mature scientific project directory (with its project configuration and 
 
 A chemical formula and optional dopants can be used by convenience commands to initialize a project configuration; they are not the core input model of the orchestration layer.
 
-**Not** a DFT engine, materials database, or Slurm replacement. Submits individual calculation units through **`crisp`** (or mpirun). Result reuse is integrated into CRISP through **[vasp-cache](https://github.com/duguex/vasp-cache)** and is linked separately as a component reference.
+**Not** a DFT engine, materials database, or Slurm replacement. Submits individual calculation units through **`crisp`** (or mpirun). CRISP optionally uses the separately documented **[vasp-cache](https://github.com/duguex/vasp-cache)** index to prefill `POSCAR` from an admitted `CONTCAR`; the calculation is still submitted normally.
 
 ---
 
@@ -22,7 +22,7 @@ vasp-sop batch run /path/to/project --dry-run
 # advance systems for real
 vasp-sop batch run /path/to/project
 
-# result reuse (crisp-owned)
+# inspect crisp's manual structure-prefill index
 crisp cache status
 
 # generate a read-only evidence report from current files
@@ -80,5 +80,5 @@ No root `CLAUDE.md` (by policy: do not invent unless you request scheme A).
 
 ## Related
 
-- Cache backend: `vasp-cache`  
+- Structure-prefill backend: `vasp-cache` (manual `crisp cache`; CONTCAR-only)
 - HPC submit path: `crisp` (see your cluster docs)

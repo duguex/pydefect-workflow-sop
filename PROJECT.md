@@ -34,9 +34,11 @@
 8. phonopy — 声子性质
 9. **crisp** — 计算资源管理。所有作业操作必须通过 `crisp` CLI（`crisp submit / cancel -n TASK_NAME / jobs`），不得直接 `scancel`/`sbatch`。Agent 操作前需加载 skill://crisp。
 10. VASP — DFT 程序
-11. **CRISP-integrated result reuse** — `vasp-cache` is the separately documented component behind CRISP's result-reuse capability.
-   - Result identity, storage, and restoration are exposed as part of the CRISP calculation lifecycle; equivalent VASP calculations need not be rerun.
-   - The component is linked separately for inspection and reuse; it is not described here as a separate `vasp_sop` orchestration layer.
+11. **CRISP-owned structure prefill** — `vasp-cache` is the separately documented
+   manual index behind CRISP's optional structure prefill.
+   - It admits converged calculations and stores only the CONTCAR payload.
+   - A cache hit may warm-start a normal `crisp submit`, but never replaces the
+     submission or restores terminal VASP outputs.
 
 ## 3. 点缺陷计算业务逻辑
 

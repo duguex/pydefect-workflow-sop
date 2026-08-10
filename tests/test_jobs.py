@@ -91,8 +91,7 @@ class TestCrispSubmitCached:
 
 
 class TestCrispSubmitDefectFlags:
-    """Big defect supercells (>150 atoms) pin to long-QOS clusters.
-    --no-cache is gone (crisp auto-cache retired 2026-08-11)."""
+    """Big defect supercells (>150 atoms) pin to long-QOS clusters."""
 
     def _submit_cmd(self, tmp_path: Path, monkeypatch, *, leg: str,
                     natoms: int) -> list[str]:
@@ -126,7 +125,6 @@ class TestCrispSubmitDefectFlags:
         cmd = self._submit_cmd(
             tmp_path, monkeypatch, leg="defect/Va_O1_0", natoms=288
         )
-        assert "--no-cache" not in cmd
         assert "--tag" in cmd and cmd[cmd.index("--tag") + 1] == "long"
 
     def test_small_defect_gets_no_flags(
@@ -135,12 +133,10 @@ class TestCrispSubmitDefectFlags:
         cmd = self._submit_cmd(
             tmp_path, monkeypatch, leg="defect/Va_O1_0", natoms=88
         )
-        assert "--no-cache" not in cmd
         assert "--tag" not in cmd
 
     def test_cpd_gets_no_flags(self, tmp_path: Path, monkeypatch):
         cmd = self._submit_cmd(
             tmp_path, monkeypatch, leg="cpd/phase_mp-1", natoms=288
         )
-        assert "--no-cache" not in cmd
         assert "--tag" not in cmd

@@ -25,7 +25,7 @@ vasp-sop 是一个**编排层**，把整条链路封装成一条命令。给定�
 | 一键批量 | `vasp-sop batch run .` 串行推进所有体系 |
 | 三波 VASP 调度 | Wave 1: 结构优化 → Wave 2: 竞争相+能带+DOS+介电+缺陷全并行 → Wave 3: 后处理 |
 | 容错 | CONTCAR 重启（最多 20 次）、12 种错误诊断、单体系失败不阻塞其他 |
-| 结果缓存 | vasp-cache v0.3.0 SQLite identity cache |
+| 结果缓存 | crisp-owned vasp-cache v0.4.0 raw-quartet index; CONTCAR-only manual prefill |
 | 后处理编排 | 11 步 pydefect 管线 → `defect_energy_summary.json` |
 
 ### 不是什么
@@ -40,8 +40,11 @@ vasp-sop 是一个**编排层**，把整条链路封装成一条命令。给定�
 
 ## Project Overview
 
-vasp-sop depends on [vasp-cache](https://github.com/duguex/vasp-cache)
-for VASP calculation result storage and deduplication.
+vasp-sop submits calculations through `crisp` but does not import or call
+`vasp-cache`. The optional cache is a crisp-owned manual index: it admits
+converged structural-relaxation inputs and stores only CONTCAR. A `crisp
+submit` cache hit can warm-start the structure, but it never skips the normal
+submission or restores terminal outputs.
 Given a chemical formula and optional dopant elements, it automates
 the end-to-end pipeline: competing phase search → chemical potential diagram →
 unitcell properties → supercell construction → defect enumeration → VASP
@@ -126,7 +129,7 @@ STRUCTURE_OPT → COMPETING → CHEM_POT_DIAGRAM → UNITCELL_DEFECT → COMPLET
 
 - Phase is determined by filesystem state (OUTCAR presence, convergence, target_vertices.yaml, etc.)
 - `--dry-run` does one pass and exits (no VASP submission)
-- Cache hit in STRUCTURE_OPT/COMPETING skips submission (saves `.target_submit.json` with `"cached"`)
+- An admitted crisp cache entry may prefill POSCAR from CONTCAR, but the requested calculation is still submitted normally
 - Errors in `advance_one_system` are caught per-system — one failure doesn't block others
 
 ## Key Directories
@@ -141,7 +144,7 @@ vasp_sop/
 └── __init__.py          ← version = "0.1.0"
 
 tests/
-├── test_cache.py        ← Cache tests (vasp-cache adapter + MP)
+├── test_cache.py        ← Materials Project download-cache tests
 ├── test_cli.py          ← CLI + dry-run + batch status tests
 ├── test_builder.py      ← Supercell builder tests
 ├── test_config.py       ← Config validation + YAML round-trip
@@ -208,16 +211,17 @@ crisp cache status
 ### Result Reuse
 
 - **Owned by crisp** — vasp-sop never reads or writes the result cache.
-  crisp's `cache` subcommand wraps the `vasp-cache` library
-  (`crisp cache put|has|fetch|query|status|rebuild`); it caches completed
-  results and materializes cached outputs back into the worktree.
-- vasp-sop always sees results as **files on disk** (converged OUTCAR /
-  CONTCAR / vasprun.xml) — no cache calls in the pipeline.
+  `crisp cache` wraps `vasp-cache` for manual `put|has|fetch|query|status|rebuild`;
+  the v1 index admits converged inputs and stores/fetches only CONTCAR.
+- A cache hit may prefill a normal `crisp submit`, but it never skips the
+  calculation and never restores OUTCAR or `vasprun.xml`.
+- vasp-sop always sees results as **files on disk** — no cache calls occur in
+  the pipeline.
 - vasp-sop's own path roots live in `vasp_sop/core/paths.py`:
   `SOP_ROOT`, `MP_CACHE`, `POSCAR_CACHE` (JobStore DB + MP downloads).
 - `MAX_LATTICE` + `lattice_too_large()` (submit gate) live in
   `vasp_sop/core/jobs.py`.
-- ``override_cache_root(path)`` — isolates both vasp-cache and SOP paths for testing
+- ``override_cache_root(path)`` isolates vasp-sop-owned paths for testing
 
 ### Error Handling
 
@@ -225,7 +229,7 @@ crisp cache status
 - Batch pipeline: errors in `advance_one_system` are caught per-system, not propagated
 - `run_local()` raises `RuntimeError` on non-zero exit or timeout
 - `convergence_verdict()` returns `ConvergenceVerdict` dataclass; never raises
-- Cache functions catch exceptions during pymatgen parsing, log warnings, store what they can
+- MP cache functions catch exceptions during pymatgen parsing, log warnings, store what they can
 - Per-system isolation: one failing system doesn't block others in batch mode
 
 ### Execution Model
@@ -293,7 +297,7 @@ CONTCAR restart (`restart_from_contcar` / poll unconverged):
 ### Persistence
 
 - Job state: `~/.vasp_sop/jobs.db` (SQLite — `job_history`: per-calculation `submitted`/`converged`/`failed`; `tracked`: active submissions awaiting polling)
-- Results cache: vasp-cache v0.3.0 (SQLite identity + BLOB)
+- Results prefill: crisp-owned vasp-cache v0.4.0 (raw-quartet identity + CONTCAR-only BLOB)
 - MP combo cache: `~/.vasp_sop/mp_cache/` (POSCARs + POTCARs on disk)
 - State is filesystem-based: phase determined by OUTCAR existence, convergence, YAML files
 
@@ -381,7 +385,7 @@ Notable gaps:
 ## Runtime Requirements
 
 - Python >= 3.10
-- Dependencies: pymatgen, pydefect, vise, numpy, pandas, pyyaml, emmet-core, vasp-cache
+- Dependencies: pymatgen, pydefect, vise, numpy, pandas, pyyaml, emmet-core
 - HPC cluster access with `crisp` scheduler agent
 - Materials Project API key (`MP_API_KEY` or `PMG_MAPI_KEY`)
 - VASP binary via singularity container (`/mnt/shared/vasp_latest.sif`)

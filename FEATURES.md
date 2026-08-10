@@ -83,7 +83,7 @@ status, presence of `target_vertices.yaml`, etc. — not from a database.
 
 - **Per-system isolation** — a failure in one system does not block others
 - **Serial batch loop** — systems are advanced sequentially in a polling loop
-- **Result reuse is crisp's** — vasp-sop is result-cache-blind; crisp caches completed results (`crisp cache put`) and materializes cached outputs into the worktree before a cycle runs
+- **Structure prefill is crisp's** — vasp-sop is result-cache-blind; an admitted CONTCAR may warm-start a normal `crisp submit`, which still runs the requested calculation
 - **Dry-run mode** — `--dry-run` processes all pipeline stages without submitting any VASP jobs
 - **Orphaned-output cleanup** — stale crisp output directories (`output/`) are detected and consolidated during system advancement
 - **Infinite-loop protection** — `_MAX_ITERATIONS` gate prevents unbounded polling
@@ -427,15 +427,16 @@ and `target_vertices.yaml`.
 ## 8. Result Reuse (crisp-owned)
 
 vasp-sop is **result-cache-blind**: it never reads or writes the VASP result
-cache. Result reuse is a capability of **crisp** (its `cache` subcommand
-wraps the `vasp-cache` library). vasp-sop interacts with results only as
-files on disk:
+cache. `crisp cache` wraps `vasp-cache` for manual admission, inspection, and
+CONTCAR-only fetch. `crisp submit` may use an admitted CONTCAR as a structure
+prefill, but it still submits the requested calculation normally.
 
-- crisp caches completed results and materializes cached outputs back into
-  the worktree before a batch cycle runs — vasp-sop then sees a converged
-  `OUTCAR`/`CONTCAR`/`vasprun.xml` like any fresh calculation.
-- `vasp-sop`'s former cache adapter, cache worker, and `vasp-sop cache` CLI
-  were deleted; users run `crisp cache status|query` instead.
+- Cache identity uses the raw POSCAR/POSCAR.bak, INCAR, KPOINTS, and POTCAR
+  input quartet; admission requires the shared convergence verdict.
+- The cache stores and fetches only CONTCAR; it never restores OUTCAR or
+  vasprun.xml and never produces a terminal cached-result sentinel.
+- vasp-sop interacts with results only as files on disk; it has no cache calls
+  in the pipeline.
 
 ### Job State Tracking
 
