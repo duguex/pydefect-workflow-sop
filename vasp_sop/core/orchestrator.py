@@ -79,6 +79,58 @@ def _chain_roots(charges: list[int]) -> set[int]:
     return {qs[n // 2 - 1], qs[n // 2]}
 
 
+# Reasons that justify an automatic ionic restart from CONTCAR for a cpd
+# phase: the structure simply needs more ionic steps.  Electronic NELM
+# exhaustion is deliberately excluded — identical inputs reproduce the
+# same failure, so blind retries would only burn core-hours.
+_IONIC_RETRY_REASONS = frozenset(
+    {"force_gate_fail", "nsw_exhausted", "nsw_early_exit", "missing_forces"}
+)
+
+# Cap on automatic CONTCAR restarts per cpd phase.  A phase whose forces
+# stall (e.g. an over-strict EDIFFG) would otherwise be resubmitted every
+# cycle forever, burning core-hours; past the cap the phase needs a
+# parameter decision, not more iterations.
+_CPD_MAX_IONIC_RESTARTS = 3
+
+
+def _refresh_stale_cpd_diagram(
+    sys: Any, js: Any, log_to_logger: bool = False
+) -> bool:
+    """Rebuild the chem-pot diagram when plan elements outgrew it.
+
+    A finished diagram (target_vertices present) is one-shot: nothing in
+    the pipeline ever recomputes it.  When the plan gained elements after
+    CPD completed (typically a dopant, ADR 0015 refresh), the stale
+    diagram silently drops the dopant's defect formation energies from
+    the summary.  On a successful refresh the old summary/status are
+    removed so wave3 re-analyzes against the fresh vertices.  Returns
+    True when the diagram was refreshed.
+    """
+    from vasp_sop.defect.cpd import cpd_diagram_stale, refresh_cpd_diagram
+
+    cpd_root = sys.cpd_dir
+    df_root = sys.defect_dir
+    if not cpd_diagram_stale(cpd_root, sys.config):
+        return False
+    if not refresh_cpd_diagram(cpd_root, sys.config):
+        logger.warning(
+            "%s: cpd diagram refresh failed — dopant defect energies "
+            "may be missing from the summary", sys.name,
+        )
+        return False
+    logger.info("%s: cpd diagram refreshed (plan elements)", sys.name)
+    for stale in (
+        df_root / "defect_energy_summary.json",
+        df_root / "analyze_status.json",
+    ):
+        try:
+            stale.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return True
+
+
 def _submit_or_skip(
     path: Path,
     label: str,
@@ -266,6 +318,49 @@ def wave2_submit(
     info = _make_info_fn(log_to_logger)
     uc_root = sys.uc_dir
     df_root = sys.defect_dir
+
+    # ── CPD phase ionic restarts (any phase) ─────────────────────────
+    # Phase inference gates COMPLETE on every cpd phase, but once a
+    # system left COMPETING nothing else ever resubmits them.  A phase
+    # that failed ionically (force gate / NSW exhausted) continues from
+    # its own CONTCAR every cycle until it converges.  Electronic NELM
+    # exhaustion is NOT auto-retried (see _IONIC_RETRY_REASONS).
+    from vasp_sop.vasp.io import restart_from_contcar
+
+    cpd_root = sys.cpd_dir
+    if cpd_root.is_dir():
+        for cd in sorted(cpd_root.iterdir()):
+            if not cd.is_dir() or cd.name == "combos":
+                continue
+            if not input_ready(cd) or js.latest(str(cd.resolve())) == "submitted":
+                continue
+            verdict = convergence_verdict(cd)
+            if verdict.converged:
+                continue
+            # Mocks in tests may omit reason; treat missing as non-retryable.
+            if getattr(verdict, "reason", None) not in _IONIC_RETRY_REASONS:
+                continue
+            if not (cd / "CONTCAR").is_file():
+                continue
+            # Stop resubmitting a phase whose restarts are not converging
+            # (force stalled at a too-strict EDIFFG): parameter work needed.
+            n_restarts = sum(
+                1 for r in js.history(str(cd.resolve()))
+                if r.get("source") == "ionic_restart"
+            )
+            if n_restarts >= _CPD_MAX_IONIC_RESTARTS:
+                logger.warning(
+                    "%s/%s: %d ionic restart(s) without convergence — "
+                    "auto-restart capped, needs a parameter decision",
+                    sys.name, cd.name, n_restarts,
+                )
+                continue
+            try:
+                restart_from_contcar(cd)
+            except Exception:
+                pass
+            _submit_or_skip(cd, f"phase:{cd.name}", sys.name, dry_run, info,
+                            js=js, source="ionic_restart", priority=priority)
 
     # ── Prepare: build defect structures ─────────────────────────────
     # Chemical-environment systems (ADR 0005) have no defect leg.
@@ -733,6 +828,15 @@ def wave3_postprocess(
         else True
     )
 
+    if uc_all_done and df_vasp_done and df_vasp_ondisk:
+        # ADR 0015: a finished chem-pot diagram can predate plan elements
+        # (dopant added later).  Refresh before declaring already-complete
+        # or analyzing — a stale diagram silently drops dopant defect
+        # energies from the summary.  A successful refresh invalidates the
+        # old summary so analyze re-runs against the new vertices.
+        if not dry_run:
+            _refresh_stale_cpd_diagram(sys, js, log_to_logger)
+
     if (
         uc_all_done
         and df_vasp_done
@@ -912,6 +1016,18 @@ def advance_one_system(
                 f"{failure['diagnostic']}"
             )
     if p == COMPLETE or p == NO_TARGET:
+        # A COMPLETE phase can still carry a stale chem-pot diagram (plan
+        # elements grew after CPD completed, e.g. a dopant): dopant defect
+        # energies silently vanish from the summary.  Refresh and drop the
+        # summary — the next cycle re-derives UNITCELL_DEFECT and wave3
+        # re-analyzes against the fresh vertices.
+        if p == COMPLETE and not dry_run:
+            try:
+                if _refresh_stale_cpd_diagram(s, js, log_to_logger):
+                    pass  # summary removed; phase re-derives next cycle
+            except Exception as exc:
+                logger.warning("%s: cpd refresh failed (non-fatal): %s",
+                               s["name"], exc)
         return
 
     # ── Wave 1: STRUCTURE_OPT ────────────────────────────────────────

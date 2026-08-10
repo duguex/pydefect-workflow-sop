@@ -266,8 +266,14 @@ class System:
             if not df_root.is_dir():
                 return UNITCELL_DEFECT
 
+            from vasp_sop.defect import is_anion_cation_antisite
+
+            # Only the valid defect set counts toward COMPLETE (ADR 0013):
+            # anion-cation antisites are excluded from the defect set and
+            # must not block the phase gate.  Everything else on disk —
+            # including never-prepared junk dirs (ADR 0004) — still blocks.
             for d in sorted(df_root.iterdir()):
-                if not d.is_dir():
+                if not d.is_dir() or is_anion_cation_antisite(d.name):
                     continue
                 if not convergence_verdict(d).converged:
                     return UNITCELL_DEFECT
@@ -275,7 +281,11 @@ class System:
             # Post-processing artifacts per defect dir (all converged dirs
             # must carry them).
             for d in df_root.iterdir():
-                if not d.is_dir() or d.name == "perfect":
+                if (
+                    not d.is_dir()
+                    or d.name == "perfect"
+                    or is_anion_cation_antisite(d.name)
+                ):
                     continue
                 # Skip non-calculation subdirs (no VASP inputs / OUTCAR).
                 if (

@@ -95,7 +95,9 @@ def _inventory(defect_root: Path) -> dict[str, Any]:
         d for d in converged if not (d / "calc_results.json").is_file()
     ]
     with_dei = [
-        d for d in converged if (d / "defect_energy_info.json").is_file()
+        d for d in converged
+        if (d / "defect_energy_info.json").is_file()
+        or (d / "defect_energy_info.yaml").is_file()
     ]
     missing_outcar = [d for d in dirs if not _has_outcar(d) and not (d / "calc_results.json").is_file()]
     return {
@@ -111,12 +113,47 @@ def _inventory(defect_root: Path) -> dict[str, Any]:
     }
 
 
+def _summary_type_gaps(defect_root: Path) -> list[str]:
+    """Valid defect types planned in defect_in.yaml missing from the summary.
+
+    A summary that silently dropped defect types must not classify as full.
+    The classic cause: a chem-pot diagram built before a dopant was added —
+    the dopant's chemical potentials are absent, so pydefect cannot compute
+    those formation energies and they vanish from the summary.  The
+    orchestrator refreshes the diagram and re-runs analyze; the gate here
+    keeps the pre-refresh state visible as partial instead of fake full.
+    """
+    di = defect_root / "defect_in.yaml"
+    summary = defect_root / _SUMMARY
+    if not di.is_file() or not summary.is_file():
+        return []
+    from vasp_sop.defect import is_anion_cation_antisite
+
+    try:
+        data = yaml.safe_load(di.read_text()) or {}
+        sdata = json.loads(summary.read_text())
+    except (OSError, yaml.YAMLError, ValueError):
+        return []
+    if not isinstance(data, dict) or not isinstance(sdata, dict):
+        return []
+    planned = {
+        str(k) for k in data.keys()
+        if not is_anion_cation_antisite(str(k))
+    }
+    if not planned:
+        return []
+    got = set(sdata.get("defect_energies", {}).keys())
+    return sorted(planned - got)
+
+
 def classify_analyze_status(defect_root: Path) -> AnalyzeStatus:
     """Classify post-process completeness from on-disk artifacts.
 
     ``full`` requires every *ionically converged* eligible dir to have
-    correction.json, a final summary, and **zero** unconverged OUTCAR dirs.
-    Unconverged dirs never count as successful corrections.
+    correction.json, a final summary, **zero** unconverged OUTCAR dirs,
+    and the summary to cover every valid planned defect type (see
+    :func:`_summary_type_gaps`).  Unconverged dirs never count as
+    successful corrections.
     """
     if not defect_root.is_dir():
         return "failed"
@@ -137,6 +174,7 @@ def classify_analyze_status(defect_root: Path) -> AnalyzeStatus:
         and converged
         and len(corrected) == len(converged)
         and not unconverged
+        and not _summary_type_gaps(defect_root)
     ):
         return "full"
     if summary or corrected or partial_summary or unconverged:
@@ -174,6 +212,7 @@ def _write_status(
         "missing_calc_results": sorted(d.name for d in inv["missing_calc_results"]),
         "missing_outcar": sorted(d.name for d in inv["missing_outcar"]),
         "unconverged": sorted(d.name for d in unconverged),
+        "missing_types": _summary_type_gaps(defect_root),
     }
     payload.update(extra)
     try:

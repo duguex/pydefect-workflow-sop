@@ -59,8 +59,15 @@ _nelm_cache: dict[tuple[str, int], bool] = {}
 
 
 def _has_nelm_warning(outcar: Path) -> bool:
-    """True when OUTCAR contains VASP's NELM-exhaustion warning anywhere
-    (it can be MBs before EOF when more ionic steps followed)."""
+    """True when the *final* ionic step exhausted NELM.
+
+    VASP prints the NELM-exhaustion warning once per ionic step whose
+    electronic loop hits the cap.  A warning from an earlier step — later
+    steps then converged — does not corrupt the final forces/energies, so
+    only a warning inside the final ionic step's electronic loop (the last
+    ``LOOP+`` block) counts as unconverged (ADR 0016).  The warning can be
+    MBs before EOF when more ionic steps followed, hence the full read.
+    """
     try:
         key = (str(outcar), outcar.stat().st_mtime)
     except OSError:
@@ -69,9 +76,19 @@ def _has_nelm_warning(outcar: Path) -> bool:
     if cached is not None:
         return cached
     try:
-        hit = _NELM_WARN_MARK in outcar.read_text(errors="ignore")
+        txt = outcar.read_text(errors="ignore")
     except OSError:
         hit = False
+    else:
+        last_warn = txt.rfind(_NELM_WARN_MARK)
+        if last_warn < 0:
+            hit = False
+        else:
+            # The final ionic step starts at the last "LOOP+" marker.
+            # A warning before it belongs to an earlier step whose later
+            # siblings converged — not final-state evidence.
+            last_ionic = txt.rfind("LOOP+")
+            hit = last_warn > last_ionic
     if len(_nelm_cache) > 4096:
         _nelm_cache.clear()
     _nelm_cache[key] = hit
@@ -99,7 +116,9 @@ _VERDICT_FLUSH_EVERY = 250
 # Bump whenever verdict *logic* changes (not just per-file data): stale
 # sidecars produced by older code must not be replayed.  v2 = ADR 0016
 # electronic (NELM) gate — pre-gate verdicts were written without it.
-_VERDICT_SCHEMA = 2
+# v3 = NELM warning counts only when it belongs to the final ionic step
+# (early-step warnings followed by converged steps are not failures).
+_VERDICT_SCHEMA = 3
 
 
 def _sidecar_path() -> Path:
@@ -259,10 +278,9 @@ def convergence_verdict(path: Path, task_type: str = "") -> ConvergenceVerdict:
     # accuracy" can be a false positive when the last electronic step hit
     # NELM (VASP warns "spurious results ... increasing NELM").  pydefect
     # reads vasprun scsteps and marks electronic_conv=False — the energy is
-    # unreliable, so the verdict must be unconverged too.  The warning can
-    # sit MBs before EOF (later ionic steps follow), so check the tail
-    # window first, then the whole file.
-    if _NELM_WARN_MARK in tail or _has_nelm_warning(outcar):
+    # unreliable, so the verdict must be unconverged too.  Only a warning
+    # from the FINAL ionic step counts (see _has_nelm_warning).
+    if _has_nelm_warning(outcar):
         verdict = ConvergenceVerdict(False, REASON_ELECTRONIC_NOT_CONV)
         _verdict_cache.setdefault(outcar, {})[task_type] = (mtime, verdict)
         _mark_dirty(outcar, task_type)

@@ -84,3 +84,41 @@ class TestElectronicGate:
         v = convergence_verdict(d, task_type="band")
         assert not v.converged
         assert v.reason == REASON_ELECTRONIC_NOT_CONV
+
+
+class TestNelmWarningPosition:
+    """The electronic gate counts a NELM warning only when it belongs to
+    the FINAL ionic step (v3).  VASP prints the warning per ionic step; an
+    early-step exhaustion followed by converged steps leaves the final
+    forces/energies reliable, so the verdict must not fail the calc."""
+
+    _WARN = "increasing NELM, if you were close to convergence\n"
+
+    def _write(self, d: Path, *, first_step: str, second_step: str) -> None:
+        (d / "OUTCAR").write_text(
+            "NSW = 50\nIBRION = 2\nEDIFFG = -0.03\n"
+            "LOOP+:\n" + first_step +
+            "LOOP+:\n" + second_step +
+            "TOTAL-FORCE (eV/Angst)\n ---\n"
+            " 0.001 0.001 0.001 0.001 0.001 0.001\n"
+            " General timing and accounting informations for this job:\n"
+        )
+        (d / "INCAR").write_text("NSW = 50\nIBRION = 2\nEDIFFG = -0.03\n")
+
+    def test_early_step_warning_passes(self, tmp_path: Path):
+        """Warning in the first ionic step, second step clean → converged."""
+        d = tmp_path / "calc"
+        d.mkdir()
+        self._write(d, first_step=self._WARN, second_step="")
+        v = convergence_verdict(d)
+        assert v.converged
+
+    def test_final_step_warning_fails(self, tmp_path: Path):
+        """Warning inside the final ionic step's electronic loop is the
+        ADR 0016 failure case → unconverged."""
+        d = tmp_path / "calc"
+        d.mkdir()
+        self._write(d, first_step="", second_step=self._WARN)
+        v = convergence_verdict(d)
+        assert not v.converged
+        assert v.reason == REASON_ELECTRONIC_NOT_CONV

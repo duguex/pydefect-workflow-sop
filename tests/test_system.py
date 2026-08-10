@@ -238,7 +238,13 @@ class TestPhaseInference:
         self._patch(monkeypatch, {})
         assert s.phase() == UNITCELL_DEFECT
 
-    def test_complete_when_all_artifacts_present(self, tmp_path: Path, monkeypatch):
+    @staticmethod
+    def _build_complete_system(tmp_path: Path) -> tuple[System, Path]:
+        """Scaffold a system where every engaged calculation is converged.
+
+        Returns ``(system, defect_root)`` — the only missing piece is the
+        phase gate itself.
+        """
         s = _make_system(tmp_path)
         td = s.cpd_dir / "GaN_mp-830"
         td.mkdir(parents=True)
@@ -286,10 +292,50 @@ class TestPhaseInference:
         _converged(defect)
         _converged(perfect)
         (df / "defect_energy_summary.json").write_text("{}")
+        return s, df
 
+    def test_complete_when_all_artifacts_present(self, tmp_path: Path, monkeypatch):
+        s, _ = self._build_complete_system(tmp_path)
         self._patch(monkeypatch, {}, input_ready=lambda d: True,
                     verdict_converged=True)
         assert s.phase() == COMPLETE
+
+    def test_complete_ignores_antisite_defect_dirs(self, tmp_path: Path, monkeypatch):
+        """ADR 0013: anion-cation antisites are excluded from the defect set
+        and must not block the COMPLETE phase gate — even when they carry
+        full inputs and never ran (no OUTCAR / no post-processing)."""
+        s, df = self._build_complete_system(tmp_path)
+        for name in ("Al_O1_0", "O_Al1_0"):
+            antisite = df / name
+            antisite.mkdir()
+            for f in ("INCAR", "POSCAR", "POTCAR", "KPOINTS"):
+                (antisite / f).write_text("x")
+        # No OUTCAR, calc_results.json, correction.json, or
+        # defect_structure_info.json in either antisite dir.
+        self._patch(monkeypatch, {}, input_ready=lambda d: True,
+                    verdict_converged=True)
+        assert s.phase() == COMPLETE
+
+    def test_unitcell_defect_when_antisite_is_invalid(self, tmp_path: Path, monkeypatch):
+        """An antisite dir that somehow converged still counts as excluded:
+        a real valid defect missing its correction keeps blocking."""
+        s, df = self._build_complete_system(tmp_path)
+        antisite = df / "Al_O1_0"
+        antisite.mkdir()
+        for f in ("INCAR", "POSCAR", "POTCAR", "KPOINTS", "OUTCAR"):
+            (antisite / f).write_text("x")
+        (antisite / "calc_results.json").write_text("{}")
+        (antisite / "correction.json").write_text("{}")
+        (antisite / "defect_structure_info.json").write_text("{}")
+        # A second, valid defect dir with no correction.json → still blocks.
+        (df / "Va_Ga_1").mkdir()
+        for f in ("INCAR", "POSCAR", "POTCAR", "KPOINTS", "OUTCAR"):
+            (df / "Va_Ga_1" / f).write_text("x")
+        (df / "Va_Ga_1" / "calc_results.json").write_text("{}")
+
+        self._patch(monkeypatch, {}, input_ready=lambda d: True,
+                    verdict_converged=True)
+        assert s.phase() == UNITCELL_DEFECT
 
     def test_unitcell_defect_when_defect_missing_correction(self, tmp_path: Path, monkeypatch):
         s = _make_system(tmp_path)

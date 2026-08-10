@@ -9,6 +9,7 @@ code; these tests guard against regressions.
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pymatgen.core import Composition
@@ -382,3 +383,86 @@ class TestEnsureCpdPhases:
         cpd = self._setup(tmp_path, ["Al", "Ca", "O"], ["Al_mp-1"])
         assert cpd_mod.ensure_cpd_phases(
             cpd, self._config(dopants=["Fe"]), dry_run=True) == -1
+
+
+class TestCpdDiagramRefresh:
+    """Chem-pot diagram staleness vs plan elements + safe refresh."""
+
+    def _config(self, formula: str = "SrAl4O7",
+                dopants: list[str] | None = None) -> SimpleNamespace:
+        from vasp_sop.core.config import PipelineConfig
+        cfg = PipelineConfig(
+            formula=formula, root=Path("/nonexistent"),
+            dopant_elements=dopants or [],
+        )
+        return cfg
+
+    def test_stale_when_dopant_missing_from_standard_energies(
+        self, tmp_path: Path
+    ):
+        from vasp_sop.defect import cpd as cpd_mod
+        cpd = tmp_path / "cpd"
+        cpd.mkdir()
+        (cpd / "standard_energies.yaml").write_text(
+            "Al: -4.15\nO: -4.44\nSr: -1.87\n"
+        )
+        assert cpd_mod.cpd_diagram_stale(cpd, self._config(dopants=["Fe"]))
+
+    def test_fresh_when_all_plan_elements_present(self, tmp_path: Path):
+        from vasp_sop.defect import cpd as cpd_mod
+        cpd = tmp_path / "cpd"
+        cpd.mkdir()
+        (cpd / "standard_energies.yaml").write_text(
+            "Al: -4.15\nO: -4.44\nSr: -1.87\nFe: -8.10\n"
+        )
+        assert not cpd_mod.cpd_diagram_stale(cpd, self._config(dopants=["Fe"]))
+
+    def test_not_stale_without_standard_energies(self, tmp_path: Path):
+        from vasp_sop.defect import cpd as cpd_mod
+        cpd = tmp_path / "cpd"
+        cpd.mkdir()
+        assert not cpd_mod.cpd_diagram_stale(cpd, self._config(dopants=["Fe"]))
+
+    def test_refresh_preflight_keeps_artefacts_on_missing_phase_files(
+        self, tmp_path: Path, monkeypatch
+    ):
+        from vasp_sop.defect import cpd as cpd_mod
+        cpd = tmp_path / "cpd"
+        cpd.mkdir()
+        (cpd / "target_vertices.yaml").write_text("old\n")
+        # a phase dir missing its OUTCAR → mce preflight not ready
+        phase = cpd / "FeO_mp-1"
+        phase.mkdir()
+        (phase / "CONTCAR").write_text("x\n")
+        called = []
+        monkeypatch.setattr(
+            cpd_mod, "compute_chemical_potentials",
+            lambda *a, **kw: called.append(True))
+        ok = cpd_mod.refresh_cpd_diagram(cpd, self._config())
+        assert not ok
+        assert called == []
+        # old diagram untouched (preflight failed before deletion)
+        assert (cpd / "target_vertices.yaml").read_text() == "old\n"
+
+    def test_refresh_deletes_and_recomputes(self, tmp_path: Path, monkeypatch):
+        from vasp_sop.defect import cpd as cpd_mod
+        cpd = tmp_path / "cpd"
+        cpd.mkdir()
+        phase = cpd / "FeO_mp-1"
+        phase.mkdir()
+        (phase / "OUTCAR").write_text("x\n")
+        (phase / "CONTCAR").write_text("x\n")
+        for name in ("target_vertices.yaml", "chem_pot_diag.json",
+                     "standard_energies.yaml", "composition_energies.yaml",
+                     "relative_energies.yaml"):
+            (cpd / name).write_text("old\n")
+        called = []
+        monkeypatch.setattr(
+            cpd_mod, "compute_chemical_potentials",
+            lambda *a, **kw: called.append(a))
+        ok = cpd_mod.refresh_cpd_diagram(cpd, self._config())
+        assert ok
+        assert len(called) == 1
+        # stale artefacts removed before recompute
+        assert not (cpd / "target_vertices.yaml").exists()
+        assert not (cpd / "chem_pot_diag.json").exists()

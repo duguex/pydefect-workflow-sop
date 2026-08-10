@@ -33,10 +33,12 @@ _NON_DEFECT_DIRS = frozenset({"perfect", "defect_new", "__pycache__"})
 _ANION_ELEMENTS = frozenset(
     {"O", "S", "Se", "Te", "F", "Cl", "Br", "I", "N", "P"}
 )
-_SINGLE_DEFECT_RE = re.compile(r"^([A-Z][a-z]?)_([A-Z][a-z]?)(\d+)_(-?\d+)$")
+# Single substitution: "Al_O1_0" (directory name, with charge) or
+# "Al_O1" (defect_in.yaml key, no charge suffix).
+_SINGLE_DEFECT_RE = re.compile(r"^([A-Z][a-z]?)_([A-Z][a-z]?)(\d+)(?:_-?\d+)?$")
 
 
-def _is_anion_cation_antisite(name: str) -> bool:
+def is_anion_cation_antisite(name: str) -> bool:
     """True if *name* is a single substitution with exactly one anion side.
 
     ``O_Ga1_-1`` (anion on a cation site) and ``Bi_O1_0`` (cation on an
@@ -84,7 +86,7 @@ def is_valid_defect_dir(path: Path, *, include_defect_new: bool = False) -> bool
     # Anion-cation antisites are excluded (ADR 0013): still on disk, but
     # never submitted or counted by any scan (this gate is the single
     # entry point for wave2 submission and analysis enumeration).
-    if _is_anion_cation_antisite(name):
+    if is_anion_cation_antisite(name):
         return False
 
     # Check Name_Charge pattern: split on first "_", both parts non-empty

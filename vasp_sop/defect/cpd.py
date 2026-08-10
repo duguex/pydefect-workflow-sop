@@ -40,6 +40,69 @@ def _get_target_composition(formula: str):
     return Composition(formula)
 
 
+def cpd_diagram_stale(cpd_root: Path, config: PipelineConfig) -> bool:
+    """True when the finished chem-pot diagram predates plan elements.
+
+    ``standard_energies.yaml`` lists every element the diagram's vertices
+    were built from.  When the plan gained elements after CPD completed
+    (typically a dopant, ADR 0015 refresh), the stale diagram lacks their
+    chemical potentials — dopant defect formation energies silently
+    disappear from the defect summary.  Refresh is the caller's job.
+    """
+    se_path = cpd_root / _STANDARD_ENERGIES
+    if not se_path.is_file():
+        return False
+    try:
+        data = yaml.safe_load(se_path.read_text()) or {}
+    except (OSError, yaml.YAMLError):
+        return False
+    have = {str(k) for k in data.keys()}
+    try:
+        target = Composition(config.formula)
+    except Exception:
+        return False
+    plan_elems = {str(e) for e in target.elements}
+    plan_elems |= {str(e) for e in getattr(config, "dopant_elements", []) or []}
+    return not plan_elems <= have
+
+
+def refresh_cpd_diagram(cpd_root: Path, config: PipelineConfig) -> bool:
+    """Rebuild the chem-pot diagram from the phases on disk.
+
+    ``compute_chemical_potentials`` is one-shot (target_vertices exists →
+    no-op), so the finished artefacts are removed first.  The mce preflight
+    runs BEFORE any deletion: a missing phase file keeps the old diagram
+    intact (the system stays COMPLETE-gated but loses nothing).  Returns
+    False when the diagram could not be refreshed.
+    """
+    target = _get_target_composition(config.formula)
+    preflight = preflight_cpd_inputs(cpd_root)
+    if not preflight.ready:
+        logger.warning(
+            "cpd diagram refresh skipped: preflight missing %s",
+            {n: f for n, f in preflight.missing.items()},
+        )
+        return False
+    for name in (
+        _TARGET_VERTICES,
+        _CHEM_POT_DIAG,
+        _STANDARD_ENERGIES,
+        _COMPOSITION_ENERGIES,
+        _RELATIVE_ENERGIES,
+    ):
+        try:
+            (cpd_root / name).unlink(missing_ok=True)
+        except OSError:
+            pass
+    try:
+        compute_chemical_potentials(cpd_root, config, target)
+    except Exception as exc:
+        logger.warning("cpd diagram refresh failed: %s", exc)
+        return False
+    logger.info("cpd diagram refreshed for plan elements")
+    return True
+
+
 @dataclass(frozen=True)
 class CpdPreflight:
     """Validation result for the files consumed by ``pydefect_vasp mce``."""

@@ -384,6 +384,60 @@ class TestClassifyAnalyzeStatus:
         monkeypatch.setattr(an, "_converged_dirs", lambda dirs: list(dirs))
         assert an.classify_analyze_status(tmp_path) == "partial"
 
+    def test_full_requires_all_planned_types(self, tmp_path: Path, monkeypatch):
+        """A summary that silently dropped a planned defect type (e.g.
+        dopant defects when the chem-pot diagram predates the dopant)
+        must not classify as full."""
+        import json
+        from vasp_sop.defect import analysis as an
+
+        d = tmp_path / "Va_Ga_0"
+        d.mkdir()
+        (d / "OUTCAR").write_text("x\n")
+        (d / "correction.json").write_text("{}\n")
+        (tmp_path / "defect_in.yaml").write_text(
+            "Va_Ga_0: [0]\nFe_Ga_0: [0]\n"
+        )
+        (tmp_path / "defect_energy_summary.json").write_text(
+            json.dumps({"defect_energies": {"Va_Ga_0": {}}})
+        )
+        monkeypatch.setattr(an, "_converged_dirs", lambda dirs: list(dirs))
+        assert an.classify_analyze_status(tmp_path) == "partial"
+
+    def test_full_when_all_planned_types_present(self, tmp_path: Path, monkeypatch):
+        import json
+        from vasp_sop.defect import analysis as an
+
+        d = tmp_path / "Va_Ga_0"
+        d.mkdir()
+        (d / "OUTCAR").write_text("x\n")
+        (d / "correction.json").write_text("{}\n")
+        (tmp_path / "defect_in.yaml").write_text("Va_Ga_0: [0]\n")
+        (tmp_path / "defect_energy_summary.json").write_text(
+            json.dumps({"defect_energies": {"Va_Ga_0": {}}})
+        )
+        monkeypatch.setattr(an, "_converged_dirs", lambda dirs: list(dirs))
+        assert an.classify_analyze_status(tmp_path) == "full"
+
+    def test_antisite_types_do_not_block_full(self, tmp_path: Path, monkeypatch):
+        """ADR 0013-excluded antisites in defect_in.yaml are not part of
+        the planned defect set — their absence never blocks full."""
+        import json
+        from vasp_sop.defect import analysis as an
+
+        d = tmp_path / "Va_Ga_0"
+        d.mkdir()
+        (d / "OUTCAR").write_text("x\n")
+        (d / "correction.json").write_text("{}\n")
+        (tmp_path / "defect_in.yaml").write_text(
+            "Va_Ga_0: [0]\nO_Ga1_0: [0]\n"  # O_Ga = anion-cation antisite
+        )
+        (tmp_path / "defect_energy_summary.json").write_text(
+            json.dumps({"defect_energies": {"Va_Ga_0": {}}})
+        )
+        monkeypatch.setattr(an, "_converged_dirs", lambda dirs: list(dirs))
+        assert an.classify_analyze_status(tmp_path) == "full"
+
 
     def test_status_json_has_qa_keys(self, tmp_path: Path, monkeypatch):
         import json
