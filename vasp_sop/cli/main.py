@@ -829,6 +829,24 @@ def _add_batch_parser(subparsers) -> None:
         help="Project root directory containing system subdirectories",
     )
 
+    # dir-status — single authoritative state for one calc dir
+    p_ds = sub.add_parser(
+        "dir-status",
+        help="Authoritative state of one calculation directory (DB + "
+        "disk evidence merged, never a single source)",
+    )
+    p_ds.add_argument(
+        "root",
+        type=Path,
+        help="Project root directory containing system subdirectories",
+    )
+    p_ds.add_argument(
+        "dir",
+        type=str,
+        help="Calc dir relative to root, e.g. "
+        "Gd2GaSbO7:Bi/cpd/Bi2O3_mp-23262",
+    )
+
     # restore
     p_restore = sub.add_parser(
         "restore",
@@ -961,6 +979,8 @@ def _handle_batch(args: argparse.Namespace) -> None:
         _batch_regenerate(args.root.resolve(), args.dirs)
     elif args.batch_action == "blockers":
         _batch_blockers(args.root.resolve())
+    elif args.batch_action == "dir-status":
+        _batch_dir_status(args.root, args.dir)
     elif args.batch_action == "git-snapshot":
         _batch_git_snapshot(args.root)
     elif args.batch_action == "restore":
@@ -1285,6 +1305,26 @@ def _batch_git_snapshot(root: Path) -> None:
         f"git-snapshot: {len(systems)} system(s), "
         f"{n_init} baseline commit(s), {n_commit} change commit(s)"
     )
+
+
+def _batch_dir_status(root: Path, rel: str) -> None:
+    """One authoritative state for one calculation directory.
+
+    Merges agent.db records, disk hard evidence (slurm log tail markers,
+    submit.slurm, XDATCAR, OUTCAR/CONTCAR mtimes) and the convergence
+    verdict — the 2026 cpd incident showed any single source lies.
+    """
+    from vasp_sop.core.dir_status import dir_status
+
+    d = (root / rel).resolve()
+    if not d.is_dir():
+        raise SystemExit(f"not a directory: {d}")
+    s = dir_status(d)
+    print(f"{rel}: {s.state}")
+    for line in s.evidence:
+        print(f"  {line}")
+    for w in s.warnings:
+        print(f"  WARNING: {w}")
 
 
 def _batch_reconcile(root: Path) -> None:
