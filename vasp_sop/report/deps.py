@@ -257,6 +257,12 @@ def _add_gate_artifact(
         path=str(path),
         status="complete" if exists else "not-run",
         detail="present" if exists else "missing gate artifact",
+        disposition=_disposition(
+            path,
+            "gate-artifact",
+            "complete" if exists else "not-run",
+            "present" if exists else "missing gate artifact",
+        ),
     )
     return aid
 
