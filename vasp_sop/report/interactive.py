@@ -184,7 +184,7 @@ def _sort_defect_names(defects: dict[str, Any]) -> list[str]:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# Display-name typesetting (subscripts / superscripts)
+# Display-name typesetting (subscript / superscript segments)
 # ═════════════════════════════════════════════════════════════════════
 
 _SUBSCRIPT_TRANS = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
@@ -204,27 +204,28 @@ def _formula_html(text: str) -> str:
     return re.sub(r"\d+", lambda m: f"<sub>{m.group(0)}</sub>", text)
 
 
-def _defect_display(name: str) -> str:
-    """Typeset a defect name: species + subscript(site) + superscript(charge).
+def _defect_segments(name: str) -> list[list[str]]:
+    """Typeset a defect name as [style, text] segments for rendering.
 
-    ``Al_Ca1_-1`` -> ``AlCa₁⁻¹``; ``Bi_Pb1`` (no charge part) -> ``BiPb₁``;
-    anything unparseable falls back to subscripts on all digits.
+    ``Al_Ca1_-1`` -> ``[["n","Al"],["s","Ca1"],["p","-1"]]`` (normal /
+    subscript / superscript); ``Bi_Pb1`` (no charge part) ->
+    ``[["n","Bi"],["s","Pb1"]]``; anything unparseable renders as one
+    normal segment. The site keeps its letters: Unicode has no
+    subscript Latin letters, so sub/sup must be drawn with a smaller
+    font and an offset baseline (canvas) or ``<sub>/<sup>`` (HTML).
     """
     parts = name.split("_")
     if parts and parts[0] == "1":  # legacy ``1_`` prefix convention
         parts = parts[1:]
     if len(parts) >= 3 and re.fullmatch(r"[+-]?\d+|\d+[+-]", parts[-1]):
-        species = parts[0]
-        site = "_".join(parts[1:-1])
-        charge = parts[-1]
-        return (
-            species
-            + site.translate(_SUBSCRIPT_TRANS)
-            + charge.translate(_SUPERSCRIPT_TRANS)
-        )
+        return [
+            ["n", parts[0]],
+            ["s", "_".join(parts[1:-1])],
+            ["p", parts[-1]],
+        ]
     if len(parts) == 2:
-        return parts[0] + parts[1].translate(_SUBSCRIPT_TRANS)
-    return name.translate(_SUBSCRIPT_TRANS)
+        return [["n", parts[0]], ["s", parts[1]]]
+    return [["n", name]]
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -520,6 +521,8 @@ canvas{{background:#f5f5f5;border-radius:8px;display:block}}
 .mumin,.mumax{{font-family:monospace;font-size:11px;color:#888;text-align:right}}
 .mubar{{position:relative;height:6px;background:#eee;border-radius:3px}}
 .mucur{{position:absolute;top:-2px;width:10px;height:10px;border-radius:50%;background:#16c79a;margin-left:-5px}}
+.csub{{font-size:0.72em;vertical-align:sub}}
+.csup{{font-size:0.72em;vertical-align:super}}
 #tooltip{{position:absolute;background:rgba(245,245,245,0.95);border:1px solid #d63031;border-radius:4px;padding:6px 10px;font-size:12px;pointer-events:none;display:none;z-index:10;color:#333}}
 </style></head><body>
 <h2>{title_html} — Formation Energy</h2>
@@ -553,6 +556,29 @@ var cv=document.getElementById("cv"), cx=cv.getContext("2d");
 var W=800, H=520, P={l:60,r:160,t:20,b:40};
 var minY=-10, maxY=10;
 var cursorEF=null;
+
+// Typeset name segments: [style,text] with style n=normal, s=subscript,
+// p=superscript. Unicode has no subscript Latin letters, so sub/sup are
+// drawn with a smaller font at an offset baseline.
+function segWidth(segs){
+  var w=0;
+  segs.forEach(function(seg){
+    cx.font=(seg[0]==="n"?"12px":"9px")+" Arial";
+    w+=cx.measureText(seg[1]).width;
+  });
+  cx.font="12px Arial";
+  return w;
+}
+function drawSegs(x,y,segs){
+  var w=0;
+  segs.forEach(function(seg){
+    cx.font=(seg[0]==="n"?"12px":"9px")+" Arial";
+    var dy=(seg[0]==="s"?3:(seg[0]==="p"?-3:0));
+    cx.fillText(seg[1],x+w,y+dy);
+    w+=cx.measureText(seg[1]).width;
+  });
+  cx.font="12px Arial";
+}
 
 function xPx(v){return P.l+(v/BG)*(W-P.l-P.r);}
 function yPx(v){return P.t+(1-(v-minY)/(maxY-minY))*(H-P.t-P.b);}
@@ -612,7 +638,7 @@ function drawFE(mu){
   // Update legend order
   var leg=document.getElementById("leg");
   sorted.forEach(function(s,i){
-    var div=Array.from(leg.children).filter(function(d){return d.textContent.indexOf(DISP[s.name])===0;})[0];
+    var div=Array.from(leg.children).filter(function(d){return d.getAttribute("data-name")===s.name;})[0];
     if(div) leg.appendChild(div);
   });
 
@@ -640,8 +666,11 @@ function drawFE(mu){
   });
   rightSorted.sort(function(a,b){return b.ef-a.ef;});
   rightSorted.forEach(function(s){
-    cx.fillStyle=CL[s.idx];cx.textAlign="left";cx.font="12px Arial";
-    cx.fillText(DISP[s.name]+" "+(s.ef>=0?"+":"")+s.ef.toFixed(2)+"eV",W-P.r+6,yPx(s.ef));
+    cx.fillStyle=CL[s.idx];cx.textAlign="left";
+    var nx=W-P.r+6, ny=yPx(s.ef);
+    drawSegs(nx,ny,DISP[s.name]);
+    cx.font="12px Arial";
+    cx.fillText((s.ef>=0?"+":"")+s.ef.toFixed(2)+"eV",nx+segWidth(DISP[s.name])+5,ny);
   });
 
   // Vertical cursor line
@@ -658,6 +687,16 @@ function drawFE(mu){
 """
 
 _COMMON_JS_FOOTER = """
+function segHtml(segs){
+  var h="";
+  segs.forEach(function(seg){
+    if(seg[0]==="s")h+="<span class='csub'>"+seg[1]+"</span>";
+    else if(seg[0]==="p")h+="<span class='csup'>"+seg[1]+"</span>";
+    else h+=seg[1];
+  });
+  return h;
+}
+
 var tip=document.getElementById("tooltip");
 cv.addEventListener("mousemove",function(ev){
   var r=cv.getBoundingClientRect();var x=ev.clientX-r.left;var ef=xInv(x);
@@ -672,7 +711,7 @@ cv.addEventListener("mousemove",function(ev){
     var p0=ld.pts[lo],p1=ld.pts[hi];
     if(p1.ef-p0.ef<1e-10)return;
     var t=(ef-p0.ef)/(p1.ef-p0.ef);var e=p0.e+(p1.e-p0.e)*t;
-    html+="<span style='color:"+CL[ld.idx]+"'>"+DISP[ld.name]+": "+(e>=0?"+":"")+e.toFixed(3)+" eV</span><br>";
+    html+="<span style='color:"+CL[ld.idx]+"'>"+segHtml(DISP[ld.name])+": "+(e>=0?"+":"")+e.toFixed(3)+" eV</span><br>";
   });
   tip.innerHTML=html;tip.style.display="block";tip.style.left=(x+15)+"px";tip.style.top=Math.max(5,ev.clientY-r.top-10)+"px";
 });
@@ -716,7 +755,8 @@ function update(mu){curMu=mu;drawCPD(mu);drawFE(mu);updateMuPanel(mu);
 var leg=document.getElementById("leg");
 names.forEach(function(n,i){
   var d=document.createElement("div");
-  d.innerHTML="<span style='display:inline-block;width:12px;height:12px;border-radius:3px;background:"+CL[i]+";margin-right:4px'></span>"+DISP[n];
+  d.setAttribute("data-name",n);
+  d.innerHTML="<span style='display:inline-block;width:12px;height:12px;border-radius:3px;background:"+CL[i]+";margin-right:4px'></span>"+segHtml(DISP[n]);
   d.onclick=function(){hidden[n]=!hidden[n];d.style.opacity=hidden[n]?".4":"1";if(curMu)drawFE(curMu);};
   leg.appendChild(d);
 });
@@ -804,7 +844,7 @@ def _html_template(
             colors_json=js(colors),
             bg=cbm,
             names_json=js(sorted_names),
-            disp_json=js({n: _defect_display(n) for n in sorted_names}),
+            disp_json=js({n: _defect_segments(n) for n in sorted_names}),
         )
         + "\n" + cpd_js + "\n" + fe_canvas + "\n" + _COMMON_JS_FOOTER
     )

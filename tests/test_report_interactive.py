@@ -10,7 +10,7 @@ import yaml
 from vasp_sop.report.interactive import (
     _bary_js,
     _build_defects,
-    _defect_display,
+    _defect_segments,
     _extract_vertex_data,
     _formula_html,
     _formula_subscripts,
@@ -303,18 +303,28 @@ class TestSortDefectNames:
 
 class TestDisplayNames:
     def test_defect_name_species_site_subscript_charge_superscript(self):
-        assert _defect_display("Al_Ca1_-1") == "AlCa₁⁻¹"
-        assert _defect_display("Va_O1_0") == "VaO₁⁰"
-        assert _defect_display("Al_O1_2") == "AlO₁²"
+        assert _defect_segments("Al_Ca1_-1") == [
+            ["n", "Al"], ["s", "Ca1"], ["p", "-1"],
+        ]
+        assert _defect_segments("Va_O1_0") == [
+            ["n", "Va"], ["s", "O1"], ["p", "0"],
+        ]
 
     def test_defect_name_without_charge_part(self):
-        assert _defect_display("Bi_Pb1") == "BiPb₁"
+        assert _defect_segments("Bi_Pb1") == [["n", "Bi"], ["s", "Pb1"]]
 
     def test_defect_name_with_legacy_prefix(self):
-        assert _defect_display("1_Fe_Ca1_2+") == "FeCa₁²⁺"
+        assert _defect_segments("1_Fe_Ca1_2+") == [
+            ["n", "Fe"], ["s", "Ca1"], ["p", "2+"],
+        ]
 
-    def test_unparseable_name_falls_back_to_digit_subscripts(self):
-        assert _defect_display("BaAl4O7") == "BaAl₄O₇"
+    def test_defect_name_with_underscored_site(self):
+        assert _defect_segments("O_i1_0") == [
+            ["n", "O"], ["s", "i1"], ["p", "0"],
+        ]
+
+    def test_unparseable_name_stays_single_normal_segment(self):
+        assert _defect_segments("BaAl4O7") == [["n", "BaAl4O7"]]
 
     def test_formula_subscripts(self):
         assert _formula_subscripts("CaAl4O7") == "CaAl₄O₇"
@@ -414,10 +424,9 @@ class TestHtmlTemplate:
             a0_range=(-1.8, -0.2),
             a1_range=(-4.5, -2.8),
         )
-        # Typeset title (HTML <sub>) and display-name map (Unicode,
-        # json-escaped as \u2081 in the embedded JS).
+        # Typeset title (HTML <sub>) and display-name segment map.
         assert "CsPbBr<sub>3</sub>" in html
-        assert '"Bi_Pb1": "BiPb\\u2081"' in html
+        assert '"Bi_Pb1": [["n", "Bi"], ["s", "Pb1"]]' in html
         # Chemical-potential range panel.
         assert "化学势范围" in html
         assert "function buildMuPanel" in html
@@ -426,6 +435,13 @@ class TestHtmlTemplate:
         assert "devicePixelRatio" in html
         assert "function layout" in html
         assert "overflow:hidden" in html
+        # Typeset segment renderers: canvas draws sub/sup with a smaller
+        # font at an offset baseline; HTML legend/tooltip use <sub>/<sup>.
+        assert "function drawSegs" in html
+        assert "function segHtml" in html
+        assert "class='csub'" in html
+        assert "class='csup'" in html
+        assert "getAttribute(\"data-name\")" in html
 
 
 # ═════════════════════════════════════════════════════════════════════
