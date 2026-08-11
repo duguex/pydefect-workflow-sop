@@ -164,5 +164,5 @@ class TestPollSinglePoint:
         orch.js = js
         orch.dry_run = False
         n = orch._poll_tracked()
-        assert n == 0
+        assert n == 1  # finalized as converged, not crashed
         assert not any(r[0] == "failed" for r in recs), recs
