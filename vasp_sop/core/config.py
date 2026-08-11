@@ -187,6 +187,19 @@ class PipelineConfig:
         sc = plan.get("supercell", {})
         d = plan.get("defects", {})
         corr = plan.get("corrections", {})
+        # Tolerate a toplevel stage2_soc (written that way by the ADR 0014
+        # rollout, 2026-08-10) — silently ignoring it silently disabled the
+        # two-phase SOC supplement for the whole 2026 batch.
+        stage2_soc = params.get("stage2_soc", False)
+        if not stage2_soc and plan.get("stage2_soc", False):
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "toplevel stage2_soc in plan (root=%s): treating as true; "
+                "move it under 'parameters:' for schema compliance",
+                root,
+            )
+            stage2_soc = True
         return cls(
             root=root,
             formula=p.get("formula", ""),
@@ -196,7 +209,7 @@ class PipelineConfig:
             functional=params.get("functional", "pbesol"),
             encut=params.get("encut"),
             soc=params.get("soc", False),
-            stage2_soc=params.get("stage2_soc", False),
+            stage2_soc=stage2_soc,
             hubbard_u=params.get("hubbard_u", False),
             potcar_overrides=params.get("pp", []),
             supercell_min_atoms=sc.get("min_atoms", 200),

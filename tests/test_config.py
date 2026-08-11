@@ -242,3 +242,29 @@ class TestScope:
     def test_invalid_scope_rejected(self):
         with pytest.raises(ValueError, match="scope"):
             PipelineConfig(formula="GaN", scope="just-cpd")
+
+
+class TestStage2SocParsing:
+    def test_stage2_soc_under_parameters(self):
+        c = PipelineConfig.from_plan({
+            "project": {"formula": "GaN"},
+            "parameters": {"soc": True, "stage2_soc": True},
+        })
+        assert c.stage2_soc is True
+
+    def test_toplevel_stage2_soc_falls_back_with_warning(self):
+        # ADR 0014 rollout wrote it toplevel (2026-08-10); the parser must
+        # not silently disable the SOC supplement again.
+        c = PipelineConfig.from_plan({
+            "project": {"formula": "GaN"},
+            "parameters": {"soc": True},
+            "stage2_soc": True,
+        })
+        assert c.stage2_soc is True
+
+    def test_stage2_soc_absent_defaults_false(self):
+        c = PipelineConfig.from_plan({
+            "project": {"formula": "GaN"},
+            "parameters": {"soc": True},
+        })
+        assert c.stage2_soc is False
