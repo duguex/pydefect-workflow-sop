@@ -1563,6 +1563,36 @@ class BatchOrchestrator:
                     reset += 1
         return reset
 
+    def _git_snapshots(self) -> int:
+        """Snapshot each system's input/result repo (ADR 0019).
+
+        Runs ``git add -A`` + commit per system whenever anything changed
+        since the last snapshot.  Failures are logged, never raised — a
+        git problem must not crash the batch loop.  Returns the number of
+        repos that produced a commit this pass.
+        """
+        from vasp_sop.core.git_snapshot import commit_snapshot
+
+        committed = 0
+        for s in self.systems:
+            root = s["root"]
+            if not (root / ".git").is_dir():
+                # Not initialised yet — init lazily (baseline) so a new
+                # system directory joins the snapshot scheme by itself.
+                try:
+                    from vasp_sop.core.git_snapshot import init_system_repo
+
+                    if init_system_repo(root):
+                        committed += 1
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("git_snapshot: init failed for %s: %s", root, exc)
+                continue
+            if commit_snapshot(root, "cycle snapshot"):
+                committed += 1
+        if committed:
+            self._print_info(f"  Snapshot {committed} system repo(s) to git.")
+        return committed
+
     def _poll_tracked(self) -> int:
         """Poll tracked dirs: finalize converged, detect crashes, restart."""
         from vasp_sop.core.jobs import crisp_active_dirs
@@ -1793,6 +1823,7 @@ class BatchOrchestrator:
                                 f"  Reset {n} stale-converged record(s) from "
                                 "disk truth (resubmitting)."
                             )
+                        self._git_snapshots()
 
                 n_skipped, errors = self._advance_systems()
 

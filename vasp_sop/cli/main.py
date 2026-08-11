@@ -817,6 +817,18 @@ def _add_batch_parser(subparsers) -> None:
         help="Emit a mermaid graph (edges = upstream dependencies)",
     )
 
+    # git-snapshot — per-system input/result git snapshots (ADR 0019)
+    p_git = sub.add_parser(
+        "git-snapshot",
+        help="Initialise per-system git repos (baseline) and commit any "
+        "input/result changes (ADR 0019)",
+    )
+    p_git.add_argument(
+        "root",
+        type=Path,
+        help="Project root directory containing system subdirectories",
+    )
+
     # restore
     p_restore = sub.add_parser(
         "restore",
@@ -949,6 +961,8 @@ def _handle_batch(args: argparse.Namespace) -> None:
         _batch_regenerate(args.root.resolve(), args.dirs)
     elif args.batch_action == "blockers":
         _batch_blockers(args.root.resolve())
+    elif args.batch_action == "git-snapshot":
+        _batch_git_snapshot(args.root)
     elif args.batch_action == "restore":
         _batch_restore(args.root.resolve(), dry_run=args.dry_run)
     elif args.batch_action == "generate-inputs":
@@ -1226,6 +1240,34 @@ def _batch_run(
         loop=loop,
         retry_failed=retry_failed,
     ).run()
+
+
+def _batch_git_snapshot(root: Path) -> None:
+    """Initialise per-system git repos and commit pending changes (ADR 0019).
+
+    Idempotent: systems already under git are snapshotted (commit only if
+    something changed); uninitialised systems get a baseline commit.
+    """
+    from vasp_sop.core.git_snapshot import commit_snapshot, init_system_repo
+
+    if not root.is_dir():
+        raise SystemExit(f"not a directory: {root}")
+    systems = [
+        d for d in sorted(root.iterdir())
+        if d.is_dir() and (d / "plan.yaml").is_file()
+    ]
+    if not systems:
+        raise SystemExit(f"no systems found under {root}")
+    n_init = n_commit = 0
+    for d in systems:
+        if init_system_repo(d):
+            n_init += 1
+        elif commit_snapshot(d, "manual snapshot"):
+            n_commit += 1
+    print(
+        f"git-snapshot: {len(systems)} system(s), "
+        f"{n_init} baseline commit(s), {n_commit} change commit(s)"
+    )
 
 
 def _batch_reconcile(root: Path) -> None:
