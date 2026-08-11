@@ -1,34 +1,53 @@
-"""Dependency-graph audit (batch deps): structure, edges, bottlenecks."""
+"""Runtime dependency audit: gates, lineage, blocking roots."""
 
-import pathlib
+from pathlib import Path
 
 import pytest
 
 from vasp_sop.report import deps
 
+_INPUTS = ("INCAR", "POSCAR", "POTCAR", "KPOINTS")
 
-def _make_system(tmp_path: pathlib.Path, name: str = "TestSys") -> pathlib.Path:
-    """Minimal system: plan.yaml + unitcell + cpd + defect dirs."""
-    sys_dir = tmp_path / name
-    (sys_dir / "unitcell" / "structure_opt").mkdir(parents=True)
-    (sys_dir / "cpd").mkdir()
-    (sys_dir / "defect" / "perfect").mkdir(parents=True)
-    for f in ("INCAR", "POSCAR", "POTCAR", "KPOINTS"):
-        (sys_dir / "unitcell" / "structure_opt" / f).write_text("x\n")
-    (sys_dir / "plan.yaml").write_text(
+
+def _write_inputs(directory: Path) -> None:
+    for name in _INPUTS:
+        (directory / name).write_text("x\n")
+
+
+def _make_system(tmp_path: Path) -> Path:
+    """One target, two competing phases, and a three-charge defect chain."""
+    system = tmp_path / "TestSys"
+    so = system / "unitcell" / "structure_opt"
+    so.mkdir(parents=True)
+    _write_inputs(so)
+    cpd = system / "cpd"
+    cpd.mkdir()
+    target = cpd / "TestO3_mp-1"
+    target.mkdir()
+    _write_inputs(target)
+    for phase in ("FeO_mp-1", "Fe2O3_mp-2"):
+        directory = cpd / phase
+        directory.mkdir()
+        _write_inputs(directory)
+    (cpd / "target_vertices.yaml").write_text("vertices: []\n")
+    (cpd / "standard_energies.yaml").write_text("energies: {}\n")
+    defect = system / "defect"
+    defect.mkdir()
+    for name in ("Va_O1_0", "Va_O1_1", "Va_O1_2"):
+        directory = defect / name
+        directory.mkdir()
+        _write_inputs(directory)
+    (system / "plan.yaml").write_text(
         "project:\n  formula: TestO3\n  poscar_src: MP mp-1\n"
     )
-    return sys_dir
+    return system
 
 
-def _dirs(status_map: dict[str, str]):
-    """Fake _dir_status: path string -> status."""
-
-    def fake(path: pathlib.Path, *, jobstore_fallback: bool = False):
-        key = str(path)
-        for prefix, st in status_map.items():
-            if key.endswith(prefix):
-                return st, "test"
+def _statuses(status_map: dict[str, str]):
+    def fake(path: Path, *, jobstore_fallback: bool = False):
+        for suffix, status in status_map.items():
+            if str(path).endswith(suffix):
+                return status, "test"
         return "not-run", "test"
 
     return fake
@@ -36,80 +55,98 @@ def _dirs(status_map: dict[str, str]):
 
 @pytest.fixture
 def graph(tmp_path, monkeypatch):
-    sys_dir = _make_system(tmp_path)
-    (sys_dir / "cpd" / "FeO_mp-1").mkdir()
-    (sys_dir / "cpd" / "Fe2O3_mp-2").mkdir()
-    for d in ("Va_O1_0", "Va_O1_1", "Va_O1_2"):
-        (sys_dir / "defect" / d).mkdir()
+    _make_system(tmp_path)
     status_map = {
         "structure_opt": "converged",
+        "TestO3_mp-1": "converged",
         "FeO_mp-1": "converged",
         "Fe2O3_mp-2": "not-run",
-        "Va_O1_0": "converged",   # root (median of 0/1/2)
+        # Charge 1 is the median root; it gates 0 and 2 first submissions.
+        "Va_O1_0": "not-run",
         "Va_O1_1": "not-run",
         "Va_O1_2": "not-run",
     }
-    monkeypatch.setattr(deps, "_dir_status", _dirs(status_map))
-    g = deps.build_graph(tmp_path)
-    return g, status_map
+    monkeypatch.setattr(deps, "_dir_status", _statuses(status_map))
+    return deps.build_graph(tmp_path)
 
 
-def test_system_node_and_groups(graph):
-    g, _ = graph
-    nodes = {n["id"]: n for n in g["nodes"]}
-    sys_id = "sys:TestSys"
-    assert sys_id in nodes
-    children = nodes[sys_id]["children"]
-    kinds = {nodes[c]["kind"] for c in children if c in nodes}
-    assert "task-group" in kinds
-    group_ids = [c for c in children
-                 if nodes.get(c, {}).get("kind") == "task-group"]
-    labels = sorted(nodes[c]["label"] for c in group_ids)
-    assert labels == ["cpd (2)", "defects (1 chains)", "unitcell (1)"]
+def _nodes(graph: dict) -> dict[str, dict]:
+    return {node["id"]: node for node in graph["nodes"]}
 
 
-def test_seeding_edges(graph):
-    g, _ = graph
-    nodes = {n["id"]: n for n in g["nodes"]}
-    # Va_O1 chain: root is 1 (median of [0,1,2]); 0 and 2 depend on it
-    chain = next(n for n in g["nodes"] if n["kind"] == "defect-chain")
-    by_label = {c["label"]: c for c in g["nodes"]
-                if c["id"].startswith(chain["id"] + ":")}
-    root_id = by_label["Va_O1_1"]["id"]
-    assert root_id in by_label["Va_O1_0"]["deps"]
-    assert root_id in by_label["Va_O1_2"]["deps"]
-    # chain status: root converged, others waiting-seed -> not converged
-    assert chain["n_ok"] == 1
-    assert chain["n_total"] == 3
+def test_systems_are_addressable_objects_and_groups(graph):
+    nodes = _nodes(graph)
+    assert graph["systems"] == [{"id": "sys:TestSys", "label": "TestSys"}]
+    system = nodes["sys:TestSys"]
+    labels = sorted(
+        nodes[c]["label"]
+        for c in system["children"]
+        if nodes[c]["kind"] == "task-group"
+    )
+    assert labels == ["cpd (3)", "defects (1 chains)", "unitcell (1)"]
 
 
-def test_bottleneck_scoring(graph):
-    g, _ = graph
-    # wave3 depends on all cpd + chains + uc: Fe2O3 not-run -> 1 block
-    by_label = {n["label"]: n for n in g["nodes"]
-                if n["label"] == "Fe2O3_mp-2"}
-    assert by_label["Fe2O3_mp-2"]["bottleneck"] >= 1
-    # bottlenecks list is sorted descending
-    scores = [b["score"] for b in g["bottlenecks"]]
-    assert scores == sorted(scores, reverse=True)
+def test_seed_is_hard_gate_and_target_poscar_is_lineage(graph):
+    nodes = _nodes(graph)
+    root = "sys:TestSys:df:Va_O1:Va_O1_1"
+    child = "sys:TestSys:df:Va_O1:Va_O1_0"
+    assert root in nodes[child]["deps"]
+    seed = next(
+        edge
+        for edge in graph["edges"]
+        if edge["source"] == root
+        and edge["target"] == child
+        and edge["type"] == deps.RUNTIME_GATE
+    )
+    assert seed["hard"] is True
+    lineage = next(
+        edge
+        for edge in graph["edges"]
+        if edge["target"] == child
+        and edge["type"] == deps.LINEAGE
+        and edge["label"] == "defect input source"
+    )
+    assert lineage["source"] == "sys:TestSys:artifact:target-poscar"
 
 
-def test_wave3_gate_deps(graph):
-    g, _ = graph
-    w3 = next(n for n in g["nodes"] if n["kind"] == "wave3")
-    # deps include the cpd dirs and the defect chain
-    labels = {n["label"] for n in g["nodes"]
-              if n["id"] in w3["deps"]}
-    assert "FeO_mp-1" in labels and "Fe2O3_mp-2" in labels
-    assert "Va_O1" in labels
+def test_parallel_defects_have_no_false_structure_opt_gate(graph):
+    nodes = _nodes(graph)
+    structure_opt = "sys:TestSys:uc:structure_opt"
+    cpd = nodes["sys:TestSys:cpd:FeO_mp-1"]
+    defect = nodes["sys:TestSys:df:Va_O1:Va_O1_0"]
+    assert structure_opt not in cpd["deps"]
+    assert structure_opt not in defect["deps"]
 
 
-def test_renderers(graph):
-    g, _ = graph
-    tree = deps.render_tree(g)
+def test_analysis_uses_real_gate_artifacts_not_all_cpd_phases(graph):
+    nodes = _nodes(graph)
+    analysis = next(node for node in graph["nodes"] if node["kind"] == "analysis-gate")
+    assert "sys:TestSys:artifact:target_vertices" in analysis["deps"]
+    assert "sys:TestSys:artifact:standard_energies" in analysis["deps"]
+    assert "sys:TestSys:cpd:Fe2O3_mp-2" not in analysis["deps"]
+    assert nodes["sys:TestSys:artifact:target_vertices"]["kind"] == "gate-artifact"
+
+
+def test_blocking_roots_are_disposition_partitioned_and_transitive(graph):
+    roots = graph["blocking_roots"]
+    va_root = next(root for root in roots if root["label"] == "Va_O1_1")
+    assert va_root["disposition"] == "automatic"
+    # Both non-root charge states and their common analysis downstream count.
+    assert va_root["affected"] >= 2
+    assert roots == sorted(
+        roots,
+        key=lambda root: (
+            {"manual": 0, "automatic": 1, "wait": 2, "none": 3}[root["disposition"]],
+            -root["affected"],
+            root["label"],
+        ),
+    )
+
+
+def test_renderers_expose_roots_and_relation_edges(graph):
+    tree = deps.render_tree(graph)
     assert "TestSys" in tree
-    assert "bottlenecks" in tree
-    mm = deps.render_mermaid(g)
-    assert mm.startswith("graph TD")
-    raw = deps.to_json(g)
-    assert '"systems"' in raw
+    assert "blocking roots" in tree
+    assert "Va_O1_1" in tree
+    assert deps.render_mermaid(graph).startswith("graph TD")
+    assert '"blocking_roots"' in deps.to_json(graph)

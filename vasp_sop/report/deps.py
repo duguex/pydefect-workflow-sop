@@ -1,33 +1,24 @@
-"""Dependency graph for batch audits (read-only).
+"""Read-only runtime dependency audit for a vasp-sop batch.
 
-Builds the dependency tree of every calculation in a batch root — what
-each node needs (upstream dependencies), who it blocks (downstream
-nodes waiting on it), each node's runtime state, and a global bottleneck
-ranking (nodes whose unmet dependency blocks the most downstream work).
-Nothing here writes to JobStore, files, or crisp.
+The report distinguishes four relation layers:
 
-Node kinds:
-    system        — one project directory (root of the tree)
-    phase         — a position in the phase chain (STRUCTURE_OPT → … → COMPLETE)
-    unitcell-task — structure_opt / band / dos / dielectric
-    cpd-dir       — one competing-phase directory
-    defect-chain  — a defect group (charge suffix stripped, ADR 0010)
-    defect-dir    — one charge-state directory
-    wave3         — chempot / analysis gate (formation energies)
+* ``runtime_gate`` — a condition that currently gates downstream work;
+* ``lineage`` — a POSCAR/seed/result provenance relation;
+* ``dispatch`` — an actual orchestrator fan-out/fan-in relation;
+* ``containment`` — system/group/chain ownership, not a blocking edge.
 
-Edges are *upstream dependencies*: node.deps lists what must be ready
-before the node can finish.  A node whose deps are not all ready is
-``waiting``; each such blocked node adds 1 to the bottleneck score of
-every unmet dep.
-
-States (disk-first, crisp second, JobStore third):
-    converged / running / waiting / waiting-seed / failed / no-input /
-    not-run / complete / blocked
+Only runtime gates contribute to blocking-root scoring. This module never
+writes JobStore, calculation directories, or crisp state.
 """
+
 from __future__ import annotations
 
+import datetime
 import json
-from collections import Counter
+import os
+import re
+import sqlite3
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -35,20 +26,27 @@ from vasp_sop.core.config import PipelineConfig
 from vasp_sop.vasp.convergence import convergence_verdict
 from vasp_sop.vasp.io import input_ready
 
-PHASE_CHAIN = (
-    "STRUCTURE_OPT", "COMPETING", "CHEM_POT_DIAGRAM",
-    "UNITCELL_DEFECT", "COMPLETE",
+RUNTIME_GATE = "runtime_gate"
+LINEAGE = "lineage"
+DISPATCH = "dispatch"
+CONTAINMENT = "containment"
+_RELATION_TYPES = (RUNTIME_GATE, LINEAGE, DISPATCH, CONTAINMENT)
+_READY = frozenset(("converged", "complete"))
+_AUTO_RETRY_REASONS = frozenset(
+    {
+        "force_gate_fail",
+        "nsw_exhausted",
+        "nsw_early_exit",
+        "missing_forces",
+        "truncated",
+    }
 )
+_CPD_MAX_IONIC_RESTARTS = 3
 
-# ── crisp / JobStore lookups (best-effort, never fatal) ──────────────
 
-
+# ── crisp / JobStore lookups (best effort, never fatal) ───────────────
 def _crisp_status(local_dir: Path) -> str | None:
-    """Latest crisp job status for *local_dir*, or None when unavailable."""
     try:
-        import sqlite3
-        import os
-
         db = Path(os.path.expanduser("~/.crisp/data/agent.db"))
         if not db.is_file():
             return None
@@ -56,7 +54,8 @@ def _crisp_status(local_dir: Path) -> str | None:
         try:
             row = con.execute(
                 "select status from jobs where local_dir = ? "
-                "order by rowid desc limit 1", (str(local_dir),)
+                "order by rowid desc limit 1",
+                (str(local_dir),),
             ).fetchone()
             return row[0] if row else None
         finally:
@@ -66,11 +65,7 @@ def _crisp_status(local_dir: Path) -> str | None:
 
 
 def _jobstore_latest(local_dir: Path) -> str | None:
-    """Latest JobStore status for *local_dir*, or None."""
     try:
-        import sqlite3
-        import os
-
         db = Path(os.path.expanduser("~/.vasp_sop/jobs.db"))
         if not db.is_file():
             return None
@@ -78,7 +73,8 @@ def _jobstore_latest(local_dir: Path) -> str | None:
         try:
             row = con.execute(
                 "select status from job_history where dir_path = ? "
-                "order by timestamp desc limit 1", (str(local_dir),)
+                "order by timestamp desc limit 1",
+                (str(local_dir),),
             ).fetchone()
             return row[0] if row else None
         finally:
@@ -89,9 +85,6 @@ def _jobstore_latest(local_dir: Path) -> str | None:
 
 def _jobstore_history(local_dir: Path) -> list[dict]:
     try:
-        import sqlite3
-        import os
-
         db = Path(os.path.expanduser("~/.vasp_sop/jobs.db"))
         if not db.is_file():
             return []
@@ -102,82 +95,210 @@ def _jobstore_history(local_dir: Path) -> list[dict]:
                 "where dir_path = ? order by timestamp",
                 (str(local_dir),),
             ).fetchall()
-            return [{"status": r[0], "source": r[1], "reason": r[2]}
-                    for r in rows]
+            return [{"status": r[0], "source": r[1], "reason": r[2]} for r in rows]
         finally:
             con.close()
     except Exception:
         return []
 
 
-# ── nodes ─────────────────────────────────────────────────────────────
-
-
+# ── node model ────────────────────────────────────────────────────────
 @dataclass
 class Node:
     id: str
-    kind: str            # system|phase|unitcell-task|cpd-dir|defect-chain|defect-dir|wave3
+    kind: str
     label: str
     path: str | None = None
-    deps: list[str] = field(default_factory=list)   # upstream node ids
+    deps: list[str] = field(default_factory=list)  # runtime-gate upstream IDs
     status: str = "not-run"
     detail: str = ""
-    n_ok: int = 0        # children converged
+    disposition: str = "none"  # wait | automatic | manual | none
+    n_ok: int = 0
     n_total: int = 0
-    children: list[str] = field(default_factory=list)
+    children: list[str] = field(default_factory=list)  # containment only
     bottleneck: int = 0
 
     def to_dict(self) -> dict:
         return {
-            "id": self.id, "kind": self.kind, "label": self.label,
-            "path": self.path, "deps": self.deps, "status": self.status,
-            "detail": self.detail, "n_ok": self.n_ok, "n_total": self.n_total,
-            "children": self.children, "bottleneck": self.bottleneck,
+            "id": self.id,
+            "kind": self.kind,
+            "label": self.label,
+            "path": self.path,
+            "deps": self.deps,
+            "status": self.status,
+            "detail": self.detail,
+            "disposition": self.disposition,
+            "n_ok": self.n_ok,
+            "n_total": self.n_total,
+            "children": self.children,
+            "bottleneck": self.bottleneck,
         }
 
 
 def _dir_status(path: Path, *, jobstore_fallback: bool = False) -> tuple[str, str]:
-    """Disk-first status for a single calculation directory.
-
-    *jobstore_fallback*: unitcell tasks are never re-run after their
-    phase passed — a converged/pending JobStore record with no usable
-    disk inputs is an archival artifact, not a missing calculation.
-    """
+    """Disk-first status; fallback is reserved for staging structure_opt."""
     if jobstore_fallback:
         js = _jobstore_latest(path)
         if js in ("converged", "pending"):
-            return "converged", f"jobstore:{js} (phase passed)"
+            return "converged", f"jobstore:{js} (staging phase passed)"
     if not input_ready(path):
         return "no-input", "missing INCAR/POSCAR/POTCAR/KPOINTS"
-    v = convergence_verdict(path)
-    if v.converged:
-        return "converged", v.reason or ""
+    verdict = convergence_verdict(path)
+    if verdict.converged:
+        return "converged", verdict.reason or ""
     crisp = _crisp_status(path)
     if crisp in ("running", "submitted", "submit", "ready_fetch"):
         return "running", f"crisp:{crisp}"
     js = _jobstore_latest(path)
-    if v.reason == "electronic_not_conv":
+    if verdict.reason == "electronic_not_conv":
         return "failed", "NELM exhaustion (not auto-retried)"
     if js == "failed":
-        return "failed", v.reason or "failed"
-    return "not-run", v.reason or ""
+        return "failed", verdict.reason or "failed"
+    return "not-run", verdict.reason or ""
 
 
-# ── graph builder ─────────────────────────────────────────────────────
+def _has_zbrent_failure(path: Path) -> bool:
+    outcar = path / "OUTCAR"
+    if not outcar.is_file():
+        return False
+    try:
+        with outcar.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 65536))
+            return b"ZBRENT" in f.read()
+    except OSError:
+        return False
+
+
+def _defect_charge(name: str) -> int | None:
+    match = re.search(r"_(-?\d+)$", name)
+    return int(match.group(1)) if match else None
+
+
+def _chain_roots(charges: list[int]) -> set[int]:
+    qs = sorted(charges)
+    if not qs:
+        return set()
+    n = len(qs)
+    return {qs[n // 2]} if n % 2 else {qs[n // 2 - 1], qs[n // 2]}
+
+
+def _disposition(path: Path | None, kind: str, status: str, detail: str) -> str:
+    """Mirror current orchestrator behavior, including CPD/defect asymmetry."""
+    if status in ("running", "submitted", "waiting", "waiting-seed"):
+        return "wait"
+    if status in _READY:
+        return "none"
+    if kind == "gate-artifact":
+        return "automatic" if status == "not-run" else "manual"
+    if status == "no-input":
+        return "manual"
+    if status == "not-run":
+        return "automatic" if path is not None and input_ready(path) else "manual"
+    if status == "failed":
+        reason = detail.split("(", 1)[0].strip()
+        if kind == "cpd-dir":
+            if path is not None and _has_zbrent_failure(path):
+                return "automatic"
+            history = _jobstore_history(path) if path is not None else []
+            restarts = sum(1 for row in history if row.get("source") == "ionic_restart")
+            if reason in _AUTO_RETRY_REASONS and (
+                reason == "truncated" or restarts < _CPD_MAX_IONIC_RESTARTS
+            ):
+                return "automatic"
+            return "manual"
+        if kind == "defect-dir":
+            # wave2 restarts any defect with history, including NELM failures.
+            return "automatic"
+        return "manual"
+    return "manual"
+
+
+def _add_edge(
+    edges: list[dict],
+    source: str,
+    target: str,
+    relation: str,
+    *,
+    label: str = "",
+    hard: bool = False,
+) -> None:
+    if relation not in _RELATION_TYPES:
+        raise ValueError(f"unknown relation type: {relation}")
+    edge_id = f"{relation}:{source}->{target}"
+    if any(e["id"] == edge_id for e in edges):
+        return
+    edges.append(
+        {
+            "id": edge_id,
+            "source": source,
+            "target": target,
+            "type": relation,
+            "label": label,
+            "hard": hard,
+        }
+    )
+
+
+def _add_gate_artifact(
+    nodes: dict[str, Node],
+    edges: list[dict],
+    sid: str,
+    path: Path,
+    label: str,
+) -> str:
+    aid = f"{sid}:artifact:{label}"
+    exists = path.is_file() and path.stat().st_size > 0
+    nodes[aid] = Node(
+        id=aid,
+        kind="gate-artifact",
+        label=label,
+        path=str(path),
+        status="complete" if exists else "not-run",
+        detail="present" if exists else "missing gate artifact",
+    )
+    return aid
+
+
+def _group(
+    nodes: dict[str, Node], sid: str, gid: str, label: str, child_ids: list[str]
+) -> str:
+    node = Node(id=gid, kind="task-group", label=label, children=child_ids)
+    node.n_total = len(child_ids)
+    node.n_ok = sum(nodes[c].status in _READY for c in child_ids if c in nodes)
+    node.status = (
+        "converged"
+        if node.n_total and node.n_ok == node.n_total
+        else (
+            "running"
+            if any(
+                nodes.get(c, Node("", "", "")).status == "running" for c in child_ids
+            )
+            else (
+                "waiting-seed"
+                if any(
+                    nodes.get(c, Node("", "", "")).status == "waiting-seed"
+                    for c in child_ids
+                )
+                else "not-run"
+            )
+        )
+    )
+    nodes[gid] = node
+    nodes[sid].children.append(gid)
+    return gid
 
 
 def build_graph(root: Path, *, system_filter: str | None = None) -> dict:
-    """Build the dependency graph for every system under *root*.
-
-    Read-only: uses disk verdicts, crisp agent.db and the vasp-sop
-    JobStore.  Returns a JSON-serialisable dict.
-    """
+    """Build a JSON-serialisable, read-only runtime relation graph."""
     from vasp_sop.core.system import System
     from vasp_sop.defect import is_valid_defect_dir
-    import re
 
     nodes: dict[str, Node] = {}
-    systems: list[str] = []
+    edges: list[dict] = []
+    systems: list[dict] = []
+    system_models: dict[str, tuple[System, str]] = {}
 
     for sys_dir in sorted(root.iterdir()):
         if not sys_dir.is_dir() or not (sys_dir / "plan.yaml").is_file():
@@ -185,207 +306,347 @@ def build_graph(root: Path, *, system_filter: str | None = None) -> dict:
         name = sys_dir.name
         if system_filter and name != system_filter:
             continue
-        systems.append(name)
+        sid = f"sys:{name}"
+        systems.append({"id": sid, "label": name})
         try:
             cfg = PipelineConfig.from_yaml(sys_dir / "plan.yaml", root=sys_dir)
             sys_model = System(sys_dir, cfg)
+            phase = sys_model.derive_phase(_FakeStore())
         except Exception as exc:
-            nodes[f"sys:{name}"] = Node(
-                id=f"sys:{name}", kind="system", label=name,
-                status="blocked", detail=f"plan parse failed: {exc}",
+            nodes[sid] = Node(
+                id=sid,
+                kind="system",
+                label=name,
+                status="blocked",
+                detail=f"plan parse failed: {exc}",
+                disposition="manual",
             )
             continue
+        system_models[sid] = (sys_model, phase)
+        nodes[sid] = Node(
+            id=sid,
+            kind="system",
+            label=name,
+            path=str(sys_dir),
+            status="complete" if phase == "COMPLETE" else "blocked",
+            detail=f"phase={phase}",
+            disposition="none",
+        )
 
-        sid = f"sys:{name}"
-        snode = Node(id=sid, kind="system", label=name, path=str(sys_dir))
-        nodes[sid] = snode
-
-        def _group(gid: str, label: str, child_ids: list[str],
-                   kind: str = "task-group") -> str:
-            g = Node(id=gid, kind=kind, label=label)
-            g.children = child_ids
-            g.n_total = len(child_ids)
-            g.n_ok = sum(1 for i in child_ids
-                         if nodes.get(i) and nodes[i].status == "converged")
-            g.status = (
-                "converged" if g.n_ok == g.n_total and g.n_total else
-                "running" if any(nodes.get(i) and nodes[i].status == "running"
-                                 for i in child_ids) else
-                "not-run"
-            )
-            nodes[gid] = g
-            snode.children.append(gid)
-            return gid
-
-        # ── unitcell tasks ────────────────────────────────────────────
-        uc_root = sys_dir / "unitcell"
         uc_ids: list[str] = []
-        if uc_root.is_dir():
-            for task in ("structure_opt", "band", "dos", "dielectric"):
-                td = uc_root / task
-                if not td.is_dir():
-                    continue
-                nid = f"{sid}:uc:{task}"
-                st, det = _dir_status(td, jobstore_fallback=True)
-                n = Node(id=nid, kind="unitcell-task", label=task,
-                         path=str(td), status=st, detail=det)
-                nodes[nid] = n
-                uc_ids.append(nid)
+        uc_root = sys_dir / "unitcell"
+        for task in ("structure_opt", "band", "dos", "dielectric"):
+            td = uc_root / task
+            if not td.is_dir():
+                continue
+            nid = f"{sid}:uc:{task}"
+            st, detail = _dir_status(td, jobstore_fallback=(task == "structure_opt"))
+            nodes[nid] = Node(
+                id=nid,
+                kind="unitcell-task",
+                label=task,
+                path=str(td),
+                status=st,
+                detail=detail,
+                disposition=_disposition(td, "unitcell-task", st, detail),
+            )
+            uc_ids.append(nid)
         if uc_ids:
-            _group(f"{sid}:group:uc", f"unitcell ({len(uc_ids)})", uc_ids)
+            _group(nodes, sid, f"{sid}:group:uc", f"unitcell ({len(uc_ids)})", uc_ids)
 
-        # ── cpd phases ────────────────────────────────────────────────
-        cpd_root = sys_dir / "cpd"
         cpd_ids: list[str] = []
-        if cpd_root.is_dir():
-            for pd in sorted(cpd_root.iterdir()):
-                if not pd.is_dir() or pd.name == "combos":
-                    continue
-                nid = f"{sid}:cpd:{pd.name}"
-                st, det = _dir_status(pd)
-                n = Node(id=nid, kind="cpd-dir", label=pd.name, path=str(pd),
-                         status=st, detail=det)
-                nodes[nid] = n
-                cpd_ids.append(nid)
+        cpd_root = sys_dir / "cpd"
+        for pd in sorted(cpd_root.iterdir()) if cpd_root.is_dir() else []:
+            if not pd.is_dir() or pd.name == "combos":
+                continue
+            nid = f"{sid}:cpd:{pd.name}"
+            st, detail = _dir_status(pd)
+            nodes[nid] = Node(
+                id=nid,
+                kind="cpd-dir",
+                label=pd.name,
+                path=str(pd),
+                status=st,
+                detail=detail,
+                disposition=_disposition(pd, "cpd-dir", st, detail),
+            )
+            cpd_ids.append(nid)
         if cpd_ids:
-            gid = _group(f"{sid}:group:cpd", f"cpd ({len(cpd_ids)})", cpd_ids)
-            g = nodes[gid]
-            g.detail = f"{g.n_ok}/{g.n_total} converged"
+            _group(nodes, sid, f"{sid}:group:cpd", f"cpd ({len(cpd_ids)})", cpd_ids)
 
-        # ── defect chains (ADR 0010 grouping) ─────────────────────────
-        df_root = sys_dir / "defect"
         chain_ids: list[str] = []
+        df_root = sys_dir / "defect"
         if df_root.is_dir():
             chains: dict[str, list[Path]] = {}
             for dd in sorted(df_root.iterdir()):
-                if not dd.is_dir() or not is_valid_defect_dir(dd):
-                    continue
-                if dd.name == "perfect":
+                if (
+                    not dd.is_dir()
+                    or dd.name == "perfect"
+                    or not is_valid_defect_dir(dd)
+                ):
                     continue
                 key = re.sub(r"_(-?\d+)$", "", dd.name)
                 chains.setdefault(key, []).append(dd)
             for key, dirs in sorted(chains.items()):
-                nid = f"{sid}:df:{key}"
-                cn = Node(id=nid, kind="defect-chain", label=key)
-                nodes[nid] = cn
-                chain_ids.append(nid)
-                charges = sorted(
-                    int(m.group(1))
-                    for m in (re.search(r"_(-?\d+)$", d.name) for d in dirs)
-                    if m
+                cid = f"{sid}:df:{key}"
+                chain = Node(id=cid, kind="defect-chain", label=key)
+                nodes[cid] = chain
+                chain_ids.append(cid)
+                roots = _chain_roots(
+                    [q for q in (_defect_charge(d.name) for d in dirs) if q is not None]
                 )
-                roots = _chain_roots(charges)
-                dir_ids = []
                 for dd in sorted(dirs):
-                    did = f"{nid}:{dd.name}"
-                    st, det = _dir_status(dd)
+                    did = f"{cid}:{dd.name}"
+                    st, detail = _dir_status(dd)
                     q = _defect_charge(dd.name)
-                    dn = Node(id=did, kind="defect-dir", label=dd.name,
-                              path=str(dd), status=st, detail=det)
-                    # seeding dependency: non-root charges wait on a
-                    # converged sibling (ADR 0010)
+                    has_history = bool(_jobstore_history(dd))
+                    if (
+                        q is not None
+                        and q not in roots
+                        and st == "not-run"
+                        and not has_history
+                    ):
+                        st, detail = "waiting-seed", "waits for root charge (ADR 0010)"
+                    nodes[did] = Node(
+                        id=did,
+                        kind="defect-dir",
+                        label=dd.name,
+                        path=str(dd),
+                        status=st,
+                        detail=detail,
+                        disposition=_disposition(dd, "defect-dir", st, detail),
+                    )
+                    chain.children.append(did)
                     if q is not None and q not in roots:
-                        dn.deps = [f"{nid}:{s.name}" for s in dirs
-                                   if _defect_charge(s.name) in roots]
-                        # never submitted + no converged sibling -> waiting
-                        if st == "not-run" and not _jobstore_history(dd):
-                            dn.status = "waiting-seed"
-                            dn.detail = "waits for root charge (ADR 0010)"
-                    nodes[did] = dn
-                    cn.children.append(did)
-                    dir_ids.append(did)
-                cn.n_total = len(dir_ids)
-                cn.n_ok = sum(1 for i in dir_ids
-                              if nodes[i].status == "converged")
-                cn.status = (
-                    "converged" if cn.n_ok == cn.n_total and cn.n_total
-                    else "running" if any(nodes[i].status == "running"
-                                          for i in dir_ids)
-                    else "waiting-seed" if any(
-                        nodes[i].status == "waiting-seed" for i in dir_ids
-                    ) or (cn.n_total and cn.n_ok == 0)
-                    else "not-run"
+                        for root_charge in sorted(roots):
+                            root_dirs = [
+                                d for d in dirs if _defect_charge(d.name) == root_charge
+                            ]
+                            for rd in root_dirs:
+                                rid = f"{cid}:{rd.name}"
+                                _add_edge(
+                                    edges,
+                                    rid,
+                                    did,
+                                    RUNTIME_GATE,
+                                    label="seed root",
+                                    hard=True,
+                                )
+                                _add_edge(
+                                    edges,
+                                    rid,
+                                    did,
+                                    LINEAGE,
+                                    label="CONTCAR seed source",
+                                    hard=False,
+                                )
+                chain.n_total = len(chain.children)
+                chain.n_ok = sum(nodes[c].status in _READY for c in chain.children)
+                chain.status = (
+                    "converged"
+                    if chain.n_total and chain.n_ok == chain.n_total
+                    else (
+                        "running"
+                        if any(nodes[c].status == "running" for c in chain.children)
+                        else (
+                            "waiting-seed"
+                            if any(
+                                nodes[c].status == "waiting-seed"
+                                for c in chain.children
+                            )
+                            else "not-run"
+                        )
+                    )
                 )
             if chain_ids:
-                gid = _group(f"{sid}:group:df",
-                             f"defects ({len(chain_ids)} chains)",
-                             chain_ids)
-                g = nodes[gid]
-                g.detail = f"{g.n_ok}/{g.n_total} chains converged"
-                # chains that are all waiting-seed make the group wait too
-                if g.status == "not-run" and all(
-                    nodes[i].status == "waiting-seed"
-                    for i in chain_ids if nodes.get(i)
-                ):
-                    g.status = "waiting-seed"
+                gid = _group(
+                    nodes,
+                    sid,
+                    f"{sid}:group:df",
+                    f"defects ({len(chain_ids)} chains)",
+                    chain_ids,
+                )
+                nodes[gid].detail = (
+                    f"{nodes[gid].n_ok}/{nodes[gid].n_total} chains converged"
+                )
 
-        # ── phase chain ───────────────────────────────────────────────
-        try:
-            phase = sys_model.derive_phase(_FakeStore())
-        except Exception:
-            phase = "?"
-        snode.status = "complete" if phase == "COMPLETE" else "blocked"
-        # phase chain nodes: current phase and everything downstream
-        start = PHASE_CHAIN.index(phase) if phase in PHASE_CHAIN else 0
-        for ph in PHASE_CHAIN[start:]:
-            pid = f"{sid}:phase:{ph}"
-            pn = Node(id=pid, kind="phase", label=ph)
-            nodes[pid] = pn
-            snode.children.append(pid)
-        # A system past STRUCTURE_OPT has finished its unitcell
-        # relaxation — a structure_opt dir without disk inputs is an
-        # archival artifact, not a missing calculation (do not let it
-        # bottleneck every cpd/defect below).
-        if phase != "STRUCTURE_OPT":
-            so_id = f"{sid}:uc:structure_opt"
-            so = nodes.get(so_id)
-            if so is not None and so.status != "converged":
-                so.status = "converged"
-                so.detail = "phase passed (archival)"
+        # Provenance: defects are built from the target POSCAR, not from
+        # structure_opt convergence. This is deliberately not a hard gate.
+        target = sys_model.target_dir
+        if target is not None:
+            target_poscar = target / "POSCAR"
+            aid = f"{sid}:artifact:target-poscar"
+            nodes[aid] = Node(
+                id=aid,
+                kind="data-artifact",
+                label="target POSCAR",
+                path=str(target_poscar),
+                status="complete" if target_poscar.is_file() else "not-run",
+                detail="defect builder source",
+            )
+            nodes[sid].children.append(aid)
+            for cid in chain_ids:
+                for did in nodes[cid].children:
+                    _add_edge(edges, aid, did, LINEAGE, label="defect input source")
 
-        # wave3 gates: chempot needs all cpd; analysis needs defects + UC
-        w3 = Node(id=f"{sid}:wave3", kind="wave3",
-                  label="formation energies (wave3)")
-        w3.deps = cpd_ids + chain_ids + uc_ids
-        nodes[w3.id] = w3
-        snode.children.append(w3.id)
-        snode.detail = f"phase={phase}"
+        # The actual wave2 dispatch fans out CPD and defects/perfect in
+        # COMPETING; this is a relation layer, not a blocking gate.
+        if phase in ("COMPETING", "UNITCELL_DEFECT"):
+            did = f"{sid}:dispatch:wave2"
+            nodes[did] = Node(
+                id=did, kind="dispatch", label="wave2 dispatch", status="running"
+            )
+            nodes[sid].children.append(did)
+            for task_id in cpd_ids + chain_ids + uc_ids:
+                _add_edge(edges, did, task_id, DISPATCH, label="same-cycle dispatch")
 
-    # ── dependency edges: defect input needs perfect; cpd needs UC ────
-    for nid, node in nodes.items():
-        if node.kind in ("cpd-dir", "defect-chain", "defect-dir"):
-            uc_so = f"{nid.split(':')[0]}:{nid.split(':')[1]}:uc:structure_opt"
-            if uc_so in nodes and uc_so not in node.deps:
-                node.deps.append(uc_so)
+        # Analysis gate: actual wave3 waits on UC disk completion and
+        # defect VASP truth; it does not wait on every CPD directory.
+        wave3_id = f"{sid}:wave3"
+        nodes[wave3_id] = Node(
+            id=wave3_id,
+            kind="analysis-gate",
+            label="analysis / formation energies",
+            status=(
+                "complete"
+                if (sys_dir / "defect" / "defect_energy_summary.json").is_file()
+                else "not-run"
+            ),
+            disposition="none",
+        )
+        nodes[sid].children.append(wave3_id)
+        for task_id in uc_ids:
+            if nodes[task_id].label in ("band", "dos", "dielectric"):
+                nodes[wave3_id].deps.append(task_id)
+                _add_edge(
+                    edges,
+                    task_id,
+                    wave3_id,
+                    RUNTIME_GATE,
+                    label="UC analysis gate",
+                    hard=True,
+                )
+        for cid in chain_ids:
+            for did in nodes[cid].children:
+                nodes[wave3_id].deps.append(did)
+                _add_edge(
+                    edges,
+                    did,
+                    wave3_id,
+                    RUNTIME_GATE,
+                    label="defect VASP gate",
+                    hard=True,
+                )
+        for label in ("target_vertices", "standard_energies"):
+            path = cpd_root / f"{label}.yaml"
+            aid = _add_gate_artifact(nodes, edges, sid, path, label)
+            nodes[sid].children.append(aid)
+            nodes[wave3_id].deps.append(aid)
+            _add_edge(edges, aid, wave3_id, RUNTIME_GATE, label="phase gate", hard=True)
 
-    # ── bottleneck scoring ───────────────────────────────────────────
-    # For every node with an unmet upstream dependency, that dependency
-    # earns +1 (it is blocking this node).  The global bottleneck list is
-    # the sorted ranking — nodes whose unmet state blocks the most
-    # downstream work.
-    bottlenecks: Counter[str] = Counter()
-    for nid, n in nodes.items():
-        if n.kind in ("system", "phase"):
-            continue
-        for dep in n.deps:
-            dn = nodes.get(dep)
-            if dn is not None and dn.status not in ("converged", "complete"):
-                bottlenecks[dep] += 1
-    for nid, score in bottlenecks.items():
-        if nid in nodes:
-            nodes[nid].bottleneck = score
+    # Materialise containment relations separately; containment never scores.
+    for parent in nodes.values():
+        for child in parent.children:
+            _add_edge(edges, parent.id, child, CONTAINMENT, label="contains")
+
+    node_map = nodes
+    for edge in edges:
+        if edge["type"] == RUNTIME_GATE:
+            target = node_map.get(edge["target"])
+            source = node_map.get(edge["source"])
+            if (
+                target is not None
+                and source is not None
+                and source.id not in target.deps
+            ):
+                target.deps.append(source.id)
+
+    roots = _blocking_roots(nodes, edges)
+    for item in roots:
+        nodes[item["id"]].bottleneck = item["affected"]
 
     return {
         "generated_at": _now_iso(),
         "root": str(root),
         "nodes": [n.to_dict() for n in nodes.values()],
         "systems": systems,
+        "edges": edges,
+        "blocking_roots": roots,
+        # Compatibility alias for existing consumers; it is now the
+        # disposition-partitioned blocking-root ranking, not raw deps.
         "bottlenecks": [
-            {"id": nid, "label": nodes[nid].label, "score": s,
-             "status": nodes[nid].status}
-            for nid, s in bottlenecks.most_common()
+            {
+                "id": r["id"],
+                "label": r["label"],
+                "score": r["affected"],
+                "status": r["status"],
+                "disposition": r["disposition"],
+            }
+            for r in roots
         ],
     }
+
+
+def _blocking_roots(nodes: dict[str, Node], edges: list[dict]) -> list[dict]:
+    outgoing: dict[str, list[str]] = {}
+    incoming_unmet: dict[str, set[str]] = {}
+    for e in edges:
+        if e["type"] != RUNTIME_GATE or not e["hard"]:
+            continue
+        outgoing.setdefault(e["source"], []).append(e["target"])
+        source = nodes.get(e["source"])
+        target = nodes.get(e["target"])
+        if (
+            source
+            and target
+            and source.status not in _READY
+            and target.status not in _READY
+        ):
+            incoming_unmet.setdefault(e["source"], set()).add(e["target"])
+    candidates = set(incoming_unmet)
+    ancestors: dict[str, set[str]] = {}
+    for e in edges:
+        if e["type"] == RUNTIME_GATE and e["hard"]:
+            ancestors.setdefault(e["target"], set()).add(e["source"])
+    roots = [
+        nid
+        for nid in candidates
+        if not any(parent in candidates for parent in ancestors.get(nid, set()))
+    ]
+    result: list[dict] = []
+    for nid in roots:
+        affected: set[str] = set()
+        queue = deque(outgoing.get(nid, []))
+        while queue:
+            child = queue.popleft()
+            if child in affected:
+                continue
+            child_node = nodes.get(child)
+            if child_node is None or child_node.status in _READY:
+                continue
+            affected.add(child)
+            queue.extend(outgoing.get(child, []))
+        node = nodes[nid]
+        result.append(
+            {
+                "id": nid,
+                "label": node.label,
+                "status": node.status,
+                "disposition": node.disposition,
+                "detail": node.detail,
+                "affected": len(affected),
+                "downstream": sorted(affected),
+            }
+        )
+    disposition_order = {"manual": 0, "automatic": 1, "wait": 2, "none": 3}
+    result.sort(
+        key=lambda r: (
+            disposition_order.get(r["disposition"], 9),
+            -r["affected"],
+            r["label"],
+        )
+    )
+    return result
 
 
 class _FakeStore:
@@ -399,60 +660,41 @@ class _FakeStore:
         return _jobstore_history(Path(path))
 
 
-def _defect_charge(name: str) -> int | None:
-    import re
-
-    m = re.search(r"_(-?\d+)$", name)
-    return int(m.group(1)) if m else None
-
-
-def _chain_roots(charges: list[int]) -> set[int]:
-    """Median charge states — the chain's starting points (ADR 0010)."""
-    qs = sorted(charges)
-    n = len(qs)
-    if n == 0:
-        return set()
-    if n % 2 == 1:
-        return {qs[n // 2]}
-    return {qs[n // 2 - 1], qs[n // 2]}
-
-
 def _now_iso() -> str:
-    import datetime
-
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
 # ── rendering ─────────────────────────────────────────────────────────
-
 _STATUS_CHAR = {
-    "converged": "✓", "complete": "✓", "running": "▶", "waiting": "⏳",
-    "waiting-seed": "⏳", "failed": "✗", "no-input": "!", "not-run": "·",
+    "converged": "✓",
+    "complete": "✓",
+    "running": "▶",
+    "waiting": "⏳",
+    "waiting-seed": "⏳",
+    "failed": "✗",
+    "no-input": "!",
+    "not-run": "·",
     "blocked": "⛔",
 }
 
 
 def render_tree(graph: dict) -> str:
-    """Plain-text indented tree of the dependency graph."""
     nodes = {n["id"]: n for n in graph["nodes"]}
     lines: list[str] = []
     for n in graph["nodes"]:
         if n["kind"] != "system":
             continue
-        lines.append(
-            f"{n['label']}  [{n['detail']}]  "
-            f"{n['n_ok']}/{n['n_total']} converged"
-        )
+        lines.append(f"{n['label']}  [{n['detail']}]")
         for cid in n["children"]:
             if cid in nodes:
                 _render_node(lines, nodes, nodes[cid], "  ")
-
-    if graph["bottlenecks"]:
+    if graph.get("blocking_roots"):
         lines.append("")
-        lines.append("bottlenecks (blocked downstream count):")
-        for b in graph["bottlenecks"][:10]:
+        lines.append("blocking roots (disposition / affected downstream):")
+        for b in graph["blocking_roots"][:20]:
             lines.append(
-                f"  {b['score']:>3}  {b['label']:<40} [{b['status']}]"
+                f"  {b['affected']:>3}  {b['label']:<40} "
+                f"[{b['disposition']}/{b['status']}]"
             )
     return "\n".join(lines)
 
@@ -461,36 +703,30 @@ def _render_node(lines: list[str], nodes: dict, n: dict, indent: str) -> None:
     ch = _STATUS_CHAR.get(n["status"], "?")
     deps = ""
     if n["deps"]:
-        short = [nodes[d]["label"] for d in n["deps"] if d in nodes]
-        shown = short[:5]
-        more = f" …+{len(short) - 5}" if len(short) > 5 else ""
+        labels = [nodes[d]["label"] for d in n["deps"] if d in nodes]
+        shown = labels[:5]
+        more = f" …+{len(labels) - 5}" if len(labels) > 5 else ""
         deps = f"  ← needs: {', '.join(shown)}{more}"
+    disp = (
+        f" ({n['disposition']})" if n.get("disposition") not in (None, "none") else ""
+    )
     frac = f" {n['n_ok']}/{n['n_total']}" if n["n_total"] else ""
-    bn = f"  [blocks {n['bottleneck']}]" if n["bottleneck"] else ""
-    lines.append(f"{indent}{ch} {n['label']}{frac}{bn}{deps}")
+    lines.append(f"{indent}{ch} {n['label']}{frac}{disp}{deps}")
     for cid in n.get("children", []):
         if cid in nodes:
             _render_node(lines, nodes, nodes[cid], indent + "  ")
 
 
 def render_mermaid(graph: dict) -> str:
-    """Mermaid graph of systems → nodes, edges = upstream deps."""
+    """CLI-only relation export; the WebUI uses cytoscape."""
     nodes = {n["id"]: n for n in graph["nodes"]}
+    ids = {nid: f"n{i}" for i, nid in enumerate(nodes)}
     out = ["graph TD"]
-    ids: dict[str, str] = {}
-    for i, n in enumerate(graph["nodes"]):
-        mid = f"n{i}"
-        ids[n["id"]] = mid
-        label = n["label"].replace('"', "'")
-        if n["kind"] == "system":
-            out.append(f'    {mid}["{label}"]:::sys')
-        else:
-            out.append(f'    {mid}["{label}"]')
     for nid, n in nodes.items():
-        for dep in n["deps"]:
-            if dep in ids:
-                out.append(f"    {ids[dep]} --> {ids[nid]}")
-    out.append("    classDef sys fill:#eef;")
+        out.append(f'    {ids[nid]}["{n["label"].replace(chr(34), chr(39))}"]')
+    for e in graph.get("edges", []):
+        if e["source"] in ids and e["target"] in ids and e["type"] != CONTAINMENT:
+            out.append(f"    {ids[e['source']]} -->|{e['type']}| {ids[e['target']]}")
     return "\n".join(out)
 
 
