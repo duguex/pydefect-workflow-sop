@@ -87,3 +87,25 @@ class TestScanSystem:
         assert "cpd/NaCl_mp-1" not in blocks  # done → not reported
         assert blocks["defect/Va_Na_0"].reason == "crashed"
         assert blocks["defect/Va_Na_0"].path == str(crashed)
+
+    def test_scan_system_skips_adr0013_excluded_dirs(self, tmp_path: Path):
+        """Anion-cation antisites / defect_new are never audited (ADR 0013)."""
+        sys = tmp_path / "NaCl"
+        antisite = sys / "defect" / "O_Na1_0"  # anion on cation site
+        defect_new = sys / "defect" / "defect_new"
+        _minimal(antisite)
+        _minimal(defect_new)
+        (sys / "plan.yaml").write_text("x\n")
+
+        blocks = scan_system(sys)
+        assert not blocks  # excluded dirs are not blockers
+
+    def test_scan_system_keeps_valid_dopant_substitutions(self, tmp_path):
+        """Metal-site substitutions (Fe_Al, Bi_Sb) stay auditable."""
+        sys = tmp_path / "NaCl"
+        sub = sys / "defect" / "Fe_Na1_0"
+        _minimal(sub)
+        (sys / "plan.yaml").write_text("x\n")
+
+        blocks = scan_system(sys)
+        assert blocks["defect/Fe_Na1_0"].reason == "never_ran"

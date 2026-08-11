@@ -87,8 +87,13 @@ def calc_dirs(system_root: Path) -> list[tuple[Path, str]]:
                 out.append((td, t))
     df = system_root / "defect"
     if df.is_dir():
+        from vasp_sop.defect import is_valid_defect_dir
+
         for child in df.iterdir():
-            if child.is_dir() and child.name != "perfect":
+            # ADR 0013: excluded defect dirs (anion-cation antisites,
+            # defect_new, junk) are never submitted, counted or audited.
+            if child.is_dir() and child.name != "perfect" \
+                    and is_valid_defect_dir(child):
                 out.append((child, ""))
     return out
 

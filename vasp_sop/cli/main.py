@@ -1100,7 +1100,15 @@ def _batch_status(root: Path) -> None:
         prefix = str(d.resolve())
         cpd_dirs = _dirs(d / "cpd")
         uc_dirs = _dirs(d / "unitcell", exclude="structure_opt")
-        df_dirs = _dirs(d / "defect")
+        # ADR 0013: excluded defect dirs (anion-cation antisites etc.) are
+        # never counted — the Defect D/T is the valid defect set, with the
+        # excluded count shown separately.
+        from vasp_sop.defect import is_valid_defect_dir
+
+        df_dirs = [p for p in _dirs(d / "defect") if is_valid_defect_dir(p)]
+        df_excluded = sum(
+            1 for p in _dirs(d / "defect") if not is_valid_defect_dir(p)
+        )
         cpd_d = sum(1 for p in cpd_dirs if convergence_verdict(p).converged)
         uc_d = sum(1 for p in uc_dirs if convergence_verdict(p).converged)
         df_d = sum(1 for p in df_dirs if convergence_verdict(p).converged)
@@ -1122,6 +1130,7 @@ def _batch_status(root: Path) -> None:
                 "cpd": (cpd_d, len(cpd_dirs)),
                 "uc": (uc_d, len(uc_dirs)),
                 "df": (df_d, len(df_dirs)),
+                "df_excl": df_excluded,
                 "running": running,
                 "pct": pct,
             }
@@ -1132,21 +1141,22 @@ def _batch_status(root: Path) -> None:
         return
 
     print(
-        f"{'System':<22} {'P':<3} {'Phase':<10} {'CPD':>8} {'UC':>8} {'Defect':>9} {'Run':>4} {'%':>4}"
+        f"{'System':<22} {'P':<3} {'Phase':<10} {'CPD':>8} {'UC':>8} {'Defect':>9} {'Excl':>5} {'Run':>4} {'%':>4}"
     )
-    print(f"{'':22s} {'':3s} {'':10s} {'D/T':>8} {'D/T':>8} {'D/T':>9}")
-    print("-" * 66)
+    print(f"{'':22s} {'':3s} {'':10s} {'D/T':>8} {'D/T':>8} {'D/T':>9} {'':>5}")
+    print("-" * 72)
     for r in rows:
         cpd_s = f"{r['cpd'][0]}/{r['cpd'][1]}" if r["cpd"][1] else "\u00b7"
         uc_s = f"{r['uc'][0]}/{r['uc'][1]}" if r["uc"][1] else "\u00b7"
         df_s = f"{r['df'][0]}/{r['df'][1]}" if r["df"][1] else "\u00b7"
         run_s = str(r["running"]) if r["running"] else "\u00b7"
         pct_s = f"{r['pct']:3d}%"
+        excl_s = str(r["df_excl"]) if r["df_excl"] else "\u00b7"
         print(
             f"{r['name']:<22} {r['pri']:<3} {r['phase']:<10} "
-            f"{cpd_s:>8} {uc_s:>8} {df_s:>9} {run_s:>4} {pct_s:>4}"
+            f"{cpd_s:>8} {uc_s:>8} {df_s:>9} {excl_s:>5} {run_s:>4} {pct_s:>4}"
         )
-    print("-" * 66)
+    print("-" * 72)
     done_count = sum(1 for r in rows if r["phase"] == "COMPLETE")
     print(
         f"Total: {len(rows)}  Done: {done_count}  "
