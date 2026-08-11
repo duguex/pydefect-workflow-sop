@@ -296,6 +296,18 @@ def _group(
     return gid
 
 
+def _blocks_defect_analysis(path: Path) -> bool:
+    """True exactly when wave3's defect-VASP truth has not settled *path*.
+
+    ``wave3_postprocess`` accepts terminal JobStore states plus disk
+    evidence; a failed defect is therefore not automatically an analysis
+    blocker.  This predicate prevents the old all-defect fan-in lie.
+    """
+    terminal = _jobstore_latest(path) in ("converged", "failed", "unconverged")
+    has_outcar = (path / "OUTCAR").is_file() or (path / "output" / "OUTCAR").is_file()
+    return not (terminal and (has_outcar or _jobstore_latest(path) == "failed"))
+
+
 def build_graph(root: Path, *, system_filter: str | None = None) -> dict:
     """Build a JSON-serialisable, read-only runtime relation graph."""
     from vasp_sop.core.system import System
@@ -534,6 +546,9 @@ def build_graph(root: Path, *, system_filter: str | None = None) -> dict:
                 )
         for cid in chain_ids:
             for did in nodes[cid].children:
+                defect_path = Path(nodes[did].path or "")
+                if not _blocks_defect_analysis(defect_path):
+                    continue
                 nodes[wave3_id].deps.append(did)
                 _add_edge(
                     edges,

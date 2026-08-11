@@ -387,12 +387,18 @@ class System:
                 continue
             if convergence_verdict(pd).converged:
                 continue
-            if current not in ("converged", "submitted"):
-                result.append(pd)
+            if current == "converged":
+                logger.info(
+                    "%s: stale JobStore 'converged' for cpd phase %s but disk "
+                    "verdict=%s — resubmitting (ADR 0016 parity)",
+                    self.name, pd.name, convergence_verdict(pd).reason,
+                )
+            result.append(pd)
         return result
 
     def competing_blockers(self, store: Any) -> list[Path]:
         """Lifecycle states that block entering CPD post-processing."""
+        from vasp_sop.vasp.convergence import convergence_verdict
         from vasp_sop.vasp.io import input_ready
         from vasp_sop.core.jobs import crisp_terminal_status
 
@@ -412,6 +418,10 @@ class System:
             if marker == "failed" or state in ("failed", "unconverged"):
                 blockers.append(pd)
                 continue
+            if state == "converged" and (pd / "POSCAR").is_file():
+                if not convergence_verdict(pd).converged:
+                    blockers.append(pd)
+                    continue
             if state not in ("converged", "submitted") and (pd / "POSCAR").is_file():
                 if not input_ready(pd):
                     blockers.append(pd)

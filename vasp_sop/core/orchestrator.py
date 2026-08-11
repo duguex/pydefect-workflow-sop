@@ -1174,6 +1174,10 @@ class BatchOrchestrator:
     policy, snapshots, system advance — lives behind this object.
     """
 
+    # How often (in poll cycles) the stale-converged disk-vs-JobStore
+    # reconciliation runs.  At the default 120s poll this is ~1/hour.
+    _STALE_CONVERGED_EVERY = 30
+
     def __init__(
         self,
         root: Path | list[Path],
@@ -1507,6 +1511,58 @@ class BatchOrchestrator:
             )
         return settled
 
+    def _reconcile_stale_converged(self) -> int:
+        """Reset stale JobStore ``converged`` records whose disk verdict is
+        unconverged (outputs cleared outside the pipeline, NELM-exhausted
+        reruns, ...) so the normal wave2/wave3 paths resubmit them.
+
+        ADR 0016 parity for cpd/unitcell: the defect path already refuses
+        to skip a ``converged`` record whose verdict is unconverged, but
+        ``competing_dirs`` used to trust the record alone — a phase whose
+        OUTCAR was removed while the record survived deadlocked the system
+        in CHEM_POT_DIAGRAM forever (observed 2026-08-11, SrGa4O7:Fe, 13
+        cpd phases).  Resetting to ``pending`` is the sanctioned recovery:
+        the next cycle resubmits through the normal submission paths.
+
+        defect leg is deliberately skipped — its advance path self-heals
+        stale ``converged`` records via CONTCAR restarts (ADR 0016), which
+        is cheaper than a from-scratch resubmit.
+        """
+        from vasp_sop.vasp.convergence import convergence_verdict
+        from vasp_sop.vasp.io import input_ready
+
+        reset = 0
+        for s in self.systems:
+            root = s["root"]
+            for base in (root / "cpd", root / "unitcell"):
+                if not base.is_dir():
+                    continue
+                for child in base.iterdir():
+                    if not child.is_dir():
+                        continue
+                    cp = str(child.resolve())
+                    if self.js.latest(cp) != "converged":
+                        continue
+                    if not input_ready(child):
+                        continue
+                    verdict = convergence_verdict(child)
+                    if verdict.converged:
+                        continue
+                    self.js.record(
+                        cp,
+                        "pending",
+                        source="stale_converged_reconcile",
+                        reason=f"stale-converged:{verdict.reason}",
+                    )
+                    logger.warning(
+                        "%s: stale JobStore 'converged' but disk verdict=%s "
+                        "(reason=%s) — reset to pending, will resubmit "
+                        "(stale_converged_reconcile)",
+                        cp, verdict.reason, verdict.reason,
+                    )
+                    reset += 1
+        return reset
+
     def _poll_tracked(self) -> int:
         """Poll tracked dirs: finalize converged, detect crashes, restart."""
         from vasp_sop.core.jobs import crisp_active_dirs
@@ -1730,6 +1786,13 @@ class BatchOrchestrator:
                             f"  Settled {settled} stale submitted record(s) "
                             "from disk truth."
                         )
+                    if cycle % self._STALE_CONVERGED_EVERY == 0:
+                        n = self._reconcile_stale_converged()
+                        if n:
+                            self._print_info(
+                                f"  Reset {n} stale-converged record(s) from "
+                                "disk truth (resubmitting)."
+                            )
 
                 n_skipped, errors = self._advance_systems()
 

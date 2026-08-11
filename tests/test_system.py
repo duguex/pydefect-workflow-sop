@@ -436,3 +436,57 @@ class TestChemicalEnvironmentScope:
         s = self._ce_system(tmp_path, scope="defects")  # no UC/defect dirs
         self._patch(monkeypatch, {}, verdict_converged=True)
         assert s.phase() == UNITCELL_DEFECT
+
+
+# ── Stale JobStore 'converged' (ADR 0016 parity for cpd) ────────────────────
+
+class TestCompetingStaleConverged:
+    """A JobStore ``converged`` record whose disk verdict is unconverged
+    must resubmit — the record alone must not gate the phase (SrGa4O7:Fe
+    deadlock, issue #121)."""
+
+    def _make(self, tmp_path: Path):
+        s = _make_system(tmp_path)
+        td = s.cpd_dir / "GaN_mp-830"
+        td.mkdir(parents=True)
+        comp = s.cpd_dir / "Ga_mp-100"
+        comp.mkdir()
+        for f in ("INCAR", "POSCAR", "POTCAR", "KPOINTS"):
+            (comp / f).write_text("x")
+        return s, comp
+
+    def _patch_verdict(self, monkeypatch, converged: bool, reason: str):
+        import vasp_sop.vasp.convergence as conv_mod
+        import vasp_sop.vasp.io as io_mod
+        from vasp_sop.vasp.convergence import ConvergenceVerdict
+
+        monkeypatch.setattr(
+            conv_mod, "convergence_verdict",
+            lambda d, task_type="": ConvergenceVerdict(converged, reason),
+            raising=False,
+        )
+        monkeypatch.setattr(io_mod, "input_ready", lambda d: True, raising=False)
+
+    def test_stale_converged_resubmits(self, tmp_path, monkeypatch):
+        s, comp = self._make(tmp_path)
+        store = FakeJobStore({str(comp.resolve()): "converged"})
+        self._patch_verdict(monkeypatch, converged=False, reason="missing_outcar")
+        assert s.competing_dirs(store) == [comp]
+
+    def test_disk_converged_never_resubmits(self, tmp_path, monkeypatch):
+        s, comp = self._make(tmp_path)
+        store = FakeJobStore({str(comp.resolve()): "converged"})
+        self._patch_verdict(monkeypatch, converged=True, reason="")
+        assert s.competing_dirs(store) == []
+
+    def test_stale_converged_is_blocker(self, tmp_path, monkeypatch):
+        s, comp = self._make(tmp_path)
+        store = FakeJobStore({str(comp.resolve()): "converged"})
+        self._patch_verdict(monkeypatch, converged=False, reason="missing_outcar")
+        assert s.competing_blockers(store) == [comp]
+
+    def test_disk_converged_not_blocker(self, tmp_path, monkeypatch):
+        s, comp = self._make(tmp_path)
+        store = FakeJobStore({str(comp.resolve()): "converged"})
+        self._patch_verdict(monkeypatch, converged=True, reason="")
+        assert s.competing_blockers(store) == []

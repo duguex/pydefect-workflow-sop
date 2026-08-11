@@ -48,7 +48,7 @@ The JobStore record of one calculation directory (`submitted` / `converged` / `f
 _Avoid_: status, done flag
 
 **Status table**:
-`vasp-sop batch status`'s per-system view. D/T columns are disk truth — the convergence verdict over every directory on disk; Run counts live `submitted` records; % is completed-dirs-over-all-dirs (100% when the defect summary exists).
+`vasp-sop batch status`'s per-system view. D/T columns are disk truth — the convergence verdict over every directory on disk; Run counts live `submitted` records; % is completed-dirs-over-all-dirs (100% when the defect summary exists). The crisp webui progress view consumes the same verdict-based disk truth for its 已收敛 column (routes_progress) — one authority, two views.
 _Avoid_: progress report (the old `batch progress` command)
 
 **Excluded phase**:
