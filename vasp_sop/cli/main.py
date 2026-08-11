@@ -20,16 +20,11 @@ from vasp_sop.core.config import PipelineConfig
 from vasp_sop.core.batch_lifecycle import (
     cleanup,
     daemonize,
-    is_stop_requested,
     stop as _lifecycle_stop,
 )
 from vasp_sop.core.system import (
-    CHEM_POT_DIAGRAM,
-    COMPETING,
     COMPLETE,
     NO_TARGET,
-    STRUCTURE_OPT,
-    UNITCELL_DEFECT,
     System,
 )
 
@@ -45,19 +40,36 @@ def _add_pipeline_parser(subparsers) -> None:
 
 def _add_materials_parser(subparsers) -> None:
     """Add ``materials`` subcommand with sub-actions."""
-    p = subparsers.add_parser("materials", help="Materials Project queries and analysis")
+    p = subparsers.add_parser(
+        "materials", help="Materials Project queries and analysis"
+    )
     sub = p.add_subparsers(dest="action", required=True)
 
     # fetch
     fetch_p = sub.add_parser("fetch", help="Download competing phases from MP")
-    fetch_p.add_argument("-e", "--elements", type=str, nargs="+", required=True, help="Element symbols")
-    fetch_p.add_argument("-d", "--dopants", type=str, nargs="*", default=[], help="Dopant elements")
-    fetch_p.add_argument("-o", "--output", type=Path, default=Path("cpd"), help="Output directory")
+    fetch_p.add_argument(
+        "-e", "--elements", type=str, nargs="+", required=True, help="Element symbols"
+    )
+    fetch_p.add_argument(
+        "-d", "--dopants", type=str, nargs="*", default=[], help="Dopant elements"
+    )
+    fetch_p.add_argument(
+        "-o", "--output", type=Path, default=Path("cpd"), help="Output directory"
+    )
 
     # phases
     phases_p = sub.add_parser("phases", help="List cached phases")
-    phases_p.add_argument("-e", "--elements", type=str, nargs="+", required=True, help="Intrinsic element symbols")
-    phases_p.add_argument("-d", "--cpd-dir", type=Path, default=Path("cpd"), help="CPD root directory")
+    phases_p.add_argument(
+        "-e",
+        "--elements",
+        type=str,
+        nargs="+",
+        required=True,
+        help="Intrinsic element symbols",
+    )
+    phases_p.add_argument(
+        "-d", "--cpd-dir", type=Path, default=Path("cpd"), help="CPD root directory"
+    )
 
     # poscar
     poscar_p = sub.add_parser("poscar", help="Download a single POSCAR by MP-ID")
@@ -77,7 +89,13 @@ def _add_vasp_parser(subparsers) -> None:
 
     inputs_p = sub.add_parser("inputs", help="Generate VASP inputs via vise")
     inputs_p.add_argument("work_dir", type=Path, help="Target calculation directory")
-    inputs_p.add_argument("-x", "--functional", type=str, default="pbesol", help="Exchange-correlation functional")
+    inputs_p.add_argument(
+        "-x",
+        "--functional",
+        type=str,
+        default="pbesol",
+        help="Exchange-correlation functional",
+    )
 
     check_p = sub.add_parser("check", help="Check VASP completion")
     check_p.add_argument("work_dir", type=Path, help="Calculation directory")
@@ -89,14 +107,22 @@ def _add_cpd_parser(subparsers) -> None:
     sub = p.add_subparsers(dest="action", required=True)
 
     # run — CPD-only entrypoint (issue #93)
-    run_p = sub.add_parser("run", help="Run ONLY the CPD phase (competing + CPD solve, no UC/defect)")
-    run_p.add_argument("system_dir", type=Path, help="System root directory (contains cpd/, plan.yaml)")
-    run_p.add_argument("-f", "--formula", type=str, required=True, help="Target formula (e.g. GaN)")
+    run_p = sub.add_parser(
+        "run", help="Run ONLY the CPD phase (competing + CPD solve, no UC/defect)"
+    )
+    run_p.add_argument(
+        "system_dir", type=Path, help="System root directory (contains cpd/, plan.yaml)"
+    )
+    run_p.add_argument(
+        "-f", "--formula", type=str, required=True, help="Target formula (e.g. GaN)"
+    )
     run_p.add_argument("--dry-run", action="store_true", help="Do not submit VASP jobs")
 
     energies_p = sub.add_parser("energies", help="Compute composition energies")
     energies_p.add_argument("cpd_dir", type=Path, help="CPD root directory")
-    energies_p.add_argument("-f", "--formula", type=str, required=True, help="Target formula")
+    energies_p.add_argument(
+        "-f", "--formula", type=str, required=True, help="Target formula"
+    )
 
     diagram_p = sub.add_parser("diagram", help="Solve and plot phase diagram")
     diagram_p.add_argument("cpd_dir", type=Path, help="CPD root directory")
@@ -113,7 +139,8 @@ def _add_unitcell_parser(subparsers) -> None:
 
 def _handle_materials(args: argparse.Namespace) -> None:
     if args.action == "fetch":
-        from vasp_sop.materials import fetch_candidate_phases, get_intrinsic_elements
+        from vasp_sop.materials import fetch_candidate_phases
+
         elements = args.elements
         if args.dopants:
             elements = elements + args.dopants
@@ -122,6 +149,7 @@ def _handle_materials(args: argparse.Namespace) -> None:
 
     elif args.action == "phases":
         from vasp_sop.materials import list_phases
+
         info = list_phases(args.cpd_dir.resolve(), args.elements)
         for name, meta in info.items():
             mpid = meta.get("mpid") or "—"
@@ -129,6 +157,7 @@ def _handle_materials(args: argparse.Namespace) -> None:
 
     elif args.action == "poscar":
         from vasp_sop.materials import mp_poscar_get
+
         poscar = mp_poscar_get(args.mpid)
         if poscar:
             print(f"Cached POSCAR for {args.mpid}: {poscar}")
@@ -138,6 +167,7 @@ def _handle_materials(args: argparse.Namespace) -> None:
     elif args.action == "cache":
         if args.cache_action == "list":
             from vasp_sop.core.paths import MP_CACHE
+
             if MP_CACHE.is_dir():
                 for child in sorted(MP_CACHE.iterdir()):
                     if child.is_dir():
@@ -147,6 +177,7 @@ def _handle_materials(args: argparse.Namespace) -> None:
         elif args.cache_action == "clear":
             import shutil
             from vasp_sop.core.paths import MP_CACHE
+
             if MP_CACHE.is_dir():
                 shutil.rmtree(str(MP_CACHE))
                 print("MP cache cleared.")
@@ -156,17 +187,21 @@ def _handle_materials(args: argparse.Namespace) -> None:
 
 def _handle_vasp(args: argparse.Namespace) -> None:
     if args.action == "inputs":
-        from vasp_sop.vasp.io import input_ready, prepare_inputs
+        from vasp_sop.vasp.io import prepare_inputs
         from vasp_sop.core.config import PipelineConfig
+
         wd = args.work_dir.resolve()
         config = PipelineConfig(
-            formula="fix", root=Path.cwd(), functional=args.functional,
+            formula="fix",
+            root=Path.cwd(),
+            functional=args.functional,
         )
         prepare_inputs(wd, config)
         print(f"VASP inputs generated in {wd}")
 
     elif args.action == "check":
         from vasp_sop.vasp.convergence import convergence_verdict
+
         wd = args.work_dir.resolve()
         if convergence_verdict(wd).converged:
             print(f"{wd}: converged")
@@ -177,15 +212,18 @@ def _handle_vasp(args: argparse.Namespace) -> None:
 def _handle_report(args: argparse.Namespace) -> None:
     if args.interactive:
         from vasp_sop.report.interactive import generate_interactive_html
+
         out = generate_interactive_html(args.system_dir)
         if args.output:
             import shutil
+
             shutil.copy2(out, args.output)
             out = args.output
         print(f"Interactive report written to {out}")
         return
 
     from vasp_sop.core.report import generate_report
+
     report_path = generate_report(args.system_dir, args.output)
     print(f"Report written to {report_path}")
 
@@ -199,17 +237,18 @@ def _add_report_parser(subparsers) -> None:
         "system_dir", type=Path, help="System directory containing plan.yaml"
     )
     report_parser.add_argument(
-        "--output", type=Path,
+        "--output",
+        type=Path,
         help="Output path (default: system_dir/calculation_report.md or formation_energy_interactive.html)",
     )
     report_parser.add_argument(
-        "--interactive", action="store_true",
+        "--interactive",
+        action="store_true",
         help="Generate interactive formation-energy HTML instead of Markdown",
     )
 
 
 def _handle_cpd(args: argparse.Namespace) -> None:
-    from vasp_sop.materials import get_intrinsic_elements
     from vasp_sop.defect.cpd import compute_chemical_potentials, adjust_unstable_phase
     from vasp_sop.core.config import PipelineConfig
     from pymatgen.core import Composition
@@ -225,9 +264,7 @@ def _handle_cpd(args: argparse.Namespace) -> None:
             config = PipelineConfig.from_yaml(plan_path, root=system_dir)
         else:
             config = PipelineConfig(formula=args.formula, root=system_dir)
-        result = cpd_only(
-            system_dir, args.formula, config, dry_run=args.dry_run
-        )
+        result = cpd_only(system_dir, args.formula, config, dry_run=args.dry_run)
         status = result.get("status", "unknown")
         print(f"CPD-only result: phase={result.get('phase')}, status={status}")
         if status == "not_ready":
@@ -238,7 +275,8 @@ def _handle_cpd(args: argparse.Namespace) -> None:
     formula = getattr(args, "formula", "GaN")
 
     config = PipelineConfig(
-        formula=formula, root=Path.cwd(),
+        formula=formula,
+        root=Path.cwd(),
     )
     target_comp = Composition(formula)
 
@@ -249,6 +287,7 @@ def _handle_cpd(args: argparse.Namespace) -> None:
     elif args.action == "diagram":
         from vasp_sop.defect.cpd import adjust_unstable_phase
         from pymatgen.core import Composition
+
         rel = cpd_dir / "relative_energies.yaml"
         adjust_unstable_phase(cpd_dir, rel, target_comp, config)
         print(f"Phase diagram processed in {cpd_dir}")
@@ -262,8 +301,6 @@ def _handle_unitcell(args: argparse.Namespace) -> None:
     config = PipelineConfig(formula="", root=Path.cwd())
     build_unitcell_yaml(uc_dir, config)
     print(f"Unitcell YAML generated in {uc_dir}")
-
-
 
 
 def main() -> None:
@@ -333,11 +370,17 @@ def _add_defect_parser(subparsers) -> None:
     # run
     run_parser = defect_sub.add_parser("run", help="Run the full pipeline")
     run_parser.add_argument(
-        "-c", "--config", type=Path, required=True,
+        "-c",
+        "--config",
+        type=Path,
+        required=True,
         help="Path to YAML configuration file",
     )
     run_parser.add_argument(
-        "-r", "--root", type=Path, default=Path("."),
+        "-r",
+        "--root",
+        type=Path,
+        default=Path("."),
         help="Project root directory (default: current directory)",
     )
 
@@ -346,39 +389,63 @@ def _add_defect_parser(subparsers) -> None:
         "resume", help="Resume pipeline from saved state"
     )
     resume_parser.add_argument(
-        "-r", "--root", type=Path, required=True,
+        "-r",
+        "--root",
+        type=Path,
+        required=True,
         help="Project root directory containing .pipeline_state.json",
     )
 
     # status
-    status_parser = defect_sub.add_parser(
-        "status", help="Show pipeline status"
-    )
+    status_parser = defect_sub.add_parser("status", help="Show pipeline status")
     status_parser.add_argument(
-        "-r", "--root", type=Path, default=Path("."),
+        "-r",
+        "--root",
+        type=Path,
+        default=Path("."),
         help="Project root directory (default: current directory)",
     )
 
     # init
-    init_parser = defect_sub.add_parser("init", help="Generate plan.yaml with inference")
-    init_parser.add_argument("-f", "--formula", type=str, required=True,
-                             help="Compound formula (e.g. GaN, SiC)")
-    init_parser.add_argument("-d", "--dopant", type=str, nargs="*", default=[],
-                             help="Dopant elements (e.g. Mg Si)")
+    init_parser = defect_sub.add_parser(
+        "init", help="Generate plan.yaml with inference"
+    )
+    init_parser.add_argument(
+        "-f",
+        "--formula",
+        type=str,
+        required=True,
+        help="Compound formula (e.g. GaN, SiC)",
+    )
+    init_parser.add_argument(
+        "-d",
+        "--dopant",
+        type=str,
+        nargs="*",
+        default=[],
+        help="Dopant elements (e.g. Mg Si)",
+    )
 
     # build — standalone defect structure generation
     build_parser = defect_sub.add_parser("build", help="Build defect structures only")
     build_parser.add_argument("project_dir", type=Path, help="Project root directory")
 
     # analyze — standalone defect post-processing
-    analyze_parser = defect_sub.add_parser("analyze", help="Run defect post-processing only")
+    analyze_parser = defect_sub.add_parser(
+        "analyze", help="Run defect post-processing only"
+    )
     analyze_parser.add_argument("project_dir", type=Path, help="Project root directory")
 
     # inventory — list defect dirs and ignored trees
-    inv_parser = defect_sub.add_parser("inventory", help="List defect directories and ignored trees")
+    inv_parser = defect_sub.add_parser(
+        "inventory", help="List defect directories and ignored trees"
+    )
     inv_parser.add_argument("project_dir", type=Path, help="Project root directory")
-    inv_parser.add_argument("--include-defect-new", action="store_true",
-                            help="Include defect_new/ parallel tree")
+    inv_parser.add_argument(
+        "--include-defect-new",
+        action="store_true",
+        help="Include defect_new/ parallel tree",
+    )
 
 
 def _handle_defect(args: argparse.Namespace) -> None:
@@ -391,7 +458,9 @@ def _handle_defect(args: argparse.Namespace) -> None:
     elif args.action == "resume":
         _do_resume(args)
     elif args.action == "build":
-        print("defect build: standalone defect structure generation not yet implemented. Use 'batch run' instead.")
+        print(
+            "defect build: standalone defect structure generation not yet implemented. Use 'batch run' instead."
+        )
     elif args.action == "analyze":
         _do_defect_analyze(args)
     elif args.action == "inventory":
@@ -428,7 +497,6 @@ def _do_defect_analyze(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
-
 def _do_defect_inventory(args: argparse.Namespace) -> None:
     """Print defect directory inventory, including ignored trees."""
     from vasp_sop.defect.analysis import _inventory
@@ -448,7 +516,7 @@ def _do_defect_inventory(args: argparse.Namespace) -> None:
     print(f"  with correction.json:        {len(inv['corrected'])}")
 
     all_subdirs = {d for d in df.iterdir() if d.is_dir()}
-    ignored = all_subdirs - set(inv['dirs'])
+    ignored = all_subdirs - set(inv["dirs"])
     if ignored:
         print(f"\n  Ignored under defect/ ({len(ignored)}):")
         for d in sorted(ignored):
@@ -461,10 +529,12 @@ def _do_defect_inventory(args: argparse.Namespace) -> None:
         dn = project / DEFECT_NEW_DIR
         if dn.is_dir():
             dn_inv = _inventory(dn)
-            print(f"\n  defect_new/ included (sibling tree):")
+            print("\n  defect_new/ included (sibling tree):")
             print(f"    valid dirs:  {len(dn_inv['dirs'])}")
             print(f"    converged:   {len(dn_inv['converged'])}")
             print(f"    unconverged: {len(dn_inv['unconverged'])}")
+
+
 def _do_init(args: argparse.Namespace) -> None:
     """Generate plan.yaml with inference and dynamic comments."""
     from vasp_sop.core.config import generate_config
@@ -487,6 +557,7 @@ def _do_status(args: argparse.Namespace) -> None:
 
     # Use System.phase() to determine current pipeline stage
     from vasp_sop.core.config import PipelineConfig
+
     plan = root / "plan.yaml"
     if not plan.is_file():
         print("  No plan.yaml found — system not initialized.")
@@ -502,15 +573,21 @@ def _do_status(args: argparse.Namespace) -> None:
     uc_dir = root / "unitcell"
     df_dir = root / "defect"
 
-    has_target = any(
-        (pd / "OUTCAR").is_file() or (pd / "output" / "OUTCAR").is_file()
-        for pd in cpd_dir.iterdir() if pd.is_dir()
-    ) if cpd_dir.is_dir() else False
+    has_target = (
+        any(
+            (pd / "OUTCAR").is_file() or (pd / "output" / "OUTCAR").is_file()
+            for pd in cpd_dir.iterdir()
+            if pd.is_dir()
+        )
+        if cpd_dir.is_dir()
+        else False
+    )
     print(f"  Target OUTCAR: {'✓' if has_target else '·'}")
 
     print(f"  CPD:      {_check_cpd(cpd_dir)}")
     print(f"  Unitcell: {_check_unitcell(uc_dir)}")
     print(f"  Defect:   {_check_defect(df_dir)}")
+
 
 def _do_run(args: argparse.Namespace) -> None:
     """Run (or resume) the full defect pipeline."""
@@ -522,6 +599,7 @@ def _do_resume(args: argparse.Namespace) -> None:
     """Resume pipeline from config (state now filesystem-based)."""
     root = args.root.resolve()
     from vasp_sop.core.config import PLAN_FILENAME
+
     config_path = root / PLAN_FILENAME
     if not config_path.is_file():
         config_path = root / "config.yaml"
@@ -538,7 +616,8 @@ def _do_resume(args: argparse.Namespace) -> None:
         else:
             logger.error(
                 "No %s, config.yaml, or info.json found in %s. Cannot resume.",
-                PLAN_FILENAME, root,
+                PLAN_FILENAME,
+                root,
             )
             sys.exit(1)
     _run_pipeline(config)
@@ -555,7 +634,8 @@ def _run_pipeline(config: PipelineConfig) -> None:
     """
     logger.info(
         "Starting point-defect pipeline for %s (root: %s)",
-        config.formula, config.root,
+        config.formula,
+        config.root,
     )
 
     from vasp_sop.core.orchestrator import BatchOrchestrator
@@ -565,11 +645,11 @@ def _run_pipeline(config: PipelineConfig) -> None:
     p = System(config.root, config).phase()
     if p not in (COMPLETE, NO_TARGET):
         logger.error(
-            "Pipeline did not complete after 200 iterations (phase=%s).", p,
+            "Pipeline did not complete after 200 iterations (phase=%s).",
+            p,
         )
         sys.exit(1)
     logger.info("Pipeline complete (phase=%s).", p)
-
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -578,24 +658,49 @@ def _run_pipeline(config: PipelineConfig) -> None:
 
 _PRIORITY_MAP: dict[str, str] = {
     # P0 — A级 NV-like 候选
-    "SrS": "P0", "MgS": "P0", "SrO": "P0",
+    "SrS": "P0",
+    "MgS": "P0",
+    "SrO": "P0",
     # P1 — B级 T2 > 2ms
-    "CaS": "P1", "CaCO3": "P1", "CaMg2(SO4)3": "P1",
-    "BaGe2S5": "P1", "Sr2MgGe2O7": "P1", "Sr2MgSi2O7": "P1",
-    "Ca2Ge7O16": "P1", "SrGe4O9": "P1", "BaGe4O9": "P1",
+    "CaS": "P1",
+    "CaCO3": "P1",
+    "CaMg2(SO4)3": "P1",
+    "BaGe2S5": "P1",
+    "Sr2MgGe2O7": "P1",
+    "Sr2MgSi2O7": "P1",
+    "Ca2Ge7O16": "P1",
+    "SrGe4O9": "P1",
+    "BaGe4O9": "P1",
     # P2 — C级 扩展候选
-    "CaSe": "P2", "SeO2": "P2", "SrSe": "P2",
-    "BaS3": "P2", "Ba2MgGe2O7": "P2", "GeSe2": "P2",
-    "MgCO3": "P2", "Ba2MgSi2O7": "P2", "SrTe": "P2",
-    "BaSe": "P2", "BaS": "P2", "Sn(SeO3)2": "P2",
-    "BaTe": "P2", "Mg3TeO6": "P2", "Ba2TeO": "P2",
-    "BaO2": "P2", "BaO": "P2",
+    "CaSe": "P2",
+    "SeO2": "P2",
+    "SrSe": "P2",
+    "BaS3": "P2",
+    "Ba2MgGe2O7": "P2",
+    "GeSe2": "P2",
+    "MgCO3": "P2",
+    "Ba2MgSi2O7": "P2",
+    "SrTe": "P2",
+    "BaSe": "P2",
+    "BaS": "P2",
+    "Sn(SeO3)2": "P2",
+    "BaTe": "P2",
+    "Mg3TeO6": "P2",
+    "Ba2TeO": "P2",
+    "BaO2": "P2",
+    "BaO": "P2",
     # P3 — 特殊体系
     "CeO2": "P3",
     # P4 — 已有体系
-    "AlN": "P4", "CaO": "P4", "diamond": "P4",
-    "GaN": "P4", "hBN": "P4", "MgO": "P4",
-    "MoS2": "P4", "SiC": "P4", "ZnO": "P4",
+    "AlN": "P4",
+    "CaO": "P4",
+    "diamond": "P4",
+    "GaN": "P4",
+    "hBN": "P4",
+    "MgO": "P4",
+    "MoS2": "P4",
+    "SiC": "P4",
+    "ZnO": "P4",
 }
 
 
@@ -607,20 +712,24 @@ def _add_batch_parser(subparsers) -> None:
     # status
     sp = sub.add_parser("status", help="Show status table for all systems")
     sp.add_argument(
-        "root", type=Path,
+        "root",
+        type=Path,
         help="Project root directory containing system subdirectories",
     )
 
     # history
     p_history = sub.add_parser("history", help="Show phase transition timeline")
     p_history.add_argument(
-        "root", type=Path,
+        "root",
+        type=Path,
         help="Project root directory containing system subdirectories",
     )
-    p_history.add_argument("--system", "-s", type=str, default=None,
-                           help="System name (omit for all)")
     p_history.add_argument(
-        "--prune", action="store_true",
+        "--system", "-s", type=str, default=None, help="System name (omit for all)"
+    )
+    p_history.add_argument(
+        "--prune",
+        action="store_true",
         help="Delete JobStore records whose directory no longer exists",
     )
 
@@ -630,7 +739,8 @@ def _add_batch_parser(subparsers) -> None:
         help="Settle stale JobStore records from disk/crisp truth (no phase advance)",
     )
     p_reconcile.add_argument(
-        "root", type=Path,
+        "root",
+        type=Path,
         help="Project root directory containing system subdirectories",
     )
 
@@ -640,12 +750,32 @@ def _add_batch_parser(subparsers) -> None:
         help="Reset calc dirs to pending so the next `batch run` resubmits them",
     )
     p_retry.add_argument(
-        "root", type=Path,
+        "root",
+        type=Path,
         help="Project root directory containing system subdirectories",
     )
     p_retry.add_argument(
-        "dirs", nargs="+", type=str,
+        "dirs",
+        nargs="+",
+        type=str,
         help="Calc dir(s) relative to root, e.g. BaGe4O9/unitcell/dielectric",
+    )
+
+    # regenerate — per-dir VASP input repair (webui manual handling)
+    preg = sub.add_parser(
+        "regenerate",
+        help="Regenerate VASP inputs (INCAR/POTCAR/KPOINTS) for specific calc dirs",
+    )
+    preg.add_argument(
+        "root",
+        type=Path,
+        help="Project root directory containing system subdirectories",
+    )
+    preg.add_argument(
+        "dirs",
+        nargs="+",
+        type=str,
+        help="Calc dir(s) relative to root, e.g. Gd2GaSbO7:Bi/defect/Va_O2_1",
     )
 
     # blockers
@@ -654,7 +784,8 @@ def _add_batch_parser(subparsers) -> None:
         help="Enumerate every block reason per system (the tool's own census)",
     )
     p_blockers.add_argument(
-        "root", type=Path,
+        "root",
+        type=Path,
         help="Project root directory containing system subdirectories",
     )
 
@@ -664,19 +795,25 @@ def _add_batch_parser(subparsers) -> None:
         help="Dependency tree of every calculation (read-only audit view)",
     )
     p_deps.add_argument(
-        "root", type=Path,
+        "root",
+        type=Path,
         help="Project root directory containing system subdirectories",
     )
     p_deps.add_argument(
-        "--system", "-s", type=str, default=None,
+        "--system",
+        "-s",
+        type=str,
+        default=None,
         help="Only include one system by directory name",
     )
     p_deps.add_argument(
-        "--json", action="store_true",
+        "--json",
+        action="store_true",
         help="Emit the raw dependency graph as JSON",
     )
     p_deps.add_argument(
-        "--mermaid", action="store_true",
+        "--mermaid",
+        action="store_true",
         help="Emit a mermaid graph (edges = upstream dependencies)",
     )
 
@@ -686,66 +823,88 @@ def _add_batch_parser(subparsers) -> None:
         help="Restore missing POTCAR from the local PSP store for runnable dirs",
     )
     p_restore.add_argument(
-        "root", type=Path,
+        "root",
+        type=Path,
         help="Project root directory containing system subdirectories",
     )
     p_restore.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Report what would be restored without writing any file",
     )
 
     # generate-inputs
     gp = sub.add_parser("generate-inputs", help="Generate VASP inputs for all systems")
     gp.add_argument(
-        "root", type=Path,
+        "root",
+        type=Path,
         help="Project root directory containing system subdirectories",
     )
     gp.add_argument(
-        "--unitcell", action="store_true",
+        "--unitcell",
+        action="store_true",
         help="Also generate unitcell inputs (structure_opt/band/dos/dielectric)",
     )
 
     # submit
     sp2 = sub.add_parser("submit", help="Submit VASP calculations for all systems")
     sp2.add_argument(
-        "root", type=Path,
+        "root",
+        type=Path,
         help="Project root directory containing system subdirectories",
     )
     sp2.add_argument(
-        "--all-phases", action="store_true",
+        "--all-phases",
+        action="store_true",
         help="Submit all competing phases (default: target phase only)",
     )
 
     # run
-    rp = sub.add_parser("run", help="Run batch pipeline — advance all systems until completion")
-    rp.add_argument(
-        "root", type=Path, nargs="+",
-        help="One or more project root directories. Order = dispatch "
-             "priority: systems under earlier roots are submitted first "
-             "(crisp priority), so list the root that must finish first "
-             "leftmost.",
+    rp = sub.add_parser(
+        "run", help="Run batch pipeline — advance all systems until completion"
     )
     rp.add_argument(
-        "--poll", type=int, default=60,
+        "root",
+        type=Path,
+        nargs="+",
+        help="One or more project root directories. Order = dispatch "
+        "priority: systems under earlier roots are submitted first "
+        "(crisp priority), so list the root that must finish first "
+        "leftmost.",
+    )
+    rp.add_argument(
+        "--poll",
+        type=int,
+        default=60,
         help="Poll interval in seconds (default: 60)",
     )
     rp.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Build defect structures and generate inputs only; do NOT submit any VASP jobs.",
     )
     rp.add_argument(
-        "--exclude", action="append", default=[],
+        "--exclude",
+        action="append",
+        default=[],
         help="Exclude a system by directory name (repeatable: --exclude hBN --exclude orth-SiC)",
     )
     rp.add_argument(
-        "--retry-failed", action="store_true",
+        "--retry-failed",
+        action="store_true",
         help="Arm the one-shot auto-rerun (ADR 0007): resubmit every failed/"
         "unconverged defect dir exactly once; a second failure is terminal",
     )
-    rp.add_argument("--loop", action="store_true",
-                    help="Keep polling and advancing until all systems complete")
-    rp.add_argument("--daemon", action="store_true",
-                    help="Detach and run in background (requires --loop)")
+    rp.add_argument(
+        "--loop",
+        action="store_true",
+        help="Keep polling and advancing until all systems complete",
+    )
+    rp.add_argument(
+        "--daemon",
+        action="store_true",
+        help="Detach and run in background (requires --loop)",
+    )
 
     # start
     sp_start = sub.add_parser("start", help="Start background batch loop")
@@ -755,12 +914,16 @@ def _add_batch_parser(subparsers) -> None:
     sp_stop = sub.add_parser("stop", help="Stop background batch loop")
     sp_stop.add_argument("root", type=Path, help="Project root directory")
 
+
 def _handle_batch(args: argparse.Namespace) -> None:
     if args.batch_action == "status":
         _batch_status(args.root.resolve())
     elif args.batch_action == "deps":
         from vasp_sop.report.deps import (
-            build_graph, render_mermaid, render_tree, to_json,
+            build_graph,
+            render_mermaid,
+            render_tree,
+            to_json,
         )
 
         graph = build_graph(args.root.resolve(), system_filter=args.system)
@@ -777,12 +940,13 @@ def _handle_batch(args: argparse.Namespace) -> None:
     elif args.batch_action == "stop":
         _batch_stop(args.root.resolve())
     elif args.batch_action == "history":
-        _batch_history(args.root.resolve(), system=args.system,
-                       prune=args.prune)
+        _batch_history(args.root.resolve(), system=args.system, prune=args.prune)
     elif args.batch_action == "reconcile":
         _batch_reconcile(args.root.resolve())
     elif args.batch_action == "retry":
         _batch_retry(args.root.resolve(), args.dirs)
+    elif args.batch_action == "regenerate":
+        _batch_regenerate(args.root.resolve(), args.dirs)
     elif args.batch_action == "blockers":
         _batch_blockers(args.root.resolve())
     elif args.batch_action == "restore":
@@ -790,11 +954,14 @@ def _handle_batch(args: argparse.Namespace) -> None:
     elif args.batch_action == "generate-inputs":
         _batch_generate_inputs(args.root.resolve(), unitcell=args.unitcell)
     elif args.batch_action == "run":
-        _batch_run([r.resolve() for r in args.root], poll_interval=args.poll,
-                   dry_run=args.dry_run, exclude=args.exclude, loop=args.loop,
-                   retry_failed=args.retry_failed)
-
-
+        _batch_run(
+            [r.resolve() for r in args.root],
+            poll_interval=args.poll,
+            dry_run=args.dry_run,
+            exclude=args.exclude,
+            loop=args.loop,
+            retry_failed=args.retry_failed,
+        )
 
 
 def _batch_start(root: Path) -> None:
@@ -864,7 +1031,8 @@ def _batch_loop_status(root: Path) -> None:
     if snapshot_time:
         details = (
             f"{details}  snapshot={snapshot_time}"
-            if details else f"snapshot={snapshot_time}"
+            if details
+            else f"snapshot={snapshot_time}"
         )
     suffix = f"  {details}" if details else ""
     print(f"Loop running (PID {pid})  uptime={uptime}{suffix}")
@@ -897,7 +1065,8 @@ def _batch_status(root: Path) -> None:
     def _running(prefix: str) -> int:
         # Read-side filter: ignore records whose directory no longer exists.
         return sum(
-            1 for p, st in all_jobs.items()
+            1
+            for p, st in all_jobs.items()
             if st == "submitted" and p.startswith(prefix) and Path(p).is_dir()
         )
 
@@ -931,18 +1100,26 @@ def _batch_status(root: Path) -> None:
         # Pure disk truth — no summary shortcut: % is the fraction of
         # directories that passed the verdict, matching the COMPLETE gate.
         pct = int(done / total * 100) if total else 0
-        rows.append({
-            "name": d.name, "pri": _PRIORITY_MAP.get(d.name, "\u2014"),
-            "phase": phase, "cpd": (cpd_d, len(cpd_dirs)),
-            "uc": (uc_d, len(uc_dirs)), "df": (df_d, len(df_dirs)),
-            "running": running, "pct": pct,
-        })
+        rows.append(
+            {
+                "name": d.name,
+                "pri": _PRIORITY_MAP.get(d.name, "\u2014"),
+                "phase": phase,
+                "cpd": (cpd_d, len(cpd_dirs)),
+                "uc": (uc_d, len(uc_dirs)),
+                "df": (df_d, len(df_dirs)),
+                "running": running,
+                "pct": pct,
+            }
+        )
 
     if not rows:
         print(f"No vasp-sop systems found in {root}")
         return
 
-    print(f"{'System':<22} {'P':<3} {'Phase':<10} {'CPD':>8} {'UC':>8} {'Defect':>9} {'Run':>4} {'%':>4}")
+    print(
+        f"{'System':<22} {'P':<3} {'Phase':<10} {'CPD':>8} {'UC':>8} {'Defect':>9} {'Run':>4} {'%':>4}"
+    )
     print(f"{'':22s} {'':3s} {'':10s} {'D/T':>8} {'D/T':>8} {'D/T':>9}")
     print("-" * 66)
     for r in rows:
@@ -951,16 +1128,21 @@ def _batch_status(root: Path) -> None:
         df_s = f"{r['df'][0]}/{r['df'][1]}" if r["df"][1] else "\u00b7"
         run_s = str(r["running"]) if r["running"] else "\u00b7"
         pct_s = f"{r['pct']:3d}%"
-        print(f"{r['name']:<22} {r['pri']:<3} {r['phase']:<10} "
-              f"{cpd_s:>8} {uc_s:>8} {df_s:>9} {run_s:>4} {pct_s:>4}")
+        print(
+            f"{r['name']:<22} {r['pri']:<3} {r['phase']:<10} "
+            f"{cpd_s:>8} {uc_s:>8} {df_s:>9} {run_s:>4} {pct_s:>4}"
+        )
     print("-" * 66)
     done_count = sum(1 for r in rows if r["phase"] == "COMPLETE")
-    print(f"Total: {len(rows)}  Done: {done_count}  "
-          f"Remaining: {len(rows) - done_count}")
+    print(
+        f"Total: {len(rows)}  Done: {done_count}  "
+        f"Remaining: {len(rows) - done_count}"
+    )
 
 
-def _batch_history(root: Path, *, system: str | None = None,
-                   prune: bool = False) -> None:
+def _batch_history(
+    root: Path, *, system: str | None = None, prune: bool = False
+) -> None:
     """Print job state history for one or all systems from JobStore.
 
     With *prune*, delete JobStore records (job_history + tracked) whose
@@ -968,14 +1150,15 @@ def _batch_history(root: Path, *, system: str | None = None,
     dirs otherwise inflate status accounting.
     """
     from vasp_sop.core.job_store import JobStore
-    from datetime import datetime
 
     store = JobStore()
     if prune:
         n_hist, n_trk = store.prune_missing()
         store.close()
-        print(f"Pruned {n_hist} history record(s) and {n_trk} tracked "
-              f"row(s) for missing directories.")
+        print(
+            f"Pruned {n_hist} history record(s) and {n_trk} tracked "
+            f"row(s) for missing directories."
+        )
         return
     all_jobs = store.latest_all()
     store.close()
@@ -984,8 +1167,7 @@ def _batch_history(root: Path, *, system: str | None = None,
 
     if system:
         prefix = f"{root_prefix}/{system}"
-        sys_jobs = {p: s for p, s in all_jobs.items()
-                    if p.startswith(prefix)}
+        sys_jobs = {p: s for p, s in all_jobs.items() if p.startswith(prefix)}
         if not sys_jobs:
             print(f"No job records for system '{system}'.")
             return
@@ -998,7 +1180,7 @@ def _batch_history(root: Path, *, system: str | None = None,
         systems: dict[str, list[str]] = {}
         for path, state in all_jobs.items():
             if path.startswith(root_prefix):
-                parts = path[len(root_prefix):].lstrip("/").split("/", 1)
+                parts = path[len(root_prefix) :].lstrip("/").split("/", 1)
                 sys_name = parts[0]
                 systems.setdefault(sys_name, []).append(state)
         if not systems:
@@ -1013,9 +1195,16 @@ def _batch_history(root: Path, *, system: str | None = None,
             print(f"  {name:<22}  {running:>3}  {done:>4}  {len(states):>5}")
     store.close()
 
-def _batch_run(roots: Path | list[Path], *, poll_interval: int = 60,
-               dry_run: bool = False, exclude: list[str] | None = None,
-               loop: bool = False, retry_failed: bool = False) -> None:
+
+def _batch_run(
+    roots: Path | list[Path],
+    *,
+    poll_interval: int = 60,
+    dry_run: bool = False,
+    exclude: list[str] | None = None,
+    loop: bool = False,
+    retry_failed: bool = False,
+) -> None:
     """Batch pipeline — advance all systems via the core orchestrator.
 
     One-shot advances each system once, then exits; ``--loop`` runs the
@@ -1113,11 +1302,15 @@ def _batch_blockers(root: Path) -> None:
         for rel, b in blocks.items():
             reason_counts[b.reason] += 1
         total.update(reason_counts)
-        print(f"{d.name:<15}{phase:<16}"
-              f"{' '.join(f'{k}:{v}' for k, v in sorted(reason_counts.items()))}")
+        print(
+            f"{d.name:<15}{phase:<16}"
+            f"{' '.join(f'{k}:{v}' for k, v in sorted(reason_counts.items()))}"
+        )
     if n_blocked:
-        print(f"\n  {n_blocked} system(s) blocked — "
-              + " ".join(f"{k}:{v}" for k, v in sorted(total.items())))
+        print(
+            f"\n  {n_blocked} system(s) blocked — "
+            + " ".join(f"{k}:{v}" for k, v in sorted(total.items()))
+        )
     else:
         print("No systems report blockers.")
 
@@ -1150,6 +1343,78 @@ def _batch_retry(root: Path, dirs: list[str]) -> None:
         js.close()
 
 
+def _batch_regenerate(root: Path, dirs: list[str]) -> None:
+    """Regenerate VASP inputs for specific calc dirs (manual repair).
+
+    The per-directory complement of ``generate-inputs``: the webui's
+    manual-handling action calls this for one dir.  Task type and defect
+    charge are inferred from the relative path, so NELECT is recomputed
+    correctly (vise API path with charge).  Idempotent — dirs whose
+    inputs are already complete are only patched (SOC/U/magmom retrofit).
+    A dir that is running in crisp is skipped (never rewrite a live job).
+    """
+    from vasp_sop.core.config import PipelineConfig
+    from vasp_sop.vasp.io import input_ready, prepare_inputs
+
+    def _task_info(rel: str) -> tuple[str, float | None]:
+        """(task_type, charge) inferred from the relative path."""
+        parts = rel.split("/")
+        if len(parts) < 3:
+            return "", None
+        leg = parts[1]
+        if leg == "defect":
+            if parts[2] == "perfect":
+                return "defect", None
+            m = re.search(r"_(-?\d+)$", parts[2])
+            return "defect", float(m.group(1)) if m else None
+        if leg == "unitcell" and len(parts) > 2:
+            task = parts[2]
+            if task in ("band", "dos", "dielectric", "structure_opt"):
+                return task, None
+        return "", None
+
+    def _crisp_running(d: Path) -> bool:
+        from vasp_sop.report.deps import _crisp_status
+
+        return _crisp_status(d) in ("running", "submitted", "ready_fetch")
+
+    ok, skipped, failed = 0, 0, 0
+    for rel in dirs:
+        d = (root / rel).resolve()
+        if not d.is_relative_to(root):
+            print(f"  SKIP {rel}: outside project root")
+            skipped += 1
+            continue
+        if not d.is_dir():
+            print(f"  SKIP {rel}: not a directory")
+            skipped += 1
+            continue
+        if _crisp_running(d):
+            print(f"  SKIP {rel}: running/submitted in crisp (refusing rewrite)")
+            skipped += 1
+            continue
+        sys_dir = d.parent
+        while sys_dir != root and sys_dir.parent != root:
+            sys_dir = sys_dir.parent
+        plan = sys_dir / "plan.yaml"
+        if not plan.is_file():
+            print(f"  SKIP {rel}: cannot find plan.yaml for its system")
+            skipped += 1
+            continue
+        try:
+            config = PipelineConfig.from_yaml(plan, root=sys_dir)
+            task_type, charge = _task_info(rel)
+            was_ready = input_ready(d)
+            prepare_inputs(d, config, task_type=task_type, charge=charge)
+            state = "patched" if was_ready else "generated"
+            print(f"  OK   {rel}: inputs {state} (task={task_type or 'cpd'})")
+            ok += 1
+        except Exception as exc:
+            print(f"  FAIL {rel}: {type(exc).__name__}: {exc}")
+            failed += 1
+    print(f"Done regenerate: {ok} ok, {skipped} skipped, {failed} failed")
+
+
 def _batch_generate_inputs(root: Path, *, unitcell: bool = False) -> None:
     """Generate VASP inputs for all systems in *root* that need them.
     With ``unitcell=True``, also generates band/dos/dielectric inputs
@@ -1158,6 +1423,7 @@ def _batch_generate_inputs(root: Path, *, unitcell: bool = False) -> None:
     from vasp_sop.vasp.io import input_ready, prepare_inputs
     from vasp_sop.core.config import PipelineConfig
     import logging
+
     log = logging.getLogger(__name__)
 
     _CPD_DIR = "cpd"
@@ -1166,13 +1432,17 @@ def _batch_generate_inputs(root: Path, *, unitcell: bool = False) -> None:
     # ── CPD phase dirs ─────────────────────────────────────────────
     tasks: list[tuple[str, str, Path, Path]] = []
     for d in sorted(root.iterdir()):
-        if not d.is_dir(): continue
+        if not d.is_dir():
+            continue
         plan_path = d / "plan.yaml"
-        if not plan_path.is_file(): continue
+        if not plan_path.is_file():
+            continue
         cpd_dir = d / _CPD_DIR
-        if not cpd_dir.is_dir(): continue
+        if not cpd_dir.is_dir():
+            continue
         for pd in sorted(cpd_dir.iterdir()):
-            if not pd.is_dir() or pd.name == "combos": continue
+            if not pd.is_dir() or pd.name == "combos":
+                continue
             if not input_ready(pd):
                 tasks.append((d.name, pd.name, pd, plan_path))
 
@@ -1182,7 +1452,9 @@ def _batch_generate_inputs(root: Path, *, unitcell: bool = False) -> None:
         for t in tasks:
             try:
                 sys_name, phase_name, phase_dir, plan_path = t
-                config = PipelineConfig.from_yaml(plan_path, root=phase_dir.parent.parent)
+                config = PipelineConfig.from_yaml(
+                    plan_path, root=phase_dir.parent.parent
+                )
                 prepare_inputs(phase_dir, config)
                 ok += 1
                 print(f"  OK  {sys_name}/{phase_name}")
@@ -1195,9 +1467,11 @@ def _batch_generate_inputs(root: Path, *, unitcell: bool = False) -> None:
         uc_ok = 0
         uc_skip = 0
         for d in sorted(root.iterdir()):
-            if not d.is_dir(): continue
+            if not d.is_dir():
+                continue
             plan_path = d / "plan.yaml"
-            if not plan_path.is_file(): continue
+            if not plan_path.is_file():
+                continue
             so = d / _UC_DIR / "structure_opt"
             if not so.is_dir() or not (so / "CONTCAR").is_file():
                 uc_skip += 1
@@ -1205,6 +1479,7 @@ def _batch_generate_inputs(root: Path, *, unitcell: bool = False) -> None:
             # Identify target via System.target_dir (uses plan.yaml poscar_src)
             config = PipelineConfig.from_yaml(plan_path, root=d)
             from vasp_sop.defect.unitcell import _prepare_all_inputs
+
             td = System(d, config).target_dir
             if td is None or not td.is_dir():
                 uc_skip += 1
@@ -1216,7 +1491,9 @@ def _batch_generate_inputs(root: Path, *, unitcell: bool = False) -> None:
             except Exception as exc:
                 print(f"  FAIL {d.name}/unitcell: {exc}")
         if uc_skip:
-            print(f"Skipped {uc_skip} systems (structure_opt not ready — run CPD first)")
+            print(
+                f"Skipped {uc_skip} systems (structure_opt not ready — run CPD first)"
+            )
         if uc_ok:
             print(f"Done unitcell: {uc_ok} generated")
 
@@ -1249,6 +1526,7 @@ def _batch_submit(root: Path, *, all_phases: bool = False) -> None:
         target_mpid = None
         try:
             import yaml as _yaml
+
             with open(plan_path) as f:
                 data = _yaml.safe_load(f)
             p = (data or {}).get("project", {})
@@ -1268,7 +1546,11 @@ def _batch_submit(root: Path, *, all_phases: bool = False) -> None:
                 continue
             if target_name is None and target_mpid and target_mpid in pd.name:
                 target_name = pd.name
-            elif target_name is None and target_mpid is None and formula.replace(" ", "") in pd.name.replace(" ", ""):
+            elif (
+                target_name is None
+                and target_mpid is None
+                and formula.replace(" ", "") in pd.name.replace(" ", "")
+            ):
                 target_name = pd.name
             else:
                 other_phases.append(pd)
@@ -1313,7 +1595,6 @@ def _batch_submit(root: Path, *, all_phases: bool = False) -> None:
             except Exception as exc:
                 print(f"  {d.name:<18}   phase: {pd.name} FAIL: {exc}")
 
-
     # Summary
     print("-" * 55)
     if skipped:
@@ -1326,11 +1607,10 @@ def _batch_submit(root: Path, *, all_phases: bool = False) -> None:
         print("No jobs submitted.")
 
 
-
-
 def _scan_system(d: Path, plan: Path) -> dict:
     """Inspect a single system directory and return status dict."""
     import yaml
+
     formula = "?"
     try:
         with open(plan) as f:
@@ -1343,6 +1623,7 @@ def _scan_system(d: Path, plan: Path) -> dict:
 
     # VASP inputs ready?
     from vasp_sop.vasp.io import input_ready
+
     cpd = d / "cpd"
     vasp_ready = "·"
     if cpd.is_dir():
@@ -1389,6 +1670,7 @@ def _check_cpd(cpd_dir: Path) -> str:
 
     # Any VASP input exists?
     from vasp_sop.vasp.io import input_ready
+
     for child in cpd_dir.iterdir():
         if child.is_dir() and input_ready(child):
             return "·"  # inputs ready, VASP not run
@@ -1426,6 +1708,8 @@ def _check_unitcell(uc_dir: Path) -> str:
         return "▶"
     else:
         return "·"
+
+
 def _check_defect(df_dir: Path) -> str:
     """Determine defect stage status."""
     from vasp_sop.vasp.convergence import convergence_verdict
@@ -1443,11 +1727,18 @@ def _check_defect(df_dir: Path) -> str:
         return "✓"
 
     # Check VASP results
-    has_perfect = convergence_verdict(df_dir / "perfect").converged if (df_dir / "perfect").is_dir() else False
+    has_perfect = (
+        convergence_verdict(df_dir / "perfect").converged
+        if (df_dir / "perfect").is_dir()
+        else False
+    )
 
     # Count defect dirs with VASP done vs total
-    defect_dirs = [x for x in df_dir.iterdir()
-                   if x.is_dir() and x.name != "perfect" and input_ready(x)]
+    defect_dirs = [
+        x
+        for x in df_dir.iterdir()
+        if x.is_dir() and x.name != "perfect" and input_ready(x)
+    ]
     done_dirs = sum(1 for x in defect_dirs if convergence_verdict(x).converged)
 
     if has_perfect and done_dirs == len(defect_dirs) and len(defect_dirs) > 0:
@@ -1459,6 +1750,6 @@ def _check_defect(df_dir: Path) -> str:
     else:
         return "·"
 
+
 if __name__ == "__main__":
     main()
-
