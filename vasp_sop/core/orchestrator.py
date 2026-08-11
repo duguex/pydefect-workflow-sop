@@ -100,6 +100,28 @@ _CPD_MAX_IONIC_RESTARTS = 3
 _drift_warned: set[str] = set()
 
 
+def _has_zbrent_failure(path: Path) -> bool:
+    """True if the last run died in a ZBRENT line-search bracket failure.
+
+    ZBRENT aborts occur when EDIFF=1e-4 leaves too much force noise for
+    the line search (metallic phases; 08-08 protocol EDIFF=1e-7
+    converged the same dirs).  Operator decision 2026-08-11 (issue #119):
+    keep the global EDIFF=1e-4, but re-run dirs whose last attempt died
+    in ZBRENT with EDIFF=1e-6.
+    """
+    outcar = path / "OUTCAR"
+    if not outcar.is_file():
+        return False
+    try:
+        with open(outcar, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 65536))
+            return b"ZBRENT" in f.read()
+    except OSError:
+        return False
+
+
 def _warn_incar_drift(path: Path, label: str) -> None:
     """Warn (once per dir per process) when INCAR is newer than OUTCAR.
 
@@ -364,7 +386,7 @@ def wave2_submit(
     # that failed ionically (force gate / NSW exhausted) continues from
     # its own CONTCAR every cycle until it converges.  Electronic NELM
     # exhaustion is NOT auto-retried (see _IONIC_RETRY_REASONS).
-    from vasp_sop.vasp.io import restart_from_contcar
+    from vasp_sop.vasp.io import patch_incar, restart_from_contcar
 
     cpd_root = sys.cpd_dir
     if cpd_root.is_dir():
@@ -404,6 +426,10 @@ def wave2_submit(
                 restart_from_contcar(cd)
             except Exception:
                 pass
+            # ZBRENT line-search aborts (metallic phases at EDIFF=1e-4)
+            # re-run with EDIFF=1e-6 instead of failing forever (issue #119).
+            if _has_zbrent_failure(cd):
+                patch_incar(cd, EDIFF="1e-6")
             _submit_or_skip(
                 cd, f"phase:{cd.name}", sys.name, dry_run, info,
                 js=js, source="ionic_restart", priority=priority,

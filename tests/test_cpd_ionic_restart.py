@@ -331,3 +331,31 @@ def test_no_warning_when_incar_older(tmp_path: Path, caplog):
         orchestrator._warn_incar_drift(d, "TestSys/cpd/FeO_mp-1")
     warns = [r.message for r in caplog.records if "newer than OUTCAR" in r.message]
     assert warns == [], warns
+
+
+def test_zbrent_dir_gets_ediff_1e6(tmp_path: Path):
+    """A cpd whose last run died in ZBRENT is resubmitted with EDIFF=1e-6
+    (operator decision 2026-08-11, issue #119) instead of looping on
+    EDIFF=1e-4 forever."""
+    from vasp_sop.core import orchestrator
+
+    d = tmp_path / "cpd" / "Sr_mp-139"
+    d.mkdir(parents=True)
+    (d / "INCAR").write_text("EDIFF = 1e-4\n")
+    (d / "OUTCAR").write_text(
+        "something\n---  I REFUSE TO CONTINUE WITH THIS SICK JOB ---\n"
+        "ZBRENT: fatal error in bracketing\n")
+    (d / "CONTCAR").write_text("x\n")
+    assert orchestrator._has_zbrent_failure(d) is True
+    from vasp_sop.vasp.io import patch_incar
+    patch_incar(d, EDIFF="1e-6")
+    assert "EDIFF = 1e-6" in (d / "INCAR").read_text()
+
+
+def test_no_zbrent_no_downgrade(tmp_path: Path):
+    from vasp_sop.core import orchestrator
+
+    d = tmp_path / "cpd" / "FeO_mp-1"
+    d.mkdir(parents=True)
+    (d / "OUTCAR").write_text("reached required accuracy\n")
+    assert orchestrator._has_zbrent_failure(d) is False
