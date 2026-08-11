@@ -271,9 +271,14 @@ def check_task_complete(path: Path, task_type: str = "") -> bool:
     return convergence_verdict(path, task_type).converged
 
 def restart_from_contcar(path: Path) -> None:
-    """Copy CONTCAR → POSCAR and set ISTART=1 for restart."""
+    """Copy CONTCAR → POSCAR and set ISTART=1 for restart.
+
+    A zero-byte CONTCAR (truncated/corrupted run, e.g. same-dir
+    concurrent VASP) must not clobber POSCAR — crisp then refuses the
+    submission ("missing or empty: POSCAR") and the dir loops forever.
+    """
     contcar = path / "CONTCAR"
-    if not contcar.is_file():
+    if not contcar.is_file() or contcar.stat().st_size == 0:
         return
     shutil.copy2(str(contcar), str(path / "POSCAR"))
 
