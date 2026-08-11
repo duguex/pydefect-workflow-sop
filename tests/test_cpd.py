@@ -162,6 +162,17 @@ class TestCpdMcePreflight:
         assert result.ready is True
         assert result.missing == {}
 
+    def test_excluded_phases_skip_preflight(self, tmp_path: Path):
+        """cpd_excluded_phases.yaml phases never block mce (issue #93)."""
+        missing = tmp_path / "Big_mp-999"
+        missing.mkdir()  # no OUTCAR / CONTCAR at all
+        (tmp_path.parent / "cpd_excluded_phases.yaml").write_text("- Big_mp-999\n")
+
+        result = preflight_cpd_inputs(tmp_path)
+
+        assert result.phase_dirs == ()
+        assert result.ready is True
+
 
     def test_compute_writes_blocked_preflight_before_mce(self, tmp_path, monkeypatch):
         phase = tmp_path / "NaCl_mp-1"

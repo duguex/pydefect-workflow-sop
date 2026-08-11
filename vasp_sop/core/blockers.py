@@ -76,8 +76,11 @@ def calc_dirs(system_root: Path) -> list[tuple[Path, str]]:
     out: list[tuple[Path, str]] = []
     cpd = system_root / "cpd"
     if cpd.is_dir():
+        from vasp_sop.defect.cpd import is_excluded_phase
+
         for pd in cpd.iterdir():
-            if pd.is_dir() and pd.name != "combos":
+            if pd.is_dir() and pd.name != "combos" \
+                    and not is_excluded_phase(system_root, pd):
                 out.append((pd, ""))
     uc = system_root / "unitcell"
     if uc.is_dir():

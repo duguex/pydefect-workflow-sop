@@ -1096,9 +1096,16 @@ def _batch_status(root: Path) -> None:
         except Exception:
             continue
 
-        phase = System(d, config).phase()
+        sys_obj = System(d, config)
+        phase = sys_obj.phase()
         prefix = str(d.resolve())
-        cpd_dirs = _dirs(d / "cpd")
+        excl_phases = sys_obj._excluded_phases()
+        cpd_dirs = [
+            p for p in _dirs(d / "cpd")
+            if p.name not in excl_phases
+            and not any(pat in p.name for pat in excl_phases)
+        ]
+        cpd_excluded = len(_dirs(d / "cpd")) - len(cpd_dirs)
         uc_dirs = _dirs(d / "unitcell", exclude="structure_opt")
         # ADR 0013: excluded defect dirs (anion-cation antisites etc.) are
         # never counted — the Defect D/T is the valid defect set, with the
@@ -1130,7 +1137,7 @@ def _batch_status(root: Path) -> None:
                 "cpd": (cpd_d, len(cpd_dirs)),
                 "uc": (uc_d, len(uc_dirs)),
                 "df": (df_d, len(df_dirs)),
-                "df_excl": df_excluded,
+                "df_excl": df_excluded + cpd_excluded,
                 "running": running,
                 "pct": pct,
             }

@@ -109,3 +109,14 @@ class TestScanSystem:
 
         blocks = scan_system(sys)
         assert blocks["defect/Fe_Na1_0"].reason == "never_ran"
+
+    def test_scan_system_skips_excluded_cpd_phases(self, tmp_path: Path):
+        """cpd_excluded_phases.yaml phases are not blockers (issue #93)."""
+        sys = tmp_path / "NaCl"
+        excl = sys / "cpd" / "Big_mp-999"
+        _minimal(excl)
+        (sys / "cpd_excluded_phases.yaml").write_text("- Big_mp-999\n")
+        (sys / "plan.yaml").write_text("x\n")
+
+        blocks = scan_system(sys)
+        assert not blocks

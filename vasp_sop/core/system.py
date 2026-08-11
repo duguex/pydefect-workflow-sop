@@ -331,18 +331,9 @@ class System:
         requires every engaged calculation to have converged, and an
         exclusion is not a failure bucket.
         """
-        import yaml as _yaml
+        from vasp_sop.defect.cpd import excluded_phases
 
-        excl_path = self.root / "cpd_excluded_phases.yaml"
-        if not excl_path.is_file():
-            return set()
-        try:
-            data = _yaml.safe_load(excl_path.read_text())
-        except (OSError, _yaml.YAMLError):
-            return set()
-        if not isinstance(data, list):
-            return set()
-        return {str(entry) for entry in data}
+        return excluded_phases(self.root)
 
     def _is_excluded_phase(self, phase_dir: Path) -> bool:
         """Check if *phase_dir* should be skipped per cpd_excluded_phases.yaml."""

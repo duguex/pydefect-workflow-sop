@@ -13,6 +13,8 @@ from pathlib import Path
 import shutil
 from typing import Optional
 
+import yaml as _yaml
+
 from vasp_sop.core.config import PipelineConfig
 
 import yaml
@@ -116,19 +118,46 @@ class CpdPreflight:
         return not self.missing
 
 
+def excluded_phases(system_root: Path) -> set[str]:
+    """Phases excluded via ``cpd_excluded_phases.yaml`` at the system root
+    (issue #93).  List of names/substrings; empty when absent/invalid."""
+    excl_path = Path(system_root) / "cpd_excluded_phases.yaml"
+    if not excl_path.is_file():
+        return set()
+    try:
+        data = _yaml.safe_load(excl_path.read_text())
+    except (OSError, _yaml.YAMLError):
+        return set()
+    if not isinstance(data, list):
+        return set()
+    return {str(entry) for entry in data}
+
+
+def is_excluded_phase(system_root: Path, phase_dir: Path) -> bool:
+    """True if *phase_dir* matches the system's cpd exclusion list."""
+    excluded = excluded_phases(system_root)
+    if not excluded:
+        return False
+    name = Path(phase_dir).name
+    return any(pattern == name or pattern in name for pattern in excluded)
+
+
 def preflight_cpd_inputs(cpd_root: Path) -> CpdPreflight:
     """Check the exact per-phase files required by ``pydefect_vasp mce``.
 
     The bundled pydefect implementation parses ``OUTCAR.final_energy`` and
     ``CONTCAR`` composition for every directory passed to ``mce``.  This
     adapter validates that contract without invoking pydefect or inferring
-    VASP convergence state.
+    VASP convergence state.  Excluded phases (cpd_excluded_phases.yaml)
+    never participate in mce, so they are not required to be present.
     """
     cpd_root = Path(cpd_root)
     phase_dirs = tuple(
         sorted(
             path for path in cpd_root.iterdir()
-            if path.is_dir() and path.name != "combos"
+            if path.is_dir()
+            and path.name != "combos"
+            and not is_excluded_phase(cpd_root.parent, path)
         )
     )
     missing = {
