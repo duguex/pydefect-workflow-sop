@@ -753,6 +753,12 @@ def wave2_submit(
                         restart_from_contcar(child)
                     except Exception:
                         pass
+                # ZBRENT line-search aborts (metallic phases at
+                # EDIFF=1e-4) re-run with EDIFF=1e-6 instead of failing
+                # forever (issue #119 — same policy as cpd restarts).
+                if _has_zbrent_failure(child):
+                    from vasp_sop.vasp.io import patch_incar
+                    patch_incar(child, EDIFF="1e-6")
                 _submit_or_skip(
                     child, f"df-{child.name}", sys.name, dry_run, info,
                     js=js, source="restart",
