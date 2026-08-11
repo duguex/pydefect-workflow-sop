@@ -10,7 +10,10 @@ import yaml
 from vasp_sop.report.interactive import (
     _bary_js,
     _build_defects,
+    _defect_display,
     _extract_vertex_data,
+    _formula_html,
+    _formula_subscripts,
     _html_template,
     _load_inputs,
     _sort_defect_names,
@@ -294,6 +297,37 @@ class TestSortDefectNames:
 
 
 # ═════════════════════════════════════════════════════════════════════
+# display-name typesetting (_defect_display / _formula_*)
+# ═════════════════════════════════════════════════════════════════════
+
+
+class TestDisplayNames:
+    def test_defect_name_species_site_subscript_charge_superscript(self):
+        assert _defect_display("Al_Ca1_-1") == "AlCa₁⁻¹"
+        assert _defect_display("Va_O1_0") == "VaO₁⁰"
+        assert _defect_display("Al_O1_2") == "AlO₁²"
+
+    def test_defect_name_without_charge_part(self):
+        assert _defect_display("Bi_Pb1") == "BiPb₁"
+
+    def test_defect_name_with_legacy_prefix(self):
+        assert _defect_display("1_Fe_Ca1_2+") == "FeCa₁²⁺"
+
+    def test_unparseable_name_falls_back_to_digit_subscripts(self):
+        assert _defect_display("BaAl4O7") == "BaAl₄O₇"
+
+    def test_formula_subscripts(self):
+        assert _formula_subscripts("CaAl4O7") == "CaAl₄O₇"
+        assert _formula_subscripts("Sr[FeO2]2") == "Sr[FeO₂]₂"
+
+    def test_formula_html_wraps_digit_runs(self):
+        assert _formula_html("CaAl4O7") == "CaAl<sub>4</sub>O<sub>7</sub>"
+        assert _formula_html("Gd2GaSbO7:Bi") == (
+            "Gd<sub>2</sub>GaSbO<sub>7</sub>:Bi"
+        )
+
+
+# ═════════════════════════════════════════════════════════════════════
 # _bary_js_func
 # ═════════════════════════════════════════════════════════════════════
 
@@ -357,6 +391,41 @@ class TestHtmlTemplate:
         assert "getMu(px,py)" in html
         # JS must be valid (no unescaped embedded issues)
         assert html.count("--") <= 2  # only HTML comments or similar
+
+    def test_embed_display_names_panel_and_responsive_layout(self):
+        html = _html_template(
+            host_name="CsPbBr3",
+            n_vertices=4,
+            poly_2d=[[-1.20, -3.76], [-0.50, -3.10],
+                      [-1.50, -4.00], [-0.80, -4.20]],
+            vertex_mu=[{"Br": -1.20, "Cs": -3.76, "Pb": -2.42, "Bi": -2.60},
+                       {"Br": -0.50, "Cs": -3.10, "Pb": -1.80, "Bi": -1.90},
+                       {"Br": -1.50, "Cs": -4.00, "Pb": -3.10, "Bi": -3.20},
+                       {"Br": -0.80, "Cs": -4.20, "Pb": -2.90, "Bi": -3.50}],
+            vertex_names=["A", "B", "C", "D"],
+            vertex_elements=["Br", "Cs", "Pb"],
+            defects={"Bi_Pb1": {"charges": [{"q": -1, "e0": -0.5}],
+                                "delta": {"Pb": -1, "Bi": 1}}},
+            sorted_names=["Bi_Pb1"],
+            ref_mu={"Br": -1.20, "Cs": -3.76, "Pb": -2.42},
+            colors=["#e94560"],
+            cbm=2.4095,
+            ax0="Br", ax1="Cs",
+            a0_range=(-1.8, -0.2),
+            a1_range=(-4.5, -2.8),
+        )
+        # Typeset title (HTML <sub>) and display-name map (Unicode,
+        # json-escaped as \u2081 in the embedded JS).
+        assert "CsPbBr<sub>3</sub>" in html
+        assert '"Bi_Pb1": "BiPb\\u2081"' in html
+        # Chemical-potential range panel.
+        assert "化学势范围" in html
+        assert "function buildMuPanel" in html
+        assert "function updateMuPanel" in html
+        # HiDPI + scrollbar-free responsive sizing.
+        assert "devicePixelRatio" in html
+        assert "function layout" in html
+        assert "overflow:hidden" in html
 
 
 # ═════════════════════════════════════════════════════════════════════

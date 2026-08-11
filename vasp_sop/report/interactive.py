@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 
 logger = logging.getLogger(__name__)
 from pathlib import Path
@@ -183,6 +184,50 @@ def _sort_defect_names(defects: dict[str, Any]) -> list[str]:
 
 
 # ═════════════════════════════════════════════════════════════════════
+# Display-name typesetting (subscripts / superscripts)
+# ═════════════════════════════════════════════════════════════════════
+
+_SUBSCRIPT_TRANS = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
+_SUPERSCRIPT_TRANS = str.maketrans("0123456789+-", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻")
+
+
+def _formula_subscripts(text: str) -> str:
+    """Chemical-formula display: every digit becomes a Unicode subscript.
+
+    ``CaAl4O7`` -> ``CaAl₄O₇``, ``Sr[FeO2]2`` -> ``Sr[FeO₂]₂``.
+    """
+    return text.translate(_SUBSCRIPT_TRANS)
+
+
+def _formula_html(text: str) -> str:
+    """HTML title rendering: digit runs wrapped in ``<sub>``."""
+    return re.sub(r"\d+", lambda m: f"<sub>{m.group(0)}</sub>", text)
+
+
+def _defect_display(name: str) -> str:
+    """Typeset a defect name: species + subscript(site) + superscript(charge).
+
+    ``Al_Ca1_-1`` -> ``AlCa₁⁻¹``; ``Bi_Pb1`` (no charge part) -> ``BiPb₁``;
+    anything unparseable falls back to subscripts on all digits.
+    """
+    parts = name.split("_")
+    if parts and parts[0] == "1":  # legacy ``1_`` prefix convention
+        parts = parts[1:]
+    if len(parts) >= 3 and re.fullmatch(r"[+-]?\d+|\d+[+-]", parts[-1]):
+        species = parts[0]
+        site = "_".join(parts[1:-1])
+        charge = parts[-1]
+        return (
+            species
+            + site.translate(_SUBSCRIPT_TRANS)
+            + charge.translate(_SUPERSCRIPT_TRANS)
+        )
+    if len(parts) == 2:
+        return parts[0] + parts[1].translate(_SUBSCRIPT_TRANS)
+    return name.translate(_SUBSCRIPT_TRANS)
+
+
+# ═════════════════════════════════════════════════════════════════════
 # JS helpers — barycentric & lerp code generation
 # ═════════════════════════════════════════════════════════════════════
 
@@ -313,7 +358,7 @@ def _cpd_canvas_js(
 
     common = f"""
 var cc = document.getElementById("cpd"), cctx = cc.getContext("2d");
-var cW = cc.width, cH = cc.height, cP = {{l:35,r:10,t:20,b:25}};
+var cW = 300, cH = 300, cP = {{l:35,r:10,t:20,b:25}};
 var a0R = [{a0_range[0]},{a0_range[1]}], a1R = [{a1_range[0]},{a1_range[1]}];
 var POLY = {js(poly_2d)};
 var VNAMES = {js(vertex_names)};
@@ -384,7 +429,7 @@ function drawCPD(mu){{
 }}
 function ptrT(e){{
   var r=cc.getBoundingClientRect();
-  var cx=(e.clientX-r.left)*cc.width/r.width, cy=(e.clientY-r.top)*cc.height/r.height;
+  var cx=e.clientX-r.left, cy=e.clientY-r.top;
   var x0=cX(POLY[0][0]),y0=cY(POLY[0][1]);
   var x1=cX(POLY[1][0]),y1=cY(POLY[1][1]);
   var dx=x1-x0,dy=y1-y0;
@@ -427,19 +472,19 @@ function getMu(px,py){{
 }}
 function drawCPD(mu){{
   cctx.clearRect(0,0,cW,cH);
-  cctx.strokeStyle="#ccc";cctx.lineWidth=0.5;cctx.fillStyle="#666";cctx.font="9px Arial";cctx.textAlign="center";
+  cctx.strokeStyle="#ccc";cctx.lineWidth=0.5;cctx.fillStyle="#666";cctx.font="11px Arial";cctx.textAlign="center";
   for(var i=0;i<=4;i++){{var v=a0R[0]+i/4*(a0R[1]-a0R[0]);cctx.beginPath();cctx.moveTo(cX(v),cP.t);cctx.lineTo(cX(v),cH-cP.b);cctx.stroke();cctx.fillText(v.toFixed(2),cX(v),cH-cP.b+12);}}
   cctx.textAlign="right";
   for(var i=0;i<=4;i++){{var v=a1R[0]+i/4*(a1R[1]-a1R[0]);cctx.beginPath();cctx.moveTo(cP.l,cY(v));cctx.lineTo(cW-cP.r,cY(v));cctx.stroke();cctx.fillText(v.toFixed(2),cP.l-4,cY(v)+3);}}
   cctx.strokeStyle="#d63031";cctx.lineWidth=2;cctx.beginPath();
   POLY.forEach(function(v,i){{i==0?cctx.moveTo(cX(v[0]),cY(v[1])):cctx.lineTo(cX(v[0]),cY(v[1]));}});
   cctx.closePath();cctx.stroke();cctx.fillStyle="rgba(214,48,49,0.08)";cctx.fill();
-  POLY.forEach(function(v,i){{cctx.fillStyle="#d63031";cctx.font="bold 12px Arial";cctx.fillText(VNAMES[i],cX(v[0])+5,cY(v[1])-5);}});
+  POLY.forEach(function(v,i){{cctx.fillStyle="#d63031";cctx.font="bold 13px Arial";cctx.fillText(VNAMES[i],cX(v[0])+5,cY(v[1])-5);}});
   if(mu){{cctx.beginPath();cctx.arc(cX(mu["{ax0}"]),cY(mu["{ax1}"]),6,0,2*Math.PI);cctx.fillStyle="#16c79a";cctx.fill();cctx.strokeStyle="#fff";cctx.lineWidth=2;cctx.stroke();}}
   cctx.fillStyle="#555";cctx.font="11px Arial";cctx.textAlign="center";cctx.fillText("μ_{ax0} (eV)",cW/2,cH-2);
   cctx.save();cctx.translate(10,cH/2);cctx.rotate(-Math.PI/2);cctx.fillText("μ_{ax1} (eV)",0,0);cctx.restore();
 }}
-function ptrPos(e){{var r=cc.getBoundingClientRect();return[invX((e.clientX-r.left)*cc.width/r.width),invY((e.clientY-r.top)*cc.height/r.height)];}}
+function ptrPos(e){{var r=cc.getBoundingClientRect();return[invX(e.clientX-r.left),invY(e.clientY-r.top)];}}
 cc.addEventListener("pointerdown",function(e){{cc.setPointerCapture(e.pointerId);var p=ptrPos(e);var mu=getMu(p[0],p[1]);if(mu)update(mu);}});
 cc.addEventListener("pointermove",function(e){{if(!e.buttons)return;var p=ptrPos(e);var mu=getMu(p[0],p[1]);if(mu)update(mu);}});
 var cx0=0,cy0=0;POLY.forEach(function(v){{cx0+=v[0];cy0+=v[1];}});cx0/=POLY.length;cy0/=POLY.length;
@@ -455,26 +500,38 @@ var curMu=getMu(cx0,cy0);
 
 _COMMON_HTML_HEAD = """<!DOCTYPE html>
 <html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{title} Formation Energy</title>
 <style>
-body{{font-family:Arial,sans-serif;margin:15px;background:#fff;color:#222}}
-canvas{{background:#f5f5f5;border-radius:8px}}
-.panel{{display:flex;gap:15px;flex-wrap:wrap}}
+html,body{{height:100%;overflow:hidden;font-family:Arial,sans-serif;margin:0;padding:0;background:#fff;color:#222}}
+body{{padding:10px;box-sizing:border-box}}
+h2{{margin:0 0 8px;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.panel{{display:flex;gap:12px;align-items:flex-start}}
+.col{{display:flex;flex-direction:column;gap:8px;min-width:0}}
+canvas{{background:#f5f5f5;border-radius:8px;display:block}}
 .leg{{display:flex;flex-wrap:wrap;gap:4px;margin:6px 0}}
-.leg>div{{display:flex;align-items:center;gap:3px;font-size:11px;cursor:pointer;padding:2px 6px;border-radius:3px}}
+.leg>div{{display:flex;align-items:center;gap:3px;font-size:12px;cursor:pointer;padding:2px 6px;border-radius:3px}}
 .leg>div:hover{{background:#eee}}
 .info{{font-size:12px;color:#666;margin:3px 0}}
-#tooltip{{position:absolute;background:rgba(245,245,245,0.95);border:1px solid #d63031;border-radius:4px;padding:6px 10px;font-size:11px;pointer-events:none;display:none;z-index:10;color:#333}}
+.mupanel{{font-size:12px;color:#444;min-width:260px}}
+.mupanel-title{{font-weight:bold;margin:2px 0 4px;color:#333}}
+.murow{{display:grid;grid-template-columns:30px 48px 1fr 48px;gap:6px;align-items:center;margin:3px 0}}
+.muel{{font-weight:bold;color:#333}}
+.mumin,.mumax{{font-family:monospace;font-size:11px;color:#888;text-align:right}}
+.mubar{{position:relative;height:6px;background:#eee;border-radius:3px}}
+.mucur{{position:absolute;top:-2px;width:10px;height:10px;border-radius:50%;background:#16c79a;margin-left:-5px}}
+#tooltip{{position:absolute;background:rgba(245,245,245,0.95);border:1px solid #d63031;border-radius:4px;padding:6px 10px;font-size:12px;pointer-events:none;display:none;z-index:10;color:#333}}
 </style></head><body>
-<h2>{title} — Formation Energy</h2>
+<h2>{title_html} — Formation Energy</h2>
 <div class="panel">
-<div>
+<div class="col">
 <div class="info">{cpd_hint}</div>
-<canvas id="cpd" width="300" height="300"></canvas>
+<div id="cpdWrap"><canvas id="cpd" width="420" height="420"></canvas></div>
 <div class="info" id="muinfo">&mu; = &mdash; eV</div>
+<div class="mupanel"><div class="mupanel-title">化学势范围 &mu; (eV)</div><div id="murows"></div></div>
 </div>
-<div style="position:relative">
-<canvas id="cv" width="800" height="500"></canvas>
+<div class="col" style="flex:1">
+<div id="cvWrap"><canvas id="cv" width="800" height="520"></canvas></div>
 <div class="leg" id="leg"></div>
 </div>
 </div>
@@ -486,13 +543,14 @@ var REF = {ref_json};
 var CL = {colors_json};
 var BG = {bg};
 var names = {names_json};
+var DISP = {disp_json};
 var nEF = 200;
 var hidden = {{}}; names.forEach(function(n){{hidden[n]=false;}});
 """
 
 _FE_CANVAS_JS = """
 var cv=document.getElementById("cv"), cx=cv.getContext("2d");
-var W=cv.width, H=cv.height, P={l:60,r:160,t:20,b:40};
+var W=800, H=520, P={l:60,r:160,t:20,b:40};
 var minY=-10, maxY=10;
 var cursorEF=null;
 
@@ -554,7 +612,7 @@ function drawFE(mu){
   // Update legend order
   var leg=document.getElementById("leg");
   sorted.forEach(function(s,i){
-    var div=Array.from(leg.children).filter(function(d){return d.textContent.indexOf(s.name.replace("1_",""))===0;})[0];
+    var div=Array.from(leg.children).filter(function(d){return d.textContent.indexOf(DISP[s.name])===0;})[0];
     if(div) leg.appendChild(div);
   });
 
@@ -582,8 +640,8 @@ function drawFE(mu){
   });
   rightSorted.sort(function(a,b){return b.ef-a.ef;});
   rightSorted.forEach(function(s){
-    cx.fillStyle=CL[s.idx];cx.textAlign="left";cx.font="11px Arial";
-    cx.fillText(s.name.replace("1_","")+" "+(s.ef>=0?"+":"")+s.ef.toFixed(2)+"eV",W-P.r+6,yPx(s.ef));
+    cx.fillStyle=CL[s.idx];cx.textAlign="left";cx.font="12px Arial";
+    cx.fillText(DISP[s.name]+" "+(s.ef>=0?"+":"")+s.ef.toFixed(2)+"eV",W-P.r+6,yPx(s.ef));
   });
 
   // Vertical cursor line
@@ -614,13 +672,43 @@ cv.addEventListener("mousemove",function(ev){
     var p0=ld.pts[lo],p1=ld.pts[hi];
     if(p1.ef-p0.ef<1e-10)return;
     var t=(ef-p0.ef)/(p1.ef-p0.ef);var e=p0.e+(p1.e-p0.e)*t;
-    html+="<span style='color:"+CL[ld.idx]+"'>"+ld.name.replace("1_","")+": "+(e>=0?"+":"")+e.toFixed(3)+" eV</span><br>";
+    html+="<span style='color:"+CL[ld.idx]+"'>"+DISP[ld.name]+": "+(e>=0?"+":"")+e.toFixed(3)+" eV</span><br>";
   });
   tip.innerHTML=html;tip.style.display="block";tip.style.left=(x+15)+"px";tip.style.top=Math.max(5,ev.clientY-r.top-10)+"px";
 });
 cv.addEventListener("mouseleave",function(){tip.style.display="none";cursorEF=null;if(curMu) drawFE(curMu);});
 
-function update(mu){curMu=mu;drawCPD(mu);drawFE(mu);
+// Chemical-potential range panel: per-element min/current/max over the
+// stability vertices, updated live as the selection moves.
+function buildMuPanel(){
+  var box=document.getElementById("murows");
+  var elems=[];VERTEX_MU.forEach(function(vm){for(var e in vm)if(elems.indexOf(e)<0)elems.push(e);});
+  elems.sort();
+  var rows={};
+  elems.forEach(function(e){
+    var mn=Infinity,mx=-Infinity;
+    VERTEX_MU.forEach(function(vm){var v=vm[e];if(v<mn)mn=v;if(v>mx)mx=v;});
+    var row=document.createElement("div");row.className="murow";
+    row.innerHTML="<span class='muel'>"+e+"</span>"+
+      "<span class='mumin'>"+mn.toFixed(2)+"</span>"+
+      "<div class='mubar'><span class='mucur'></span></div>"+
+      "<span class='mumax'>"+mx.toFixed(2)+"</span>";
+    box.appendChild(row);
+    rows[e]={mn:mn,mx:mx,cur:row.querySelector(".mucur")};
+  });
+  return rows;
+}
+var muRows=buildMuPanel();
+function updateMuPanel(mu){
+  for(var e in muRows){
+    var r=muRows[e],v=mu[e];
+    if(v===undefined)continue;
+    var pct=(r.mx>r.mn)?(v-r.mn)/(r.mx-r.mn)*100:50;
+    r.cur.style.left=pct+"%";
+  }
+}
+
+function update(mu){curMu=mu;drawCPD(mu);drawFE(mu);updateMuPanel(mu);
   var s="";Object.keys(mu).forEach(function(k){s+=k+"="+mu[k].toFixed(4)+" ";});
   if(s)document.getElementById("muinfo").innerHTML=s;
 }
@@ -628,12 +716,31 @@ function update(mu){curMu=mu;drawCPD(mu);drawFE(mu);
 var leg=document.getElementById("leg");
 names.forEach(function(n,i){
   var d=document.createElement("div");
-  d.innerHTML="<span style='display:inline-block;width:12px;height:12px;border-radius:3px;background:"+CL[i]+";margin-right:4px'></span>"+n.replace("1_","");
+  d.innerHTML="<span style='display:inline-block;width:12px;height:12px;border-radius:3px;background:"+CL[i]+";margin-right:4px'></span>"+DISP[n];
   d.onclick=function(){hidden[n]=!hidden[n];d.style.opacity=hidden[n]?".4":"1";if(curMu)drawFE(curMu);};
   leg.appendChild(d);
 });
 
+// Responsive sizing: canvas backing stores scale by devicePixelRatio
+// (crisp on hiDPI screens) and CSS sizes track the iframe viewport so
+// the page always fits without a scrollbar.
+function layout(){
+  var dpr=window.devicePixelRatio||1;
+  var pw=document.body.clientWidth, ph=window.innerHeight;
+  var cw=Math.max(240,Math.min(430,Math.round(Math.min(pw*0.36,ph-330))));
+  cc.width=cw*dpr;cc.height=cw*dpr;cc.style.width=cw+"px";cc.style.height=cw+"px";
+  cctx.setTransform(dpr,0,0,dpr,0,0);
+  var fw=Math.max(320,pw-cw-44);
+  var fh=Math.max(280,Math.min(540,ph-110));
+  cv.width=fw*dpr;cv.height=fh*dpr;cv.style.width=fw+"px";cv.style.height=fh+"px";
+  cx.setTransform(dpr,0,0,dpr,0,0);
+  cW=cw;cH=cw;W=fw;H=fh;
+  if(curMu)update(curMu);
+}
+window.addEventListener("resize",layout);
+
 update(curMu);
+layout();
 </script></body></html>"""
 
 
@@ -686,7 +793,10 @@ def _html_template(
     fe_canvas = _FE_CANVAS_JS.replace("{is_doped_str}", is_doped_str)
 
     return (
-        _COMMON_HTML_HEAD.format(title=host_name, cpd_hint=cpd_hint)
+        _COMMON_HTML_HEAD.format(
+            title=host_name, title_html=_formula_html(host_name),
+            cpd_hint=cpd_hint,
+        )
         + "\n"
         + _COMMON_JS_DECLS.format(
             def_json=js(defects),
@@ -694,6 +804,7 @@ def _html_template(
             colors_json=js(colors),
             bg=cbm,
             names_json=js(sorted_names),
+            disp_json=js({n: _defect_display(n) for n in sorted_names}),
         )
         + "\n" + cpd_js + "\n" + fe_canvas + "\n" + _COMMON_JS_FOOTER
     )
