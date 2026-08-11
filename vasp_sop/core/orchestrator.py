@@ -535,18 +535,20 @@ def wave2_submit(
                     if _stage2_soc_pending(pd, js):
                         _submit_stage2_soc(pd, sys, js, dry_run, info,
                                            priority=priority)
-        return
+        # No return here: defect/UC calculations are independent of the
+        # chemical-potential phases (formation energies need CPD only in
+        # wave3), so they run in parallel with COMPETING — matching the
+        # documented "wave2 competing+UC+defects parallel" schedule.
+        # (Operator decision 2026-08-11.)
 
     # ── UNITCELL_DEFECT: submit UC tasks + defect dirs ───────────────
     # Chemical-environment systems never run this leg (ADR 0005).
-    if p != "UNITCELL_DEFECT" or sys.is_chemical_environment:
+    if p not in ("UNITCELL_DEFECT", "COMPETING") or sys.is_chemical_environment:
         return
 
     from vasp_sop.defect import unitcell as _uc
     from vasp_sop.vasp.io import check_task_complete
 
-    if td and not (uc_root / "band" / "INCAR").is_file():
-        _uc._prepare_all_inputs(uc_root, td, sys.config)
     if td and not (df_root / "perfect" / "INCAR").is_file():
         if not (df_root / "defect_in.yaml").is_file():
             _build_defects(df_root, td, sys.config)
@@ -555,36 +557,44 @@ def wave2_submit(
 
             _generate_vasp_inputs(df_root, sys.config)
 
-    # Submit UC tasks (band, dos, dielectric)
-    for task in ("band", "dos", "dielectric"):
-        task_dir = uc_root / task
-        if not task_dir.is_dir():
-            continue
-        if check_task_complete(task_dir, task):
-            if js.latest(str(task_dir.resolve())) != "converged":
-                js.record(str(task_dir.resolve()), "converged", source="backfill")
-            _warn_incar_drift(task_dir, f"{sys.name}/unitcell/{task}")
-            continue
-        # Stale JobStore "converged" without required outputs must resubmit.
-        if js.latest(str(task_dir.resolve())) == "submitted":
-            continue
-        # A runnable submission needs a real POSCAR.  An empty/missing one
-        # (0-byte placeholder, e.g. bulk_restart-era) makes crisp refuse the
-        # upload — record failed(empty_poscar) once and stop retrying every
-        # cycle; repair the data and `batch retry` to re-arm.
-        poscar = task_dir / "POSCAR"
-        if not poscar.is_file() or poscar.stat().st_size == 0:
-            cp = str(task_dir.resolve())
-            last = js.latest(cp)
-            if not (last == "failed" and js.history(cp)[-1].get("reason")
-                    == "empty_poscar"):
-                js.record(cp, "failed", reason="empty_poscar")
-                logger.warning("%s/%s: empty POSCAR, not submitting",
-                               sys.name, task)
-            continue
-        prepare_inputs(task_dir, sys.config, task_type=task)
-        _submit_or_skip(task_dir, f"uc-{task}", sys.name, dry_run, info, js=js,
-                        priority=priority)
+    # UC tasks (band/dos/dielectric) stay gated on UNITCELL_DEFECT — only
+    # defect/perfect run in parallel with COMPETING (operator decision
+    # 2026-08-11).
+    if p == "UNITCELL_DEFECT":
+        if td and not (uc_root / "band" / "INCAR").is_file():
+            _uc._prepare_all_inputs(uc_root, td, sys.config)
+        # Submit UC tasks (band, dos, dielectric)
+        for task in ("band", "dos", "dielectric"):
+            task_dir = uc_root / task
+            if not task_dir.is_dir():
+                continue
+            if check_task_complete(task_dir, task):
+                if js.latest(str(task_dir.resolve())) != "converged":
+                    js.record(str(task_dir.resolve()), "converged",
+                              source="backfill")
+                _warn_incar_drift(task_dir, f"{sys.name}/unitcell/{task}")
+                continue
+            # Stale JobStore "converged" without required outputs must resubmit.
+            if js.latest(str(task_dir.resolve())) == "submitted":
+                continue
+            # A runnable submission needs a real POSCAR.  An empty/missing
+            # one (0-byte placeholder, e.g. bulk_restart-era) makes crisp
+            # refuse the upload — record failed(empty_poscar) once and stop
+            # retrying every cycle; repair the data and `batch retry` to
+            # re-arm.
+            poscar = task_dir / "POSCAR"
+            if not poscar.is_file() or poscar.stat().st_size == 0:
+                cp = str(task_dir.resolve())
+                last = js.latest(cp)
+                if not (last == "failed"
+                        and js.history(cp)[-1].get("reason") == "empty_poscar"):
+                    js.record(cp, "failed", reason="empty_poscar")
+                    logger.warning("%s/%s: empty POSCAR, not submitting",
+                                   sys.name, task)
+                continue
+            prepare_inputs(task_dir, sys.config, task_type=task)
+            _submit_or_skip(task_dir, f"uc-{task}", sys.name, dry_run, info,
+                            js=js, priority=priority)
 
     # Submit perfect supercell
     perfect_dir = df_root / "perfect"
