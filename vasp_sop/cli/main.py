@@ -658,6 +658,28 @@ def _add_batch_parser(subparsers) -> None:
         help="Project root directory containing system subdirectories",
     )
 
+    # deps — dependency tree for audits (read-only)
+    p_deps = sub.add_parser(
+        "deps",
+        help="Dependency tree of every calculation (read-only audit view)",
+    )
+    p_deps.add_argument(
+        "root", type=Path,
+        help="Project root directory containing system subdirectories",
+    )
+    p_deps.add_argument(
+        "--system", "-s", type=str, default=None,
+        help="Only include one system by directory name",
+    )
+    p_deps.add_argument(
+        "--json", action="store_true",
+        help="Emit the raw dependency graph as JSON",
+    )
+    p_deps.add_argument(
+        "--mermaid", action="store_true",
+        help="Emit a mermaid graph (edges = upstream dependencies)",
+    )
+
     # restore
     p_restore = sub.add_parser(
         "restore",
@@ -736,6 +758,18 @@ def _add_batch_parser(subparsers) -> None:
 def _handle_batch(args: argparse.Namespace) -> None:
     if args.batch_action == "status":
         _batch_status(args.root.resolve())
+    elif args.batch_action == "deps":
+        from vasp_sop.report.deps import (
+            build_graph, render_mermaid, render_tree, to_json,
+        )
+
+        graph = build_graph(args.root.resolve(), system_filter=args.system)
+        if args.json:
+            print(to_json(graph))
+        elif args.mermaid:
+            print(render_mermaid(graph))
+        else:
+            print(render_tree(graph))
     elif args.batch_action == "submit":
         _batch_submit(args.root.resolve(), all_phases=args.all_phases)
     elif args.batch_action == "start":
