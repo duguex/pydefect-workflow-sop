@@ -92,8 +92,12 @@ def test_defect_non_zbrent_restart_keeps_ediff(tmp_path: Path, monkeypatch):
     d.mkdir(parents=True)
     for f in ("INCAR", "POSCAR", "POTCAR", "KPOINTS"):
         (d / f).write_text("x\n")
-    (d / "INCAR").write_text("EDIFF = 1e-4\nNSW = 100\n")
-    (d / "OUTCAR").write_text("reached required accuracy\n")
+    (d / "INCAR").write_text("EDIFF = 1e-4\nNSW = 100\nIBRION = 2\nEDIFFG = -0.01\n")
+    (d / "OUTCAR").write_text(
+        "NSW = 100\nIBRION = 2\nEDIFFG = -0.01\n"
+        "TOTAL-FORCE (eV/Angst)\n ---\n"
+        " 0.5 0.5 0.5 0.2 0.2 0.2\n"
+        " General timing and accounting informations for this job:\n")
     (d / "CONTCAR").write_text("x\n")
 
     js = _JS()
@@ -102,3 +106,63 @@ def test_defect_non_zbrent_restart_keeps_ediff(tmp_path: Path, monkeypatch):
 
     assert [s[1] for s in submitted] == ["restart"], submitted
     assert "EDIFF = 1e-6" not in (d / "INCAR").read_text()
+
+
+class TestConcurrencyGuard:
+    def test_submit_or_skip_skips_crisp_live_dir(self, tmp_path, monkeypatch):
+        """A dir crisp already has a live job for must not get a second
+        submission (same-dir concurrent VASP corrupts OUTCAR/vasprun)."""
+        from vasp_sop.core import orchestrator
+
+        d = tmp_path / "defect" / "Va_O1_2"
+        d.mkdir(parents=True)
+        calls = []
+        monkeypatch.setattr(
+            "vasp_sop.core.jobs.submit_vasp",
+            lambda *a, **k: calls.append(a) or type("Job", (), {"task_name": "t"})(),
+        )
+        monkeypatch.setattr(
+            "vasp_sop.core.jobs.crisp_active_dirs",
+            lambda skip=False: {str(d.resolve())},
+        )
+        js = _JS()
+        js.record(str(d), "failed")
+
+        from vasp_sop.core.orchestrator import _submit_or_skip
+
+        _submit_or_skip(d, "df-x", "S", False, lambda *a: None, js=js)
+        assert calls == []  # no submission attempted
+
+
+class TestPollSinglePoint:
+    def test_poll_does_not_crash_single_point(self, tmp_path, monkeypatch):
+        """ADR 0014 soc2 single points (no ionic timing block) must not be
+        untracked as vasp_crash by the poll path."""
+        from vasp_sop.core import orchestrator
+        from vasp_sop.core.orchestrator import BatchOrchestrator
+
+        d = tmp_path / "calc"
+        d.mkdir()
+        (d / "OUTCAR").write_text(
+            "NSW = 0\nLSORBIT = .TRUE.\n"
+            "DAV: 10 -0.8E+03 0.1E-06\n"
+            " reached required accuracy - stopping structural energy minimisation\n"
+        )
+        (d / "INCAR").write_text("NSW = 0\nLSORBIT = .TRUE.\n")
+
+        recs: list[tuple[str, str]] = []
+        class _JS:
+            def tracked_dirs(self):
+                return [{"dir_path": str(d.resolve()), "submitted_at": 0.0}]
+            def untrack(self, p): recs.append(("untrack", p))
+            def record(self, p, st, **kw): recs.append((st, p))
+        js = _JS()
+
+        monkeypatch.setattr(
+            "vasp_sop.core.jobs.crisp_active_dirs", lambda skip=False: set())
+        orch = BatchOrchestrator.__new__(BatchOrchestrator)
+        orch.js = js
+        orch.dry_run = False
+        n = orch._poll_tracked()
+        assert n == 0
+        assert not any(r[0] == "failed" for r in recs), recs

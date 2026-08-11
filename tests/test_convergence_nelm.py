@@ -13,6 +13,9 @@ import pytest
 
 from vasp_sop.vasp.convergence import (
     REASON_ELECTRONIC_NOT_CONV,
+    REASON_FORCE_GATE_FAIL,
+    REASON_NOT_RELAXATION,
+    REASON_TRUNCATED,
     convergence_verdict,
 )
 
@@ -122,3 +125,50 @@ class TestNelmWarningPosition:
         v = convergence_verdict(d)
         assert not v.converged
         assert v.reason == REASON_ELECTRONIC_NOT_CONV
+
+
+class TestSocSinglePointVerdict:
+    """ADR 0014 soc2 jobs are NSW=0 single points whose OUTCAR ends with
+    the converged electronic tail but has no ionic timing block — they
+    must not be judged truncated."""
+
+    _SP = (
+        "NSW = 0\nIBRION = -1\nLSORBIT = .TRUE.\n"
+        "DAV:  10 -0.8E+03  0.1E-06  0.2E-07  720  0.3E-03\n"
+        " reached required accuracy - stopping structural energy minimisation\n"
+    )
+
+    def _sp_dir(self, d):
+        d.mkdir(parents=True)
+        (d / "OUTCAR").write_text(self._SP)
+        (d / "INCAR").write_text("NSW = 0\nIBRION = -1\nLSORBIT = .TRUE.\n")
+        return d
+
+    def test_single_point_with_accuracy_is_converged(self, tmp_path):
+        d = self._sp_dir(tmp_path / "calc")
+        v = convergence_verdict(d)
+        assert v.converged
+        assert v.reason == REASON_NOT_RELAXATION
+
+    def test_single_point_empty_outcar_still_truncated(self, tmp_path):
+        d = tmp_path / "calc"
+        d.mkdir()
+        (d / "OUTCAR").write_text("NSW = 0\n")
+        v = convergence_verdict(d)
+        assert not v.converged
+        assert v.reason == REASON_TRUNCATED
+
+    def test_relaxation_killed_after_accuracy_uses_force_gate(self, tmp_path):
+        """Relaxation that died right after writing accuracy (no timing):
+        judged by the force gate, not blanket-truncated."""
+        d = tmp_path / "calc"
+        d.mkdir()
+        (d / "OUTCAR").write_text(
+            "NSW = 50\nIBRION = 2\nEDIFFG = -0.01\n"
+            " reached required accuracy - stopping structural energy minimisation\n"
+            "TOTAL-FORCE (eV/Angst)\n ---\n"
+            " 0.5 0.5 0.5 0.2 0.2 0.2\n"
+        )
+        v = convergence_verdict(d)
+        assert not v.converged
+        assert v.reason == REASON_FORCE_GATE_FAIL

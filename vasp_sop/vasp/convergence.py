@@ -118,7 +118,9 @@ _VERDICT_FLUSH_EVERY = 250
 # electronic (NELM) gate — pre-gate verdicts were written without it.
 # v3 = NELM warning counts only when it belongs to the final ionic step
 # (early-step warnings followed by converged steps are not failures).
-_VERDICT_SCHEMA = 3
+# v4 = NSW<=1 single points with a converged electronic tail are not
+# truncated (ADR 0014 soc2 OUTCARs lack the ionic timing block).
+_VERDICT_SCHEMA = 4
 
 
 def _sidecar_path() -> Path:
@@ -265,14 +267,23 @@ def convergence_verdict(path: Path, task_type: str = "") -> ConvergenceVerdict:
     # >64KB before EOF, behind the timing block.
     tail = _tail_text(outcar, n=262144)
     if tail is None or _TIMING_MARK not in tail:
-        # Still report last-block force when available: stall detection reads
-        # it on OUTCARs whose run crashed before the timing marker was written.
-        verdict = ConvergenceVerdict(
-            False, REASON_TRUNCATED, max_f=_last_max_force(outcar)
-        )
-        _verdict_cache.setdefault(outcar, {})[task_type] = (mtime, verdict)
-        _mark_dirty(outcar, task_type)
-        return verdict
+        # ADR 0014 soc2 single points (NSW=0) finish without the ionic
+        # timing block: a converged electronic tail ("reached required
+        # accuracy") is their completion signal.  Fall through so the
+        # single-point branch below can accept them; a genuinely truncated
+        # run (no accuracy, no timing) still fails here.  Relaxations that
+        # die right after writing accuracy fall through too and are then
+        # judged by the force gate, which is the correct semantics.
+        if "reached required accuracy" not in tail:
+            # Still report last-block force when available: stall detection
+            # reads it on OUTCARs whose run crashed before the timing
+            # marker was written.
+            verdict = ConvergenceVerdict(
+                False, REASON_TRUNCATED, max_f=_last_max_force(outcar)
+            )
+            _verdict_cache.setdefault(outcar, {})[task_type] = (mtime, verdict)
+            _mark_dirty(outcar, task_type)
+            return verdict
 
     # Electronic convergence gate (ADR 0016): VASP's own "reached required
     # accuracy" can be a false positive when the last electronic step hit

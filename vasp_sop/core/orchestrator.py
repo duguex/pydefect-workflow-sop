@@ -208,6 +208,15 @@ def _submit_or_skip(
         if not label.startswith("df-"):
             info_fn(f"  [dry-run] {sys_name:<18} would submit: {label}")
         return None
+    # No concurrent jobs for the same directory: a second VASP writing the
+    # same OUTCAR/vasprun corrupts both runs (seen on ADR 0014 soc2
+    # single points, 2026-08-12 — truncated outputs + resubmit loop).
+    from vasp_sop.core.jobs import crisp_active_dirs
+
+    if str(path.resolve()) in crisp_active_dirs():
+        logger.info("%s/%s: crisp already has a live job for %s — skip",
+                    sys_name, label, path.name)
+        return None
     try:
         if tags:
             job = submit_vasp(path.resolve(), priority=priority, tags=tags)
@@ -1625,12 +1634,16 @@ class BatchOrchestrator:
                     self.js.record(wd_str, "failed", reason="orphaned")
                     self.js.untrack(wd_str)
                 continue
-            tail = _tail_text(outcar, 4096)
-            if not tail or "General timing and accounting" not in tail:
+            # ADR 0014 soc2 single points (NSW=0) finish without the ionic
+            # timing block — the verdict owns the truncated/crash semantics
+            # (a converged electronic tail is not a crash).
+            v = convergence_verdict(wd)
+            if v.reason == "truncated" and not v.converged:
                 self.js.record(wd_str, "failed", reason="vasp_crash")
                 self.js.untrack(wd_str)
                 continue
-            self.handle_unconverged(wd)
+            if not v.converged:
+                self.handle_unconverged(wd)
         return completed
 
     def _advance_systems(self) -> tuple[int, list[tuple[str, str]]]:
