@@ -133,3 +133,7 @@ _Avoid_: 手动补 standard_energies, cpd 全量重建
 **Electronic convergence gate**:
 The convergence verdict refuses an OUTCAR that contains VASP's NELM-exhaustion warning (`increasing NELM`/`spurious results`) — VASP can print "reached required accuracy" on a false positive when the last electronic step hit NELM and the forces happen to fall below EDIFFG, but the energy is unreliable (ADR 0016). This aligns vasp-sop's verdict with pydefect's `electronic_conv` (read from vasprun scsteps). The warning can sit MBs before EOF, so the check falls back to a full-file scan with an mtime cache.
 _Avoid_: 只信 "reached required accuracy", 忽略 NELM 警告
+
+**形成能交互报告 (formation-energy interactive report)**:
+The self-contained HTML artifact (`formation_energy_interactive.html`) written into a system dir by the report generator (`vasp_sop.report.interactive.generate_interactive_html`): one page embedding the CPD vertex selector and per-charge formation-energy plot as an interactive canvas widget. Generated after defect analysis (analysis pipeline and `vasp-sop report --interactive`); consumed read-only by the crisp webui reports view (crisp ADR 0005) — vasp-sop stays the single source of the widget's logic.
+_Avoid_: 交互图, FE widget, 报告页 (as the artifact)
