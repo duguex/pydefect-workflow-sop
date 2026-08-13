@@ -419,8 +419,8 @@ class TestHtmlTemplate:
         assert "function drawFE" in html
         assert "getMu(px,py)" in html
         assert "function fillTip" in html
-        assert "function showTip" in html
-        assert "function hideTip" in html
+        assert "function dockTip" in html
+        assert "function undockTip" in html
 
     def test_constraint_phases_and_charge_neutrality_embedded(self):
         html = _html_template(
@@ -603,11 +603,16 @@ class TestGenerateInteractiveHtml:
         assert "matchMedia(\"(hover:hover)\")" in content
         assert "fe-tip" in content
         assert "fillTip" in content
-        # Hover-only semantics: no click-pin state, no Escape handling,
-        # and the retired fixed panel is fully gone.
+        assert "dockTip" in content
+        assert "getElementById(\"cpdCard\")" in content
+        # Docked-over-CPD semantics: no follow/flip/freeze machinery remains,
+        # no pinned state, and the retired fixed panel is fully gone.
+        assert "showTip" not in content
         assert "pinnedEF" not in content
         assert "形成能检查器" not in content
         assert "renderInspector" not in content
+        assert "tipHover" not in content
+        assert "tipTimer" not in content
 
     def test_idempotent(self, tmp_path):
         """Second call overwrites cleanly."""

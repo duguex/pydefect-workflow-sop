@@ -573,7 +573,7 @@ body{{padding:14px}}
 h2{{margin:0;font-size:17px;letter-spacing:-.01em}}
 .report-head{{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin:0 0 12px}}
 .report-kicker{{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--accent)}}
-.report-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:start}}
+.report-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:start;position:relative}}
 .report-card{{min-width:0;background:var(--card);border:1px solid var(--line);border-radius:10px;box-shadow:0 1px 2px rgba(15,23,42,.04);overflow:hidden}}
 .report-card__head{{display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:11px 13px 9px;border-bottom:1px solid var(--line)}}
 .report-card__head h3{{margin:0;font-size:13px;letter-spacing:.01em}}
@@ -594,7 +594,7 @@ canvas{{display:block;background:var(--canvas);border:1px solid var(--line);bord
 .mubar{{position:relative;height:5px;background:#dfe6ee;border-radius:99px}}.mucur{{position:absolute;top:-3px;width:11px;height:11px;border-radius:50%;background:var(--accent);margin-left:-5px;box-shadow:0 0 0 2px #fff}}
 .fe-workspace{{display:block}}
 .fe-plot{{min-width:0;position:relative}}
-.fe-tip{{position:absolute;z-index:40;display:none;width:272px;max-height:78%;overflow-y:auto;background:rgba(255,255,255,.97);border:1px solid var(--line);border-radius:8px;box-shadow:0 6px 18px rgba(15,23,42,.16);padding:6px 8px;font-size:11px}}
+.fe-tip{{position:absolute;z-index:40;display:none;overflow-y:auto;background:#fff;border:1px solid var(--line);border-radius:8px;box-shadow:0 6px 18px rgba(15,23,42,.16);padding:8px 10px;font-size:11px}}
 .fe-tip__head{{font-size:11px;font-weight:700;color:var(--accent);margin-bottom:4px}}
 .fe-tip__foot{{font-size:10px;color:var(--muted);margin-top:4px}}
 .fe-tip .row{{display:grid;grid-template-columns:8px minmax(0,1fr) auto;gap:6px;align-items:center;padding:3px 2px;border-bottom:1px solid #eef2f6}}
@@ -614,7 +614,8 @@ canvas{{display:block;background:var(--canvas);border:1px solid var(--line);bord
 <canvas id="cpd" width="420" height="420"></canvas>
 <section class="selection-card" aria-live="polite"><div class="selection-card__head"><span class="selection-card__title">当前化学条件</span><span id="selection-state" class="selection-card__state">区域内插值</span></div><div id="selection-constraints" class="selection-card__constraints"></div><div id="selection-mu" class="selection-card__mu"></div><div class="mupanel"><div class="mupanel-title">化学势范围 μ (eV)</div><div id="murows"></div></div></section>
 </div></section>
-<section class="report-card" id="feCard"><header class="report-card__head"><h3>缺陷形成能</h3><span class="report-card__hint">移动查询 E<sub>F</sub></span></header><div class="report-card__body"><div class="fe-workspace"><div class="fe-plot"><canvas id="cv" width="800" height="520"></canvas><div class="leg" id="leg"></div><div class="fe-note">查询层按 E<sub>f</sub> 升序列出当前可见缺陷 · 本征缺陷 · 300 K · 未含自由载流子</div><div id="tip" class="fe-tip"></div></div></div></div></section>
+<section class="report-card" id="feCard"><header class="report-card__head"><h3>缺陷形成能</h3><span class="report-card__hint">移动查询 E<sub>F</sub></span></header><div class="report-card__body"><div class="fe-workspace"><div class="fe-plot"><canvas id="cv" width="800" height="520"></canvas><div class="leg" id="leg"></div><div class="fe-note">查询层按 E<sub>f</sub> 降序列出当前可见缺陷 · 本征缺陷 · 300 K · 未含自由载流子</div></div></div></div></section>
+<div id="tip" class="fe-tip"></div>
 </main>
 <script>"""
 
@@ -756,7 +757,6 @@ function segHtml(segs){
 }
 
 var tip=document.getElementById("tip");
-var tipHover=false,tipTimer=null;
 function rowHtml(r){
   return "<div class='row'><span class='swatch' style='background:"+CL[r.idx]+"'></span>"+
     "<span class='tname'>"+segHtml(DISP[r.name])+"</span>"+
@@ -766,89 +766,59 @@ function fillTip(ef){
   var rows=[];
   names.forEach(function(n,i){if(!hidden[n])rows.push({name:n,idx:i,e:calcE(n,curMu,ef)});});
   rows.sort(function(a,b){return b.e-a.e;});
-  var h="<div class='fe-tip__head'>E_F = "+ef.toFixed(3)+" eV</div>";
+  var h="<div class='fe-tip__head'>E_F = "+ef.toFixed(3)+" eV · 最高在前</div>";
   rows.forEach(function(r){h+=rowHtml(r);});
-  h+="<div class='fe-tip__foot'>共 "+rows.length+" 条 · 本征缺陷 · 300 K · 未含自由载流子</div>";
+  h+="<div class='fe-tip__foot'>共 "+rows.length+" 条 · 本征缺陷 · 300 K · 未含自由载流子 · 滚轮翻页</div>";
   tip.innerHTML=h;
 }
-function showTip(ef,clientX,clientY){
+// The readout docks OVER the CPD card — entirely outside the formation-energy
+// chart — so inspecting the chart never covers the data itself. It fills the
+// CPD card's extent (full width + height), sits on a fixed spot, and its
+// content tracks the cursor's Fermi level while the pointer is in the FE plot.
+function dockTip(ef){
+  var c=document.getElementById("cpdCard");
+  tip.style.left=c.offsetLeft+"px";
+  tip.style.top=c.offsetTop+"px";
+  tip.style.width=c.clientWidth+"px";
+  tip.style.height=c.clientHeight+"px";
   fillTip(ef);
   tip.style.display="block";
-  var r=cv.getBoundingClientRect(),plot=tip.parentElement.getBoundingClientRect();
-  // Always stay on the cursor's right side — never flip to the left. Near the
-  // plot's right edge the panel can't extend beyond the iframe, so slide it
-  // left inside the plot instead (it keeps its right edge, never the cursor's
-  // left side).
-  var x=clientX-r.left+16;
-  if(x+tip.offsetWidth>plot.width-4)x=Math.max(4,plot.width-4-tip.offsetWidth);
-  var y=clientY-r.top+16;
-  if(y+tip.offsetHeight>plot.height-4)y=Math.max(4,clientY-r.top-tip.offsetHeight-16);
-  tip.style.left=x+"px";tip.style.top=y+"px";
 }
-function hideTip(){tip.style.display="none";}
-// Single owner of hover state: the plot wrapper contains BOTH the canvas and
-// the floating panel, so the pointer gliding from canvas onto the scrollable
-// tooltip never re-enters a dead gap — the panel stays and can be scrolled.
+function undockTip(){tip.style.display="none";}
 var hoverCapable=window.matchMedia("(hover:hover)").matches;
 var plotEl=cv.parentElement;
 plotEl.addEventListener("mousemove",function(ev){
-  if(!hoverCapable||tipHover)return; // touch: no floating follow; inside the panel: let it scroll
+  if(!hoverCapable)return;
   var r=cv.getBoundingClientRect();
-  // Follow only while the pointer is over the canvas itself. Over the legend
-  // the panel must stay hidden so legend rows stay clickable; over the panel
-  // the tipHover guard above already applies.
   if(ev.clientX<r.left||ev.clientX>r.right||ev.clientY<r.top||ev.clientY>r.bottom)return;
   var ef=xInv(ev.clientX-r.left);
   if(ef<0||ef>BG)return;
   cursorEF=ef;
   if(curMu)drawFE(curMu);
-  showTip(ef,ev.clientX,ev.clientY);
-  // A fast sweep can land the pointer on the panel's stale rect. Its
-  // mouseenter (fired against the old layout) already queued a dwell-freeze;
-  // this reposition has now pushed the panel clear of the pointer, so cancel
-  // that pending timer — otherwise the panel freezes at the cursor's feet
-  // long after the pass-through and stops following.
-  var tr=tip.getBoundingClientRect();
-  var onPanel=(ev.clientX>=tr.left&&ev.clientX<=tr.right&&ev.clientY>=tr.top&&ev.clientY<=tr.bottom);
-  if(!onPanel){clearTimeout(tipTimer);tipTimer=null;}
+  dockTip(ef);
 });
 plotEl.addEventListener("mouseleave",function(){
   // Browsers synthesize a compat mouseleave after every tap; on touch-only
-  // devices that must not kill the tapped-on summary — the tap toggles it.
+  // devices that must not kill the tapped-on readout — the tap toggles it.
   if(!hoverCapable)return;
-  cursorEF=null;if(curMu)drawFE(curMu);hideTip();
+  cursorEF=null;if(curMu)drawFE(curMu);undockTip();
 });
-// The "freeze so the panel can be scrolled" state must NOT engage on a fast
-// pointer sweep. A quick jump can land the cursor inside the panel's previous
-// rect — mouseenter fires before mousemove, which would otherwise freeze the
-// panel before it can reposition out from under the cursor. So freezing waits
-// for a short dwell: fast pass-throughs keep the panel following (each
-// mousemove pushes it clear of the cursor), a deliberate hover still locks it.
-tip.addEventListener("mouseenter",function(){
-  clearTimeout(tipTimer);
-  tipTimer=setTimeout(function(){tipHover=true;},250);
-});
-tip.addEventListener("mouseleave",function(){
-  clearTimeout(tipTimer);tipHover=false;
-});
-document.getElementById("leg").addEventListener("mouseenter",hideTip);
-// Touch / non-hover devices: no floating follow. A tap pins a compact
-// summary to the plot; tapping again dismisses it.
+// The readout is docked on the CPD card: the pointer can't reach it without
+// leaving the FE chart (which hides it). Scrolling therefore happens by
+// wheeling over the chart — the wheel is forwarded to the panel.
+plotEl.addEventListener("wheel",function(ev){
+  if(tip.style.display!=="block")return;
+  tip.scrollTop+=ev.deltaY;
+  if(ev.preventDefault)ev.preventDefault();
+},{passive:false});
+// Touch / non-hover devices: tapping the FE chart docks/undocks the readout.
 if(!hoverCapable){
   cv.addEventListener("click",function(ev){
     var r=cv.getBoundingClientRect(),ef=xInv(ev.clientX-r.left);
     if(ef<0||ef>BG)return;
     cursorEF=ef;if(curMu)drawFE(curMu);
-    if(tip.style.display==="block"&&tip.tappedEf===ef){hideTip();tip.tappedEf=null;return;}
-    tip.tappedEf=ef;
-    var rows=[];
-    names.forEach(function(n,i){if(!hidden[n])rows.push({name:n,idx:i,e:calcE(n,curMu,ef)});});
-    rows.sort(function(a,b){return b.e-a.e;});
-    var h="<div class='fe-tip__head'>E_F = "+ef.toFixed(3)+" eV · 最低 5 条</div>";
-    rows.slice(0,5).forEach(function(r){h+=rowHtml(r);});
-    h+="<div class='fe-tip__foot'>共 "+rows.length+" 条 · 再次点击收起</div>";
-    tip.innerHTML=h;tip.style.display="block";
-    tip.style.left="8px";tip.style.top="8px";
+    if(tip.style.display==="block"){undockTip();}
+    else{dockTip(ef);}
   });
 }
 
