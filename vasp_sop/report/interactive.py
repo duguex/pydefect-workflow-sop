@@ -765,7 +765,7 @@ function rowHtml(r){
 function fillTip(ef){
   var rows=[];
   names.forEach(function(n,i){if(!hidden[n])rows.push({name:n,idx:i,e:calcE(n,curMu,ef)});});
-  rows.sort(function(a,b){return a.e-b.e;});
+  rows.sort(function(a,b){return b.e-a.e;});
   var h="<div class='fe-tip__head'>E_F = "+ef.toFixed(3)+" eV</div>";
   rows.forEach(function(r){h+=rowHtml(r);});
   h+="<div class='fe-tip__foot'>共 "+rows.length+" 条 · 本征缺陷 · 300 K · 未含自由载流子</div>";
@@ -819,7 +819,7 @@ if(!hoverCapable){
     tip.tappedEf=ef;
     var rows=[];
     names.forEach(function(n,i){if(!hidden[n])rows.push({name:n,idx:i,e:calcE(n,curMu,ef)});});
-    rows.sort(function(a,b){return a.e-b.e;});
+    rows.sort(function(a,b){return b.e-a.e;});
     var h="<div class='fe-tip__head'>E_F = "+ef.toFixed(3)+" eV · 最低 5 条</div>";
     rows.slice(0,5).forEach(function(r){h+=rowHtml(r);});
     h+="<div class='fe-tip__foot'>共 "+rows.length+" 条 · 再次点击收起</div>";
