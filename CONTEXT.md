@@ -142,3 +142,11 @@ _Avoid_: 交互图, FE widget, 报告页 (as the artifact)
 The readout docked over the chemical-potential-diagram card while the pointer is in the formation-energy plot: at the cursor's Fermi level it lists every currently visible defect in descending formation energy (highest first). Its surface never overlaps the formation-energy chart, so inspecting the chart never covers the data; it fills the CPD card while visible, is scrolled by wheeling over the chart, and hides when the pointer leaves the formation-energy plot (a touch tap docks/undocks it). It is an inspection surface, never an additional thermodynamic calculation — hiding defects from it never alters the intrinsic charge-neutrality Fermi level.
 _Avoid_: tooltip (a cursor-following overlay), inspector (a separate side column — the retired right-hand panel)
 _Avoid_: inspector (the retired fixed right-hand panel), tooltip (when meaning a transient few-row peek)
+
+**参考相（Reference phase）**:
+The phase declared by `plan.yaml` `project.poscar_src` as the host that all supercell/perfect/defect structures derive from. **It must be the formula's polymorph with the lowest `e_above_hull` on the MP convex hull** — never the first MP formula-search result (`_docs[0]`). Distinct from the *competing phase set* (cpd): cpd phases are an independent thermodynamic set; the reference phase is the defect host. When the reference phase is not hull-stable, its `e_above_hull` must be recorded, not silently ignored.
+_Avoid_: 母相 (ambiguous), poscar_src (the config key, not the concept)
+
+**宿主身份（Host identity）**:
+The shared parent-structure **topology** of a system's supercell, perfect, and defect structures — not its formula, lattice metric, or space-group symbol. Two structures with identical composition, near-identical cell metrics, and even the same space group can have different host identities (Y₂Ti₂O₇: P2 near-tetragonal 88-atom cell vs Fd-3m pyrochlore; BaAl₄O₇: two Pnma arrangements). Host identity is judged by StructureMatcher (structure match, not md5 or cell metrics). A defect set is only thermodynamically meaningful on its declared host identity; results are void when the host is later shown to be the wrong polymorph.
+_Avoid_: 结构相同 (based on metric/SG), mp-id equality

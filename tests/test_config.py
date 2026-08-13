@@ -3,6 +3,7 @@
 import json
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -268,3 +269,63 @@ class TestStage2SocParsing:
             "parameters": {"soc": True},
         })
         assert c.stage2_soc is False
+
+
+class TestReferencePhaseSelection:
+    """ADR 0023: formula-search fallback must pick the lowest e_above_hull
+    polymorph, never MP's first (material_id-sorted) doc."""
+
+    def test_fallback_picks_lowest_eah_not_first_doc(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MP_API_KEY", "test-key")
+        # Main loop finds no target phase (no cpd dirs) -> fallback path.
+        monkeypatch.setattr(
+            "vasp_sop.materials.fetch_candidate_phases", lambda *a, **k: None
+        )
+        # MP returns docs in ascending-material_id order (the 2026-08-13
+        # Y2Ti2O7 failure mode: first doc is the LEAST stable polymorph).
+        docs = [
+            SimpleNamespace(
+                material_id="mp-1173093",
+                formula_pretty="Y2Ti2O7",
+                energy_above_hull=0.162,
+            ),
+            SimpleNamespace(
+                material_id="mp-5373",
+                formula_pretty="Y2Ti2O7",
+                energy_above_hull=0.011,
+            ),
+        ]
+
+        class _Search:
+            def search(self, **kw):
+                return docs
+
+        class _Mats:
+            summary = _Search()
+
+        class _MR:
+            def __init__(self, *a):
+                self.materials = _Mats()
+
+            def get_structure_by_material_id(self, mid):
+                from pymatgen.core import Lattice, Structure
+
+                return Structure(
+                    Lattice.cubic(3.9),
+                    ["Na", "Cl"],
+                    [[0, 0, 0], [0.5, 0.5, 0.5]],
+                )
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        monkeypatch.setattr("mp_api.client.MPRester", _MR)
+
+        from vasp_sop.core.config import generate_config
+
+        path = generate_config(tmp_path, formula="Y2Ti2O7")
+        c = PipelineConfig.from_yaml(path, root=tmp_path)
+        assert c.poscar_src == "MP mp-5373"

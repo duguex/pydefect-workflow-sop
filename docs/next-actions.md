@@ -1,3 +1,15 @@
+# Next Actions — 参考相错误重建（2026-08-14，ADR 0023 / issue #149）
+
+> **宿主身份错误实锤**：Y2Ti2O7（mp-1173093 P2，0.162 eV/atom）与 BaAl4O7（mp-1019532 Pnma，0.0239）的宿主相均为 MP 公式搜索 `_docs[0]` 误选（material_id 升序≠凸包稳定序）。两体系全部缺陷/形成能无效；**之前基于 P2 宿主的 12 Å / ISIF=3 诊断全部作废**。其余 8 体系复核无此问题（e_above_hull=0.000 或 MP 唯一条目）。
+> **代码已修**：`config.py` fallback 按 `energy_above_hull` 升序取最低相 + >0.05 告警；回归测试 `test_config.py::TestReferencePhaseSelection` 通过（26 passed）。
+> **待办（重建）**：
+> 1. **Y2Ti2O7 → mp-5373（Fd-3m 烧绿石）**：plan 复制、`poscar_src` 替换、全量重建（unitcell ISIF=3 → doped 88 原子常规胞 → cpd 主相 → defect 枚举 → 全缺陷 → 解析）。
+> 2. **BaAl4O7 → mp-1019534（Pnma 排列B）**：同上全量重建。
+> 3. 新协议（仅重建两体系，其余 8 维持现状，CSV 带 protocol 列）：perfect ISIF=3 定平衡晶格；缺陷一律 ISIF=2 固定；ENCUT 全链 520；88 原子起步，门不过再升级 12 Å。
+> 4. **验收门（任一不过即回查）**：配对反位反应 > −0.5 eV；E_diff 中位 ∈ +3…+9 eV；E_perfect 每 f.u. vs cpd 主相 ≤ ±0.05 eV。
+> 5. 重建前必须过既有审批 discipline（ADR 0019 git 基线 + defect_in/电荷态/cpd 相集显式批准）。
+> **关联**：ADR `docs/adr/0023-reference-phase-host-identity.md`；术语 CONTEXT.md「参考相」「宿主身份」；issue #149。
+
 # Next Actions — 2026-08-11 阶段收尾
 
 > **CaAl4O7 相位 COMPLETE**（08-11 01:41 修复后）：72/72 defect → 22 形成能 + transition_levels + HTML；analyze full。

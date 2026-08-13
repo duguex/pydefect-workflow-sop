@@ -17,6 +17,7 @@
 - **Three-wave VASP schedule**: Wave1 structure_opt → Wave2 competing+UC+defects parallel → Wave3 pydefect post.  
 - **CLI**: `vasp-sop batch run .` (`--dry-run`), `defect build`, `cache status|query|…`, `materials fetch`.  
 - **Config**: `plan.yaml` per mature project; JobStore (SQLite) for orchestration state; result-reuse operations are exposed as a CRISP-integrated capability.
+- **Reference phase (ADR 0023)**: `plan.yaml` `poscar_src` MUST be the formula's lowest-`e_above_hull` polymorph on the MP hull — never the first `materials.summary.search` result (`_docs[0]` is material_id-sorted, not stability-sorted; issue #149). **Host identity** (the topology shared by supercell/perfect/defects) is judged by `StructureMatcher`, never by space-group symbol, cell metrics, or mp-id. A defect set on the wrong host polymorph is wholesale void — rebuild from the corrected reference phase.
 - **Tests**: `python3 -m pytest tests/` — isolate cache paths; heavy patching of VASP/crisp in unit tests.  
 - **Do not invent** new phase names or store layouts — match code + FEATURES.md.  
 - **Secrets / MP API**: use env; do not commit keys. Production trees (e.g. `2025_undergo_spin_defect`) stay outside this package tree.  

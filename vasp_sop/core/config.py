@@ -423,10 +423,39 @@ def generate_config(
                 with _MPRester(_key) as _mpr:
                     _docs = _mpr.materials.summary.search(
                         formula=formula,
-                        fields=["material_id", "formula_pretty"],
+                        fields=[
+                            "material_id",
+                            "formula_pretty",
+                            "energy_above_hull",
+                        ],
                     )
                     if _docs:
-                        _mpid = _docs[0].material_id
+                        # ADR 0023: MP formula search returns docs sorted by
+                        # material_id, NOT by stability. The first doc is not
+                        # necessarily the ground-state polymorph (Y2Ti2O7:
+                        # mp-1173093 P2 at 0.162 eV/atom vs mp-5373 Fd-3m at
+                        # 0.011). Always pick the lowest e_above_hull, and
+                        # warn loudly when that polymorph is not hull-stable.
+                        _docs_sorted = sorted(
+                            _docs,
+                            key=lambda d: d.energy_above_hull
+                            if d.energy_above_hull is not None
+                            else float("inf"),
+                        )
+                        _best = _docs_sorted[0]
+                        _mpid = _best.material_id
+                        if (
+                            _best.energy_above_hull is not None
+                            and _best.energy_above_hull > 0.05
+                        ):
+                            logger.warning(
+                                "Reference phase %s (%s) is %.3f eV/atom above "
+                                "hull (most stable polymorph of the formula) — "
+                                "confirm this polymorph is intended.",
+                                formula,
+                                _mpid,
+                                _best.energy_above_hull,
+                            )
                         _target_dir = cpd_root / f"{formula}_{_mpid}"
                         if not _target_dir.is_dir():
                             _target_dir.mkdir(parents=True)
@@ -439,7 +468,12 @@ def generate_config(
                         unitcell_poscar.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(str(_target_dir / "POSCAR"), str(unitcell_poscar))
                         plan["project"]["poscar_src"] = f"MP {_mpid}"
-                        logger.info("Downloaded target phase %s (%s)", formula, _mpid)
+                        logger.info(
+                            "Downloaded reference phase %s (%s, e_above_hull=%.4f)",
+                            formula,
+                            _mpid,
+                            _best.energy_above_hull,
+                        )
         except Exception as _exc:
             logger.warning("Failed to download target phase %s: %s", formula, _exc)
 
