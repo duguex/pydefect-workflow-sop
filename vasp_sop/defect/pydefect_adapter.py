@@ -161,6 +161,20 @@ def cpd_diagram(cpd_dir: Path, defect_summary_path: Path | None = None) -> CpdDi
     rcp = (de or {}).get("rel_chem_pots", tv or {})
     if not isinstance(rcp, dict):
         rcp = {}
+    # The summary's ``rel_chem_pots`` is flat (per-vertex μ only) — the
+    # constraint/unstable phase lists live in the target-vertices record.
+    # Merge them in so the interactive report can label which compounds
+    # pin each vertex and which dopant phases are unstable there.
+    if isinstance(tv, dict):
+        for vn, v in tv.items():
+            if not isinstance(v, dict) or vn not in rcp:
+                continue
+            vv = rcp[vn]
+            if not isinstance(vv, dict):
+                continue
+            for key in ("competing_phases", "impurity_phases"):
+                if key in v and isinstance(v[key], list):
+                    vv[key] = [str(x) for x in v[key] if x is not None]
     return CpdDiagram(
         target=host_name,
         vertex_elements=[str(e) for e in cpd.get("vertex_elements", [])],

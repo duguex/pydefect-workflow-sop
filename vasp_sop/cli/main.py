@@ -1341,7 +1341,7 @@ def _batch_reconcile(root: Path) -> None:
     orch._restore_crisp_active()
     backfilled = orch._backfill()
     orphaned = orch._orphan_sweep()
-    completed = orch._poll_tracked()
+    completed = orch._poll_tracked(restart_unconverged=False)
     settled = orch._reconcile_stale()
     orch.js.close()
     print(

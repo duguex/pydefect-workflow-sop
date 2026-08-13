@@ -202,8 +202,8 @@ def test_restart_cap_stops_blind_resubmits(tmp_path: Path, monkeypatch):
     (d / "INCAR").write_text("NSW = 50\n")
     (d / "CONTCAR").write_text("contcar\n")
     js = FakeJobStore()
-    from vasp_sop.core.orchestrator import _CPD_MAX_IONIC_RESTARTS
-    for _ in range(_CPD_MAX_IONIC_RESTARTS):
+    from vasp_sop.core.retry_policy import CPD_MAX_IONIC_RESTARTS
+    for _ in range(CPD_MAX_IONIC_RESTARTS):
         js.record(str(d), "unconverged", source="ionic_restart")
     sys = FakeSystem(tmp_path / "cpd")
 
@@ -276,14 +276,14 @@ def test_truncated_restarts_with_long_tag(tmp_path: Path, monkeypatch):
 
 def test_truncated_exempt_from_restart_cap(tmp_path: Path, monkeypatch):
     """Truncated restarts keep advancing the CONTCAR — the force-stall cap
-    must not stop them, even past _CPD_MAX_IONIC_RESTARTS."""
+    must not stop them, even past CPD_MAX_IONIC_RESTARTS."""
     d = tmp_path / "cpd" / "SrFeO2_mp-1"
     d.mkdir(parents=True)
     (d / "INCAR").write_text("NSW = 50\n")
     (d / "CONTCAR").write_text("contcar\n")
     js = FakeJobStore()
-    from vasp_sop.core.orchestrator import _CPD_MAX_IONIC_RESTARTS
-    for _ in range(_CPD_MAX_IONIC_RESTARTS + 2):
+    from vasp_sop.core.retry_policy import CPD_MAX_IONIC_RESTARTS
+    for _ in range(CPD_MAX_IONIC_RESTARTS + 2):
         js.record(str(d), "unconverged", source="ionic_restart")
     sys = FakeSystem(tmp_path / "cpd")
 
@@ -346,7 +346,8 @@ def test_zbrent_dir_gets_ediff_1e6(tmp_path: Path):
         "something\n---  I REFUSE TO CONTINUE WITH THIS SICK JOB ---\n"
         "ZBRENT: fatal error in bracketing\n")
     (d / "CONTCAR").write_text("x\n")
-    assert orchestrator._has_zbrent_failure(d) is True
+    from vasp_sop.core import retry_policy
+    assert retry_policy.has_zbrent_failure(d) is True
     from vasp_sop.vasp.io import patch_incar
     patch_incar(d, EDIFF="1e-6")
     assert "EDIFF = 1e-6" in (d / "INCAR").read_text()
@@ -358,4 +359,5 @@ def test_no_zbrent_no_downgrade(tmp_path: Path):
     d = tmp_path / "cpd" / "FeO_mp-1"
     d.mkdir(parents=True)
     (d / "OUTCAR").write_text("reached required accuracy\n")
-    assert orchestrator._has_zbrent_failure(d) is False
+    from vasp_sop.core import retry_policy
+    assert retry_policy.has_zbrent_failure(d) is False

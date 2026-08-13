@@ -34,10 +34,16 @@ def _make_minimal_des() -> dict:
         "supercell_vbm": -0.0944,
         "supercell_cbm": 2.5271,
         "rel_chem_pots": {
-            "A": {"Br": -1.20, "Cs": -3.76, "Pb": -2.42, "Bi": -2.60},
-            "B": {"Br": -0.50, "Cs": -3.10, "Pb": -1.80, "Bi": -1.90},
-            "C": {"Br": -1.50, "Cs": -4.00, "Pb": -3.10, "Bi": -3.20},
-            "D": {"Br": -0.80, "Cs": -4.20, "Pb": -2.90, "Bi": -3.50},
+            "A": {"Br": -1.20, "Cs": -3.76, "Pb": -2.42, "Bi": -2.60,
+                  "competing_phases": ["CsPbBr3", "CsBr"],
+                  "impurity_phases": ["BiBr3"]},
+            "B": {"Br": -0.50, "Cs": -3.10, "Pb": -1.80, "Bi": -1.90,
+                  "competing_phases": ["CsBr"]},
+            "C": {"Br": -1.50, "Cs": -4.00, "Pb": -3.10, "Bi": -3.20,
+                  "competing_phases": ["PbBr2"],
+                  "impurity_phases": ["BiBr3"]},
+            "D": {"Br": -0.80, "Cs": -4.20, "Pb": -2.90, "Bi": -3.50,
+                  "competing_phases": ["PbBr2"]},
         },
         "defect_energies": {
             "Bi_Pb1": {
@@ -225,17 +231,22 @@ class TestExtractPolygon:
         de = _make_minimal_des()
         cpd = _make_minimal_cpd()
         tv = _make_minimal_tv()
-        vertex_mu, names, host, elems = _extract_vertex_data(_cpd_record(cpd, tv, de))
+        vertex_mu, names, host, elems, phases = _extract_vertex_data(_cpd_record(cpd, tv, de))
         assert host == "CsPbBr3"
         assert len(vertex_mu) == 4
         assert len(names) == 4
         assert len(vertex_mu) == 4
+        # Constraint phases survive extraction (per vertex, cyclic order).
+        assert len(phases) == 4
+        by_name = dict(zip(names, phases))
+        assert by_name["A"]["competing"] == ["CsPbBr3", "CsBr"]
+        assert by_name["A"]["impurity"] == ["BiBr3"]
 
     def test_names_match_rcp_keys(self):
         de = _make_minimal_des()
         cpd = _make_minimal_cpd()
         tv = _make_minimal_tv()
-        _, names, _, _ = _extract_vertex_data(_cpd_record(cpd, tv, de))
+        _, names, _, _, _ = _extract_vertex_data(_cpd_record(cpd, tv, de))
         assert set(names) == {"A", "B", "C", "D"}
 
     def test_cyclic_order_includes_all_vertices(self):
@@ -243,7 +254,7 @@ class TestExtractPolygon:
         de = _make_minimal_des()
         cpd = _make_minimal_cpd()
         tv = _make_minimal_tv()
-        vertex_mu, names, _, _ = _extract_vertex_data(_cpd_record(cpd, tv, de))
+        vertex_mu, names, _, _, _ = _extract_vertex_data(_cpd_record(cpd, tv, de))
         assert len(vertex_mu) == 4
         assert len(names) == 4
         assert set(names) == {"A", "B", "C", "D"}
@@ -256,7 +267,7 @@ class TestExtractPolygon:
         de = json.loads((p / "defect" / "defect_energy_summary.json").read_text())
         cpd = json.loads((p / "cpd" / "chem_pot_diag.json").read_text())
         tv = yaml.safe_load((p / "cpd" / "target_vertices.yaml").read_text())
-        vertex_mu, _, _, vertex_elements = _extract_vertex_data(_cpd_record(cpd, tv, de))
+        vertex_mu, _, _, vertex_elements, _ = _extract_vertex_data(_cpd_record(cpd, tv, de))
         assert len(vertex_mu) == 4
 
         def _cross(o, a, b):
@@ -380,6 +391,12 @@ class TestHtmlTemplate:
                        {"Br": -1.50, "Cs": -4.00, "Pb": -3.10, "Bi": -3.20},
                        {"Br": -0.80, "Cs": -4.20, "Pb": -2.90, "Bi": -3.50}],
             vertex_names=["A", "B", "C", "D"],
+            vertex_phases=[
+                {"competing": ["CsBr"], "impurity": ["BiBr3"]},
+                {"competing": ["CsBr"], "impurity": []},
+                {"competing": ["PbBr2"], "impurity": ["BiBr3"]},
+                {"competing": ["PbBr2"], "impurity": []},
+            ],
             vertex_elements=["Br", "Cs", "Pb"],
             defects={"Bi_Pb1": {"charges": [{"q": -1, "e0": -0.5}],
                                 "delta": {"Pb": -1, "Bi": 1}}},
@@ -390,17 +407,78 @@ class TestHtmlTemplate:
             ax0="Br", ax1="Cs",
             a0_range=(-1.8, -0.2),
             a1_range=(-4.5, -2.8),
+            exo_elements=["Bi"],
         )
-        # Check key elements exist
+        # Core rendering and the two-card scientific workspace exist.
         assert "<!DOCTYPE html>" in html
-        assert "<canvas" in html
+        assert "report-grid" in html
+        assert "化学势稳定区" in html
         assert "var POLY" in html
         assert "var DEF" in html
         assert "var BG" in html
         assert "function drawFE" in html
         assert "getMu(px,py)" in html
-        # JS must be valid (no unescaped embedded issues)
-        assert html.count("--") <= 2  # only HTML comments or similar
+        assert "function fillTip" in html
+        assert "function dockTip" in html
+        assert "function undockTip" in html
+
+    def test_constraint_phases_and_charge_neutrality_embedded(self):
+        html = _html_template(
+            host_name="CsPbBr3",
+            n_vertices=4,
+            poly_2d=[[-1.20, -3.76], [-0.50, -3.10],
+                      [-1.50, -4.00], [-0.80, -4.20]],
+            vertex_mu=[{"Br": -1.20, "Cs": -3.76, "Pb": -2.42, "Bi": -2.60},
+                       {"Br": -0.50, "Cs": -3.10, "Pb": -1.80, "Bi": -1.90},
+                       {"Br": -1.50, "Cs": -4.00, "Pb": -3.10, "Bi": -3.20},
+                       {"Br": -0.80, "Cs": -4.20, "Pb": -2.90, "Bi": -3.50}],
+            vertex_names=["A", "B", "C", "D"],
+            vertex_phases=[
+                {"competing": ["CsBr"], "impurity": ["BiBr3"]},
+                {"competing": ["CsBr"], "impurity": []},
+                {"competing": ["PbBr2"], "impurity": ["BiBr3"]},
+                {"competing": ["PbBr2"], "impurity": []},
+            ],
+            vertex_elements=["Br", "Cs", "Pb"],
+            defects={"Bi_Pb1": {"charges": [{"q": -1, "e0": -0.5}],
+                                "delta": {"Pb": -1, "Bi": 1}}},
+            sorted_names=["Bi_Pb1"],
+            ref_mu={"Br": -1.20, "Cs": -3.76, "Pb": -2.42},
+            colors=["#e94560"],
+            cbm=2.4095,
+            ax0="Br", ax1="Cs",
+            a0_range=(-1.8, -0.2),
+            a1_range=(-4.5, -2.8),
+            exo_elements=["Bi"],
+        )
+        # Constraint phases remain encoded in VPHASES; the currently selected
+        # vertex is rendered into the scientific readout instead of printed
+        # beside every CPD point.
+        assert "CsBr" in html
+        assert "PbBr<sub>2</sub>" in html or "PbBr2" in html
+        # Uniform label: no impurity-phase section (doped systems match
+        # undoped ones).
+        assert "不稳定" not in html
+        assert "var VPHASES" in html
+        # Charge neutrality: intrinsic-only balance + drawn Fermi line.
+        assert "var EXO" in html
+        assert '["Bi"]' in html
+        assert "function calcFermi" in html
+        assert "function drawFermi" in html
+        assert "电荷中性" in html
+        assert "function isIntrinsic" in html
+        # Overlap removed: the per-element μ printout in the FE canvas is gone.
+        assert 'fillText(k+" = "+mu[k]' not in html
+        # Legend: grouped by defect KIND (site-independent base name) and
+        # fixed — the drag reorder loop must not be present.
+        assert "function defectBase" in html
+        assert "function toggleGroup" in html
+        assert "leg-group" in html
+        assert "leg-cat" in html
+        assert "leg.appendChild(div)" not in html
+        # Charge neutrality ignores display hiding (legend click must not
+        # change the physics).
+        assert "hidden[n]||!isIntrinsic(n)" not in html
 
     def test_embed_display_names_panel_and_responsive_layout(self):
         html = _html_template(
@@ -413,6 +491,12 @@ class TestHtmlTemplate:
                        {"Br": -1.50, "Cs": -4.00, "Pb": -3.10, "Bi": -3.20},
                        {"Br": -0.80, "Cs": -4.20, "Pb": -2.90, "Bi": -3.50}],
             vertex_names=["A", "B", "C", "D"],
+            vertex_phases=[
+                {"competing": ["CsBr"], "impurity": ["BiBr3"]},
+                {"competing": ["CsBr"], "impurity": []},
+                {"competing": ["PbBr2"], "impurity": ["BiBr3"]},
+                {"competing": ["PbBr2"], "impurity": []},
+            ],
             vertex_elements=["Br", "Cs", "Pb"],
             defects={"Bi_Pb1": {"charges": [{"q": -1, "e0": -0.5}],
                                 "delta": {"Pb": -1, "Bi": 1}}},
@@ -423,25 +507,27 @@ class TestHtmlTemplate:
             ax0="Br", ax1="Cs",
             a0_range=(-1.8, -0.2),
             a1_range=(-4.5, -2.8),
+            exo_elements=["Bi"],
         )
         # Typeset title (HTML <sub>) and display-name segment map.
         assert "CsPbBr<sub>3</sub>" in html
         assert '"Bi_Pb1": [["n", "Bi"], ["s", "Pb1"]]' in html
-        # Chemical-potential range panel.
+        # Chemical-potential card and responsive native chart sizing.
+        assert "当前化学条件" in html
         assert "化学势范围" in html
         assert "function buildMuPanel" in html
         assert "function updateMuPanel" in html
-        # HiDPI + scrollbar-free responsive sizing.
+        assert "function updateSelectionCard" in html
         assert "devicePixelRatio" in html
         assert "function layout" in html
-        assert "overflow:hidden" in html
-        # Typeset segment renderers: canvas draws sub/sup with a smaller
-        # font at an offset baseline; HTML legend/tooltip use <sub>/<sup>.
-        assert "function drawSegs" in html
+        assert "fe-tip" in html
+        assert "fe-note" in html
+        assert "matchMedia" in html
+        # Inspector/legend use typeset HTML names.
         assert "function segHtml" in html
         assert "class='csub'" in html
         assert "class='csup'" in html
-        assert "getAttribute(\"data-name\")" in html
+        assert "setAttribute(\"data-name\"" in html
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -509,13 +595,24 @@ class TestGenerateInteractiveHtml:
         # isDoped check present
         assert "isDoped" in content
 
-    def test_tooltip_code_present(self, tmp_path):
+    def test_hover_readout_code_present(self, tmp_path):
         root = _write_system(tmp_path)
         out = generate_interactive_html(root)
         content = out.read_text()
         assert "mousemove" in content
-        assert "mouseleave" in content
-        assert "tooltip" in content
+        assert "matchMedia(\"(hover:hover)\")" in content
+        assert "fe-tip" in content
+        assert "fillTip" in content
+        assert "dockTip" in content
+        assert "getElementById(\"cpdCard\")" in content
+        # Docked-over-CPD semantics: no follow/flip/freeze machinery remains,
+        # no pinned state, and the retired fixed panel is fully gone.
+        assert "showTip" not in content
+        assert "pinnedEF" not in content
+        assert "形成能检查器" not in content
+        assert "renderInspector" not in content
+        assert "tipHover" not in content
+        assert "tipTimer" not in content
 
     def test_idempotent(self, tmp_path):
         """Second call overwrites cleanly."""
@@ -547,7 +644,7 @@ class TestInteractiveVsPydefect:
         )
         de, cpd = _load_inputs(p)
         defects = _build_defects(de)
-        vertex_mu, poly_names, host_name, vertex_elements = _extract_vertex_data(
+        vertex_mu, poly_names, host_name, vertex_elements, _ = _extract_vertex_data(
             cpd
         )
         ref_mu_raw = cpd.rel_chem_pots

@@ -533,6 +533,7 @@ class TestEarClip:
         poly = [poly[i] for i in idx]
         mu = [mu[i] for i in idx]
         js = _cpd_canvas_js(5, poly, mu, ["V%d" % i for i in range(5)],
+                            [{"competing": [], "impurity": []} for _ in range(5)],
                             "Al", "Ca", (-9.0, 0.5), (-7.0, 0.5))
         import re
         assert "var BARYS" in js
@@ -549,10 +550,14 @@ class TestEarClip:
         from vasp_sop.report.interactive import _cpd_canvas_js
         tri = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]
         mu = [{"A": 0.0}, {"A": 1.0}, {"A": 0.0}]
-        j3 = _cpd_canvas_js(3, tri, mu, list("ABC"), "A", "B", (0, 1), (0, 1))
+        j3 = _cpd_canvas_js(3, tri, mu, list("ABC"),
+                       [{"competing": [], "impurity": []} for _ in range(3)],
+                       "A", "B", (0, 1), (0, 1))
         assert "var TRIS" in j3 and "Unsupported" not in j3
         quad = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
-        j4 = _cpd_canvas_js(4, quad, mu * 2, list("ABCD"), "A", "B", (0, 1), (0, 1))
+        j4 = _cpd_canvas_js(4, quad, mu * 2, list("ABCD"),
+                       [{"competing": [], "impurity": []} for _ in range(4)],
+                       "A", "B", (0, 1), (0, 1))
         assert "var TRIS" in j4 and "Unsupported" not in j4
 
 

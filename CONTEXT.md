@@ -137,3 +137,8 @@ _Avoid_: 只信 "reached required accuracy", 忽略 NELM 警告
 **形成能交互报告 (formation-energy interactive report)**:
 The self-contained HTML artifact (`formation_energy_interactive.html`) written into a system dir by the report generator (`vasp_sop.report.interactive.generate_interactive_html`): one page embedding the CPD vertex selector and per-charge formation-energy plot as an interactive canvas widget. Generated after defect analysis (analysis pipeline and `vasp-sop report --interactive`); consumed read-only by the crisp webui reports view (crisp ADR 0005) — vasp-sop stays the single source of the widget's logic.
 _Avoid_: 交互图, FE widget, 报告页 (as the artifact)
+
+**形成能停靠读数 (formation-energy docked readout)**:
+The readout docked over the chemical-potential-diagram card while the pointer is in the formation-energy plot: at the cursor's Fermi level it lists every currently visible defect in descending formation energy (highest first). Its surface never overlaps the formation-energy chart, so inspecting the chart never covers the data; it fills the CPD card while visible, is scrolled by wheeling over the chart, and hides when the pointer leaves the formation-energy plot (a touch tap docks/undocks it). It is an inspection surface, never an additional thermodynamic calculation — hiding defects from it never alters the intrinsic charge-neutrality Fermi level.
+_Avoid_: tooltip (a cursor-following overlay), inspector (a separate side column — the retired right-hand panel)
+_Avoid_: inspector (the retired fixed right-hand panel), tooltip (when meaning a transient few-row peek)

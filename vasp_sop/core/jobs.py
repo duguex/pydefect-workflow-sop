@@ -23,7 +23,8 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # Calculations with max lattice vector > MAX_LATTICE are skipped
-# (not submitted). Set to None to disable.
+# (not submitted). Set to None to disable. Large-cell phases are meant
+# to be excluded per-system via cpd_excluded_phases.yaml, not run.
 MAX_LATTICE: float | None = 25.0
 
 
