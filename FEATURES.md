@@ -102,7 +102,7 @@ Configuration lives in a `plan.yaml` file per system, managed by the
 project:
   formula: ""               # Chemical formula (required)
   dopant_elements: []       # List of dopant elements
-  poscar_src: ""            # POSCAR source path or MP-ID
+  poscar_src: ""            # POSCAR source path or MP-ID (must be lowest-e_above_hull polymorph, ADR 0023)
   scope: defects            # "defects" (default) or "chemical-environment" (CPD only, ADR 0005)
 parameters:
   functional: pbesol        # XC functional (pbesol, pbe, scan, hse, etc.)

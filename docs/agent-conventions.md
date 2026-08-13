@@ -207,6 +207,11 @@ crisp cache status
 - Legacy JSON format supported via `from_legacy_json()` migration
 - All three supercell keys (`min_atoms`, `max_atoms`, `min_distance`) are emitted unconditionally
   so round-trip never silently drops data — downstream code reads only what it cares about
+- **Reference phase (ADR 0023)**: `project.poscar_src` must resolve to the formula's
+  lowest-`e_above_hull` polymorph. `generate_config`'s formula-search fallback sorts by
+  `energy_above_hull` and warns above 0.05 eV/atom — never trust `_docs[0]` (MP sorts by
+  material_id). Host identity is verified with `StructureMatcher` (space-group symbol and
+  cell metrics are not sufficient). See `docs/adr/0023-reference-phase-host-identity.md`.
 
 ### Result Reuse
 
