@@ -479,6 +479,25 @@ class TestCompetingStaleConverged:
         self._patch_verdict(monkeypatch, converged=True, reason="")
         assert s.competing_dirs(store) == []
 
+    def test_disk_converged_ignores_stale_failed_marker(self, tmp_path, monkeypatch):
+        s, comp = self._make(tmp_path)
+        # Genuinely stale: the marker predates the (successful) output.
+        (comp / ".failed").write_text("CRISP_FAILED\nEXIT_CODE: 1\n")
+        (comp / "OUTCAR").write_text(
+            " General timing and accounting\n"
+            " TOTAL-FORCE (eV/Angst)\n ---\n"
+            " 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000\n"
+        )
+        import os
+        base = os.stat(comp / ".failed").st_mtime_ns
+        os.utime(comp / ".failed", ns=(base, base))
+        os.utime(comp / "OUTCAR", ns=(base + 1_000_000, base + 1_000_000))
+        store = FakeJobStore({str(comp.resolve()): "failed"})
+        self._patch_verdict(monkeypatch, converged=True, reason="")
+
+        assert s.competing_dirs(store) == []
+        assert s.competing_blockers(store) == []
+
     def test_stale_converged_is_blocker(self, tmp_path, monkeypatch):
         s, comp = self._make(tmp_path)
         store = FakeJobStore({str(comp.resolve()): "converged"})

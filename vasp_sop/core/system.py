@@ -346,6 +346,25 @@ class System:
                 return True
         return False
 
+    @staticmethod
+    def _failed_newer_than_output(pd: Path) -> bool:
+        """True when a ``.failed`` marker is newer than every VASP output.
+
+        The latest attempt failed *after* the last converged output was
+        written (e.g. a submit-stage crash), so the older output must not
+        validate the dir. A marker older than the outputs is stale (a later
+        run succeeded) and must not block — verdict-first.
+        """
+        marker = pd / ".failed"
+        if not marker.is_file():
+            return False
+        mt = marker.stat().st_mtime
+        for cand in ("OUTCAR", "vasprun.xml", "OSZICAR"):
+            f = pd / cand
+            if f.is_file() and f.stat().st_mtime > mt:
+                return False
+        return True
+
     def competing_dirs(self, store: Any) -> list[Path]:
         """Competing phases that still need VASP submission or retry."""
         from vasp_sop.vasp.convergence import convergence_verdict
@@ -367,6 +386,10 @@ class System:
             current = store.latest(str(pd.resolve()))
             if current == "submitted":
                 continue
+            verdict = convergence_verdict(pd)
+            failed_newer = self._failed_newer_than_output(pd)
+            if verdict.converged and not failed_newer:
+                continue
             marker = crisp_terminal_status(pd)
             if marker == "failed":
                 if input_ready(pd) and current != "submitted":
@@ -375,8 +398,6 @@ class System:
             if marker == "completed":
                 continue
             if not input_ready(pd):
-                continue
-            if convergence_verdict(pd).converged:
                 continue
             if current == "converged":
                 logger.info(
@@ -403,6 +424,13 @@ class System:
             if not pd.is_dir() or pd.name in (target_name, "combos"):
                 continue
             if self._is_excluded_phase(pd):
+                continue
+            failed_newer = self._failed_newer_than_output(pd)
+            if convergence_verdict(pd).converged and not failed_newer:
+                if (pd / "POSCAR").is_file() and not input_ready(pd):
+                    # Converged-looking output with incomplete inputs: the
+                    # output is stale from a different setup — must block.
+                    blockers.append(pd)
                 continue
             marker = crisp_terminal_status(pd)
             state = store.latest(str(pd.resolve()))

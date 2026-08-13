@@ -1,8 +1,9 @@
 """ADR 0014 two-phase SOC stage-2 supplement tests.
 
-Stage 1 converges without LSORBIT; stage 2 adds it — Bi_* dirs continue
-from CONTCAR, everything else gets an NSW=0 single point.  Arming is
-one-shot (a ``soc_stage2`` record anywhere in history prevents re-arming).
+Stage 1 converges without LSORBIT; stage 2 adds SOC and continues from
+CONTCAR as a full structure relaxation for every dir (ADR 0022 — the
+NSW=0 single-point regime was retired 2026-08-12).  Arming is one-shot
+(a ``soc_stage2`` record anywhere in history prevents re-arming).
 """
 
 from pathlib import Path
@@ -82,12 +83,16 @@ class TestSubmitStage2:
                                         js, False, lambda *a: None)
         return calls, js
 
-    def test_non_bi_gets_nsw0_single_point(self, tmp_path, monkeypatch):
+    def test_non_bi_relaxes_under_soc(self, tmp_path, monkeypatch):
+        """ADR 0022: every dir continues from CONTCAR and RELAXES under SOC
+        (NSW stays 100); the NSW=0 single-point regime is retired."""
         d = _mkdir(tmp_path, "Va_O1_0")
         calls, js = self._call(d, monkeypatch)
         incar = (d / "INCAR").read_text()
+        poscar = (d / "POSCAR").read_text()
         assert "LSORBIT" in incar and "ISYM = -1" in incar
-        assert "NSW = 0" in incar
+        assert "NSW = 100" in incar, "non-Bi dirs also relax under SOC"
+        assert "0.1 0.1 0.1" in poscar, "POSCAR must come from CONTCAR"
         assert calls == [("soc2:Va_O1_0", "soc_stage2")]
 
     def test_bi_dir_continues_from_contcar(self, tmp_path, monkeypatch):

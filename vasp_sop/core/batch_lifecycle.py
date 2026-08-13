@@ -37,6 +37,27 @@ def _lock_file(root: Path) -> Path:
     return root / ".batch_loop.lock"
 
 
+def _global_loop_lock_file() -> Path:
+    from vasp_sop.core import paths
+
+    return paths.SOP_ROOT / ".batch_loop.global.lock"
+
+
+def acquire_global_loop_lock() -> int:
+    """Acquire the host-wide lock owned by the unified batch loop."""
+    lock_file = _global_loop_lock_file()
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(lock_file, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(lock_fd)
+        if exc.errno not in (errno.EACCES, errno.EAGAIN):
+            raise
+        raise SystemExit("Another unified batch loop is already running")
+    return lock_fd
+
+
 def _read_pid(root: Path) -> int | None:
     try:
         pid = int(_pid_file(root).read_text().splitlines()[0])

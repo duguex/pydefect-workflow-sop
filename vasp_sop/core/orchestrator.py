@@ -342,20 +342,18 @@ def _submit_stage2_soc(child: Path, sys: Any, js: Any, dry_run: bool,
                        info_fn: Any, *, priority: int = 0) -> None:
     """Submit the ADR 0014 SOC supplement for one converged dir.
 
-    ``Bi_*`` dirs continue from CONTCAR with LSORBIT (structure also
-    relaxes under SOC); everything else gets an NSW=0 single point —
-    an SOC energy correction on the non-SOC-optimized structure.
+    Every dir continues from its CONTCAR (stage-1 relaxed structure) and
+    RELAXES under SOC: NSW stays at the stage-1 value (100), LSORBIT on
+    (ADR 0022 — stage 2 is a SOC structure relaxation for all systems;
+    the NSW=0 single-point regime was retired 2026-08-12 because stale
+    POSCAR geometries biased energies by up to ~2 eV).
     """
     from vasp_sop.vasp.io import patch_incar
 
-    is_bi = child.name.startswith("Bi_")
     patch_incar(child, LSORBIT=".TRUE.", ISYM=-1)
-    if not is_bi:
-        patch_incar(child, NSW=0)
-    else:
-        cont = child / "CONTCAR"
-        if cont.is_file() and cont.stat().st_size > 0:
-            (child / "POSCAR").write_text(cont.read_text(errors="ignore"))
+    cont = child / "CONTCAR"
+    if cont.is_file() and cont.stat().st_size > 0:
+        (child / "POSCAR").write_text(cont.read_text(errors="ignore"))
     _submit_or_skip(child, f"soc2:{child.name}", sys.name, dry_run, info_fn,
                     js=js, source="soc_stage2", priority=priority)
 
@@ -1602,8 +1600,8 @@ class BatchOrchestrator:
             self._print_info(f"  Snapshot {committed} system repo(s) to git.")
         return committed
 
-    def _poll_tracked(self) -> int:
-        """Poll tracked dirs: finalize converged, detect crashes, restart."""
+    def _poll_tracked(self, *, restart_unconverged: bool = True) -> int:
+        """Poll tracked dirs and optionally restart unconverged jobs."""
         from vasp_sop.core.jobs import crisp_active_dirs
         from vasp_sop.vasp.convergence import convergence_verdict, _tail_text
         from vasp_sop.defect import is_valid_defect_dir
@@ -1643,7 +1641,11 @@ class BatchOrchestrator:
                 self.js.untrack(wd_str)
                 continue
             if not v.converged:
-                self.handle_unconverged(wd)
+                if restart_unconverged:
+                    self.handle_unconverged(wd)
+                else:
+                    self.js.record(wd_str, "unconverged", reason=v.reason)
+                    self.js.untrack(wd_str)
         return completed
 
     def _advance_systems(self) -> tuple[int, list[tuple[str, str]]]:
@@ -1796,12 +1798,23 @@ class BatchOrchestrator:
         command); when exhausted without completion the loop just exits and
         the caller checks the final phase.
         """
-        from vasp_sop.core.batch_lifecycle import is_stop_requested
+        from vasp_sop.core.batch_lifecycle import (
+            acquire_global_loop_lock,
+            is_stop_requested,
+            _release_lock,
+        )
 
         if not self.systems:
             logger.warning("No systems found.")
             self.js.close()
             return
+        loop_lock_fd = None
+        if self.loop:
+            try:
+                loop_lock_fd = acquire_global_loop_lock()
+            except BaseException:
+                self.js.close()
+                raise
         self._print_info(f"Batch run: {len(self.systems)} systems\n")
         if self.dry_run:
             self._print_info(
@@ -1809,10 +1822,9 @@ class BatchOrchestrator:
                 "inputs, NO VASP submission.\n"
             )
 
-        self._restore_crisp_active()
-
         cycle = 0
         try:
+            self._restore_crisp_active()
             while not is_stop_requested():
                 cycle += 1
                 if not self.dry_run:
@@ -1885,3 +1897,5 @@ class BatchOrchestrator:
             self._print_info("\nInterrupted.")
         finally:
             self.js.close()
+            if loop_lock_fd is not None:
+                _release_lock(loop_lock_fd)

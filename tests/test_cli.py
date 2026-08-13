@@ -6,6 +6,7 @@ submission, and that cached submission logic isn't silently skipped.
 
 from pathlib import Path
 import os
+import fcntl
 import time
 from types import SimpleNamespace
 import yaml
@@ -1718,6 +1719,69 @@ class TestBatchRunLoopObservability:
             "crisp_failed": -1,
             "errors": [],
         }
+
+    def test_second_unified_loop_is_rejected(self, tmp_path: Path, monkeypatch):
+        from vasp_sop.core import paths
+        from vasp_sop.core.orchestrator import BatchOrchestrator
+
+        root = self._campaign(tmp_path)
+        monkeypatch.setattr(
+            "vasp_sop.core.config.PipelineConfig.from_yaml",
+            lambda *args, **kwargs: type(
+                "Config", (), {"poscar_src": "", "formula": "GaN"}
+            )(),
+        )
+        orch = BatchOrchestrator(root, dry_run=True, loop=False)
+        orch.loop = True
+        orch.systems = [{"root": root / "GaN"}]
+        monkeypatch.setattr(orch, "_restore_crisp_active", lambda: None)
+        monkeypatch.setattr(orch, "_advance_systems", lambda: (1, []))
+        monkeypatch.setattr(orch, "_status", lambda errors: ({}, 1))
+
+        lock_path = paths.SOP_ROOT / ".batch_loop.global.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            with pytest.raises(SystemExit, match="unified batch loop"):
+                orch.run(max_cycles=1)
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+
+    def test_reconcile_does_not_restart_unconverged_jobs(
+        self, tmp_path: Path, monkeypatch, isolated_cache
+    ):
+        from vasp_sop.cli.main import _batch_reconcile
+        from vasp_sop.core.job_store import JobStore
+        from vasp_sop.core.orchestrator import BatchOrchestrator
+        from vasp_sop.vasp.convergence import ConvergenceVerdict
+
+        root = self._campaign(tmp_path)
+        calc = root / "GaN" / "defect" / "Va_N1_0"
+        calc.mkdir()
+        (calc / "OUTCAR").write_text("unconverged\n")
+        with JobStore() as store:
+            store.record(str(calc.resolve()), "submitted")
+            store.track(str(calc.resolve()))
+
+        monkeypatch.setattr(
+            "vasp_sop.core.jobs.crisp_active_dirs", lambda **kwargs: set()
+        )
+        monkeypatch.setattr(
+            "vasp_sop.vasp.convergence.convergence_verdict",
+            lambda *args, **kwargs: ConvergenceVerdict(False, "force_gate_fail"),
+        )
+        restarted = []
+        monkeypatch.setattr(
+            BatchOrchestrator,
+            "handle_unconverged",
+            lambda self, work_dir: restarted.append(work_dir),
+        )
+
+        _batch_reconcile(root)
+
+        assert restarted == []
 
     def test_single_pass_does_not_enable_loop_observability(
         self,
