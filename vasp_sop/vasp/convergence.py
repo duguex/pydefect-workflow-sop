@@ -237,12 +237,20 @@ def is_stalled(prev_max_f: float | None, cur_max_f: float | None) -> bool:
     return cur_max_f >= prev_max_f * STALL_FRACTION
 
 
-def convergence_verdict(path: Path, task_type: str = "") -> ConvergenceVerdict:
+def convergence_verdict(
+    path: Path, task_type: str = "", *, cache: bool = True
+) -> ConvergenceVerdict:
     """Return the convergence verdict for the calculation directory *path*.
 
     *task_type* optionally names the calculation's job type; types in
     :data:`NO_FORCE_GATE_TASK_TYPES` skip the ionic force gate entirely
     (their convergence is "the job finished"). Never raises.
+
+    ``cache=False`` evaluates entirely from disk: the persistent verdict
+    memo is neither loaded nor consulted nor written (no sidecar reads or
+    dirty tracking) — the read-only runtime dependency audit uses it so
+    graph construction writes nothing and its evidence never depends on
+    previously persisted verdicts.
     """
     outcar: Path | None = None
     for cand in (path / "OUTCAR", path / "output" / "OUTCAR"):
@@ -256,11 +264,18 @@ def convergence_verdict(path: Path, task_type: str = "") -> ConvergenceVerdict:
         mtime = outcar.stat().st_mtime
     except OSError:
         return ConvergenceVerdict(False, REASON_MISSING_OUTCAR)
-    _load_sidecar()
-    by_task = _verdict_cache.get(outcar)
-    cached = by_task.get(task_type) if by_task is not None else None
-    if cached is not None and cached[0] == mtime:
-        return cached[1]
+    if cache:
+        _load_sidecar()
+        by_task = _verdict_cache.get(outcar)
+        cached = by_task.get(task_type) if by_task is not None else None
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+
+    def _memo(verdict: ConvergenceVerdict) -> ConvergenceVerdict:
+        if cache:
+            _verdict_cache.setdefault(outcar, {})[task_type] = (mtime, verdict)
+            _mark_dirty(outcar, task_type)
+        return verdict
 
     # Window must cover the convergence line: long runs (100+ ionic steps
     # with many electronic iterations) can leave "reached required accuracy"
@@ -278,12 +293,11 @@ def convergence_verdict(path: Path, task_type: str = "") -> ConvergenceVerdict:
             # Still report last-block force when available: stall detection
             # reads it on OUTCARs whose run crashed before the timing
             # marker was written.
-            verdict = ConvergenceVerdict(
-                False, REASON_TRUNCATED, max_f=_last_max_force(outcar)
+            return _memo(
+                ConvergenceVerdict(
+                    False, REASON_TRUNCATED, max_f=_last_max_force(outcar)
+                )
             )
-            _verdict_cache.setdefault(outcar, {})[task_type] = (mtime, verdict)
-            _mark_dirty(outcar, task_type)
-            return verdict
 
     # Electronic convergence gate (ADR 0016): VASP's own "reached required
     # accuracy" can be a false positive when the last electronic step hit
@@ -292,17 +306,11 @@ def convergence_verdict(path: Path, task_type: str = "") -> ConvergenceVerdict:
     # unreliable, so the verdict must be unconverged too.  Only a warning
     # from the FINAL ionic step counts (see _has_nelm_warning).
     if _has_nelm_warning(outcar):
-        verdict = ConvergenceVerdict(False, REASON_ELECTRONIC_NOT_CONV)
-        _verdict_cache.setdefault(outcar, {})[task_type] = (mtime, verdict)
-        _mark_dirty(outcar, task_type)
-        return verdict
+        return _memo(ConvergenceVerdict(False, REASON_ELECTRONIC_NOT_CONV))
 
     # Task types that never ionically relax: a finished job is the verdict.
     if task_type in NO_FORCE_GATE_TASK_TYPES:
-        verdict = ConvergenceVerdict(True, REASON_NOT_RELAXATION)
-        _verdict_cache.setdefault(outcar, {})[task_type] = (mtime, verdict)
-        _mark_dirty(outcar, task_type)
-        return verdict
+        return _memo(ConvergenceVerdict(True, REASON_NOT_RELAXATION))
 
     # Prefer OUTCAR tags (run that produced this OUTCAR); INCAR is fallback only.
     head = _head_text(outcar, 65536)
@@ -338,10 +346,7 @@ def convergence_verdict(path: Path, task_type: str = "") -> ConvergenceVerdict:
 
     # Single-point / DFPT / MD / unknown-static: finished job is enough
     if nsw <= 1 or ibrion not in (1, 2, 3):
-        verdict = ConvergenceVerdict(True, REASON_NOT_RELAXATION)
-        _verdict_cache.setdefault(outcar, {})[task_type] = (mtime, verdict)
-        _mark_dirty(outcar, task_type)
-        return verdict
+        return _memo(ConvergenceVerdict(True, REASON_NOT_RELAXATION))
 
     # --- Ionic relaxation ---
     max_f = _last_max_force(outcar)
@@ -356,9 +361,7 @@ def convergence_verdict(path: Path, task_type: str = "") -> ConvergenceVerdict:
                 REASON_FORCE_GATE if max_f <= abs(ediffg) + 1e-8 else REASON_FORCE_GATE_FAIL,
                 max_f=max_f,
             )
-        _verdict_cache.setdefault(outcar, {})[task_type] = (mtime, verdict)
-        _mark_dirty(outcar, task_type)
-        return verdict
+        return _memo(verdict)
 
     # Energy criterion or missing EDIFFG: NSW early-exit with *run* NSW
     n_ionic = _count_total_force_blocks(outcar)
@@ -371,9 +374,7 @@ def convergence_verdict(path: Path, task_type: str = "") -> ConvergenceVerdict:
             max_f=max_f,
             n_ionic=n_ionic,
         )
-    _verdict_cache.setdefault(outcar, {})[task_type] = (mtime, verdict)
-    _mark_dirty(outcar, task_type)
-    return verdict
+    return _memo(verdict)
 
 
 def _tail_text(path: Path, n: int = 4096) -> str | None:

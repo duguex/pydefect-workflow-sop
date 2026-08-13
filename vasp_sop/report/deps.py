@@ -23,6 +23,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from vasp_sop.core.config import PipelineConfig
+from vasp_sop.core.retry_policy import (
+    evaluate_cpd,
+    evaluate_defect,
+    has_zbrent_failure,
+)
 from vasp_sop.vasp.convergence import convergence_verdict
 from vasp_sop.vasp.io import input_ready
 
@@ -32,16 +37,6 @@ DISPATCH = "dispatch"
 CONTAINMENT = "containment"
 _RELATION_TYPES = (RUNTIME_GATE, LINEAGE, DISPATCH, CONTAINMENT)
 _READY = frozenset(("converged", "complete"))
-_AUTO_RETRY_REASONS = frozenset(
-    {
-        "force_gate_fail",
-        "nsw_exhausted",
-        "nsw_early_exit",
-        "missing_forces",
-        "truncated",
-    }
-)
-_CPD_MAX_IONIC_RESTARTS = 3
 
 
 # ── crisp / JobStore lookups (best effort, never fatal) ───────────────
@@ -113,6 +108,7 @@ class Node:
     status: str = "not-run"
     detail: str = ""
     disposition: str = "none"  # wait | automatic | manual | none
+    explanation: str = ""  # canonical retry-policy reason (from Decision)
     n_ok: int = 0
     n_total: int = 0
     children: list[str] = field(default_factory=list)  # containment only
@@ -128,11 +124,38 @@ class Node:
             "status": self.status,
             "detail": self.detail,
             "disposition": self.disposition,
+            "explanation": self.explanation,
             "n_ok": self.n_ok,
             "n_total": self.n_total,
             "children": self.children,
             "bottleneck": self.bottleneck,
         }
+
+
+def _dir_evidence(path: Path) -> dict:
+    """Raw retry-policy evidence for one calculation directory (read-only).
+
+    Mirrors the executor's evidence hand-off in ``orchestrator.wave2_submit``:
+    the latest JobStore state, the convergence verdict (converged flag +
+    reason), CONTCAR existence, ionic-restart history, and the ZBRENT probe.
+    The verdict is evaluated without touching the persistent verdict memo
+    (``cache=False``), so graph construction never writes anything — no
+    JobStore, inputs, crisp rows, or verdict-cache sidecar.
+    """
+    verdict = convergence_verdict(path, cache=False)
+    latest = _jobstore_latest(path)
+    history = _jobstore_history(path)
+    return {
+        "latest_state": latest,
+        "verdict_converged": verdict.converged,
+        "verdict_reason": getattr(verdict, "reason", None),
+        "ionic_restarts": sum(
+            1 for row in history if row.get("source") == "ionic_restart"
+        ),
+        "has_conticar": (path / "CONTCAR").is_file(),
+        "has_zbrent": has_zbrent_failure(path),
+        "history": history,
+    }
 
 
 def _dir_status(path: Path, *, jobstore_fallback: bool = False) -> tuple[str, str]:
@@ -143,32 +166,28 @@ def _dir_status(path: Path, *, jobstore_fallback: bool = False) -> tuple[str, st
             return "converged", f"jobstore:{js} (staging phase passed)"
     if not input_ready(path):
         return "no-input", "missing INCAR/POSCAR/POTCAR/KPOINTS"
-    verdict = convergence_verdict(path)
-    if verdict.converged:
-        return "converged", verdict.reason or ""
+    evidence = _dir_evidence(path)
+    if evidence["verdict_converged"]:
+        return "converged", evidence["verdict_reason"] or ""
     crisp = _crisp_status(path)
     if crisp in ("running", "submitted", "submit", "ready_fetch"):
         return "running", f"crisp:{crisp}"
-    js = _jobstore_latest(path)
-    if verdict.reason == "electronic_not_conv":
+    latest = evidence["latest_state"]
+    if latest == "submitted":
+        # In flight in JobStore but invisible to crisp (fresh submit before
+        # the daemon poll); retry policy waits for its outcome either way.
+        return "running", "jobstore:submitted (in flight)"
+    if evidence["verdict_reason"] == "electronic_not_conv":
         return "failed", "NELM exhaustion (not auto-retried)"
-    if js == "failed":
-        return "failed", verdict.reason or "failed"
-    return "not-run", verdict.reason or ""
-
-
-def _has_zbrent_failure(path: Path) -> bool:
-    outcar = path / "OUTCAR"
-    if not outcar.is_file():
-        return False
-    try:
-        with outcar.open("rb") as f:
-            f.seek(0, 2)
-            size = f.tell()
-            f.seek(max(0, size - 65536))
-            return b"ZBRENT" in f.read()
-    except OSError:
-        return False
+    if latest == "converged":
+        # ADR 0016: the record is stale — disk truth says unconverged.
+        return "failed", (
+            "stale JobStore 'converged' record; disk verdict "
+            f"{evidence['verdict_reason'] or 'unconverged'}"
+        )
+    if latest == "failed":
+        return "failed", evidence["verdict_reason"] or "failed"
+    return "not-run", evidence["verdict_reason"] or ""
 
 
 def _defect_charge(name: str) -> int | None:
@@ -185,7 +204,13 @@ def _chain_roots(charges: list[int]) -> set[int]:
 
 
 def _disposition(path: Path | None, kind: str, status: str, detail: str) -> str:
-    """Mirror current orchestrator behavior, including CPD/defect asymmetry."""
+    """Generic (non-CPD/non-defect) disposition for the remaining node kinds.
+
+    CPD and defect retry decisions come from the unified retry-policy module
+    (:func:`vasp_sop.core.retry_policy.evaluate_cpd` / :func:`evaluate_defect`)
+    applied to raw evidence in :func:`build_graph`; this function only covers
+    unitcell tasks, gate artifacts, and never-run defect first submissions.
+    """
     if status in ("running", "submitted", "waiting", "waiting-seed"):
         return "wait"
     if status in _READY:
@@ -196,22 +221,6 @@ def _disposition(path: Path | None, kind: str, status: str, detail: str) -> str:
         return "manual"
     if status == "not-run":
         return "automatic" if path is not None and input_ready(path) else "manual"
-    if status == "failed":
-        reason = detail.split("(", 1)[0].strip()
-        if kind == "cpd-dir":
-            if path is not None and _has_zbrent_failure(path):
-                return "automatic"
-            history = _jobstore_history(path) if path is not None else []
-            restarts = sum(1 for row in history if row.get("source") == "ionic_restart")
-            if reason in _AUTO_RETRY_REASONS and (
-                reason == "truncated" or restarts < _CPD_MAX_IONIC_RESTARTS
-            ):
-                return "automatic"
-            return "manual"
-        if kind == "defect-dir":
-            # wave2 restarts any defect with history, including NELM failures.
-            return "automatic"
-        return "manual"
     return "manual"
 
 
@@ -379,6 +388,19 @@ def build_graph(root: Path, *, system_filter: str | None = None) -> dict:
                 continue
             nid = f"{sid}:cpd:{pd.name}"
             st, detail = _dir_status(pd)
+            evidence = _dir_evidence(pd)
+            # The shared CPD decision is the single authority (ADR 0017):
+            # submitted → wait, converged → none, truncated → automatic,
+            # budget exhaustion / NELM / missing CONTCAR → manual.  ZBRENT
+            # is decision metadata only and never overrides the budget.
+            decision = evaluate_cpd(
+                verdict_reason=evidence["verdict_reason"],
+                verdict_converged=evidence["verdict_converged"],
+                latest_state=evidence["latest_state"],
+                ionic_restarts=evidence["ionic_restarts"],
+                has_conticar=evidence["has_conticar"],
+                has_zbrent=evidence["has_zbrent"],
+            )
             nodes[nid] = Node(
                 id=nid,
                 kind="cpd-dir",
@@ -386,7 +408,8 @@ def build_graph(root: Path, *, system_filter: str | None = None) -> dict:
                 path=str(pd),
                 status=st,
                 detail=detail,
-                disposition=_disposition(pd, "cpd-dir", st, detail),
+                disposition=decision.disposition,
+                explanation=decision.explanation,
             )
             cpd_ids.append(nid)
         if cpd_ids:
@@ -417,7 +440,8 @@ def build_graph(root: Path, *, system_filter: str | None = None) -> dict:
                     did = f"{cid}:{dd.name}"
                     st, detail = _dir_status(dd)
                     q = _defect_charge(dd.name)
-                    has_history = bool(_jobstore_history(dd))
+                    evidence = _dir_evidence(dd)
+                    has_history = bool(evidence["history"])
                     if (
                         q is not None
                         and q not in roots
@@ -425,6 +449,34 @@ def build_graph(root: Path, *, system_filter: str | None = None) -> dict:
                         and not has_history
                     ):
                         st, detail = "waiting-seed", "waits for root charge (ADR 0010)"
+                    disposition: str
+                    explanation = ""
+                    if st == "waiting-seed":
+                        # The ADR 0010 seed upstream gate owns this node; it
+                        # is not a retry decision at all.
+                        disposition = "wait"
+                    elif has_history:
+                        # Has run before: the shared defect decision is the
+                        # authority (state-driven, reason-blind — ADR 0010
+                        # revision / ADR 0016): submitted → wait, verdict
+                        # converged → none, restart-eligible (failed /
+                        # unconverged / pending / stale-converged) →
+                        # automatic, shaped by own CONTCAR (continuation vs
+                        # fresh submission).
+                        decision = evaluate_defect(
+                            latest_state=evidence["latest_state"],
+                            verdict_converged=evidence["verdict_converged"],
+                            verdict_reason=evidence["verdict_reason"],
+                            has_conticar=evidence["has_conticar"],
+                            has_zbrent=evidence["has_zbrent"],
+                        )
+                        disposition = decision.disposition
+                        explanation = decision.explanation
+                    else:
+                        # Never-run dir: first submission (including ADR 0010
+                        # seeding) is the executor's call — a pending fresh
+                        # submit, not a retry.
+                        disposition = _disposition(dd, "defect-dir", st, detail)
                     nodes[did] = Node(
                         id=did,
                         kind="defect-dir",
@@ -432,7 +484,8 @@ def build_graph(root: Path, *, system_filter: str | None = None) -> dict:
                         path=str(dd),
                         status=st,
                         detail=detail,
-                        disposition=_disposition(dd, "defect-dir", st, detail),
+                        disposition=disposition,
+                        explanation=explanation,
                     )
                     chain.children.append(did)
                     if q is not None and q not in roots:
