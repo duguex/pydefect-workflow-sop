@@ -756,7 +756,7 @@ function segHtml(segs){
 }
 
 var tip=document.getElementById("tip");
-var tipHover=false;
+var tipHover=false,tipTimer=null;
 function rowHtml(r){
   return "<div class='row'><span class='swatch' style='background:"+CL[r.idx]+"'></span>"+
     "<span class='tname'>"+segHtml(DISP[r.name])+"</span>"+
@@ -803,6 +803,14 @@ plotEl.addEventListener("mousemove",function(ev){
   cursorEF=ef;
   if(curMu)drawFE(curMu);
   showTip(ef,ev.clientX,ev.clientY);
+  // A fast sweep can land the pointer on the panel's stale rect. Its
+  // mouseenter (fired against the old layout) already queued a dwell-freeze;
+  // this reposition has now pushed the panel clear of the pointer, so cancel
+  // that pending timer — otherwise the panel freezes at the cursor's feet
+  // long after the pass-through and stops following.
+  var tr=tip.getBoundingClientRect();
+  var onPanel=(ev.clientX>=tr.left&&ev.clientX<=tr.right&&ev.clientY>=tr.top&&ev.clientY<=tr.bottom);
+  if(!onPanel){clearTimeout(tipTimer);tipTimer=null;}
 });
 plotEl.addEventListener("mouseleave",function(){
   // Browsers synthesize a compat mouseleave after every tap; on touch-only
@@ -810,8 +818,19 @@ plotEl.addEventListener("mouseleave",function(){
   if(!hoverCapable)return;
   cursorEF=null;if(curMu)drawFE(curMu);hideTip();
 });
-tip.addEventListener("mouseenter",function(){tipHover=true;});
-tip.addEventListener("mouseleave",function(){tipHover=false;});
+// The "freeze so the panel can be scrolled" state must NOT engage on a fast
+// pointer sweep. A quick jump can land the cursor inside the panel's previous
+// rect — mouseenter fires before mousemove, which would otherwise freeze the
+// panel before it can reposition out from under the cursor. So freezing waits
+// for a short dwell: fast pass-throughs keep the panel following (each
+// mousemove pushes it clear of the cursor), a deliberate hover still locks it.
+tip.addEventListener("mouseenter",function(){
+  clearTimeout(tipTimer);
+  tipTimer=setTimeout(function(){tipHover=true;},250);
+});
+tip.addEventListener("mouseleave",function(){
+  clearTimeout(tipTimer);tipHover=false;
+});
 document.getElementById("leg").addEventListener("mouseenter",hideTip);
 // Touch / non-hover devices: no floating follow. A tap pins a compact
 // summary to the plot; tapping again dismisses it.
