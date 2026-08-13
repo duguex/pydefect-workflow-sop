@@ -775,8 +775,13 @@ function showTip(ef,clientX,clientY){
   fillTip(ef);
   tip.style.display="block";
   var r=cv.getBoundingClientRect(),plot=tip.parentElement.getBoundingClientRect();
-  var x=clientX-r.left+16,y=clientY-r.top+16;
-  if(x+tip.offsetWidth>plot.width-4)x=Math.max(4,clientX-r.left-tip.offsetWidth-16);
+  // Always stay on the cursor's right side — never flip to the left. Near the
+  // plot's right edge the panel can't extend beyond the iframe, so slide it
+  // left inside the plot instead (it keeps its right edge, never the cursor's
+  // left side).
+  var x=clientX-r.left+16;
+  if(x+tip.offsetWidth>plot.width-4)x=Math.max(4,plot.width-4-tip.offsetWidth);
+  var y=clientY-r.top+16;
   if(y+tip.offsetHeight>plot.height-4)y=Math.max(4,clientY-r.top-tip.offsetHeight-16);
   tip.style.left=x+"px";tip.style.top=y+"px";
 }
