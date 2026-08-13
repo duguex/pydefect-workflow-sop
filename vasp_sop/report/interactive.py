@@ -605,7 +605,7 @@ canvas{{display:block;background:var(--canvas);border:1px solid var(--line);bord
 .fe-note{{font-size:10px;color:var(--muted);margin-top:8px;line-height:1.4}}
 .leg{{display:flex;flex-wrap:wrap;gap:5px;margin-top:10px}}.leg-group{{display:flex;flex-wrap:wrap;gap:4px;min-width:0;margin:2px 0;padding:2px 4px;border-left:2px solid #dfe6ee}}.leg>div{{display:flex;align-items:center;gap:3px;font-size:11px;cursor:pointer;padding:2px 5px;border-radius:3px}}.leg>div:hover{{background:#eef3f6}}.leg-cat{{font-size:10px!important;font-weight:700;color:var(--accent);flex-basis:100%}}.leg-cat:hover{{background:var(--accent-soft)!important}}
 .csub{{font-size:.72em;vertical-align:sub}}.csup{{font-size:.72em;vertical-align:super}}
-@media(max-width:980px){{.report-grid{{grid-template-columns:1fr}}}}
+@media(max-width:800px){{.report-grid{{grid-template-columns:1fr}}}}
 @media(max-width:560px){{body{{padding:8px}}.report-head{{align-items:flex-start;flex-direction:column}}.report-card__body{{padding:8px}}}}
 </style></head><body>
 <header class="report-head"><h2>{title_html}</h2><span class="report-kicker">Defect thermodynamics</span></header>
