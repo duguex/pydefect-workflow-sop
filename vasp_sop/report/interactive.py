@@ -453,7 +453,7 @@ function getMu() {{
 }}
 function drawCPD(mu){{
   cctx.clearRect(0,0,cW,cH);
-  cctx.fillStyle="#555";cctx.font="14px Arial";cctx.textAlign="center";
+  cctx.fillStyle="#555";cctx.font="21px Arial";cctx.textAlign="center";
   cctx.fillText("μ fixed at vertex {vertex_names[0]}",cW/2,cH/2);
 }}
 var curMu = getMu();
@@ -475,14 +475,14 @@ function drawCPD(mu){{
   cctx.beginPath();cctx.moveTo(x0,y0);cctx.lineTo(x1,y1);cctx.stroke();
   [[x0,y0],[x1,y1]].forEach(function(p,i){{
     cctx.fillStyle="#334155";cctx.beginPath();cctx.arc(p[0],p[1],3.5,0,2*Math.PI);cctx.fill();
-    cctx.font="600 14px Arial";cctx.textAlign="left";cctx.fillText("V"+(i+1),p[0]+6,p[1]-6);
+    cctx.font="600 21px Arial";cctx.textAlign="left";cctx.fillText("V"+(i+1),p[0]+6,p[1]-6);
   }});
   if(mu){{
     var mx=cX(mu["{ax0}"]),my=cY(mu["{ax1}"]);
     cctx.beginPath();cctx.arc(mx,my,6,0,2*Math.PI);
     cctx.fillStyle="#169b78";cctx.fill();cctx.strokeStyle="#fff";cctx.lineWidth=2;cctx.stroke();
   }}
-  cctx.fillStyle="#657084";cctx.font="14px Arial";cctx.textAlign="center";
+  cctx.fillStyle="#657084";cctx.font="21px Arial";cctx.textAlign="center";
   cctx.fillText("μ_{ax0} (eV)",cW/2,cH-4);
   cctx.save();cctx.translate(13,cH/2);cctx.rotate(-Math.PI/2);cctx.fillText("μ_{ax1} (eV)",0,0);cctx.restore();
 }}
@@ -532,7 +532,7 @@ function getMu(px,py){{
 }}
 function drawCPD(mu){{
   cctx.clearRect(0,0,cW,cH);
-  cctx.strokeStyle="#e9edf2";cctx.lineWidth=1;cctx.fillStyle="#718096";cctx.font="13px Arial";cctx.textAlign="center";
+  cctx.strokeStyle="#e9edf2";cctx.lineWidth=1;cctx.fillStyle="#718096";cctx.font="20px Arial";cctx.textAlign="center";
   for(var i=0;i<=4;i++){{var v=a0R[0]+i/4*(a0R[1]-a0R[0]);cctx.beginPath();cctx.moveTo(cX(v),cP.t);cctx.lineTo(cX(v),cH-cP.b);cctx.stroke();cctx.fillText(v.toFixed(2),cX(v),cH-cP.b+13);}}
   cctx.textAlign="right";
   for(var i=0;i<=4;i++){{var v=a1R[0]+i/4*(a1R[1]-a1R[0]);cctx.beginPath();cctx.moveTo(cP.l,cY(v));cctx.lineTo(cW-cP.r,cY(v));cctx.stroke();cctx.fillText(v.toFixed(2),cP.l-5,cY(v)+3);}}
@@ -541,10 +541,10 @@ function drawCPD(mu){{
   cctx.closePath();cctx.stroke();cctx.fillStyle="rgba(22,155,120,0.09)";cctx.fill();
   POLY.forEach(function(v,i){{
     var x=cX(v[0]),y=cY(v[1]);cctx.fillStyle="#334155";cctx.beginPath();cctx.arc(x,y,3.5,0,2*Math.PI);cctx.fill();
-    cctx.font="600 14px Arial";cctx.textAlign="left";cctx.fillText("V"+(i+1),x+6,y-6);
+    cctx.font="600 21px Arial";cctx.textAlign="left";cctx.fillText("V"+(i+1),x+6,y-6);
   }});
   if(mu){{var mx=cX(mu["{ax0}"]),my=cY(mu["{ax1}"]);cctx.beginPath();cctx.arc(mx,my,6,0,2*Math.PI);cctx.fillStyle="#169b78";cctx.fill();cctx.strokeStyle="#fff";cctx.lineWidth=2;cctx.stroke();}}
-  cctx.fillStyle="#657084";cctx.font="14px Arial";cctx.textAlign="center";cctx.fillText("μ_{ax0} (eV)",cW/2,cH-4);
+  cctx.fillStyle="#657084";cctx.font="21px Arial";cctx.textAlign="center";cctx.fillText("μ_{ax0} (eV)",cW/2,cH-4);
   cctx.save();cctx.translate(13,cH/2);cctx.rotate(-Math.PI/2);cctx.fillText("μ_{ax1} (eV)",0,0);cctx.restore();
 }}
 function ptrPos(e){{var r=cc.getBoundingClientRect();return[invX(e.clientX-r.left),invY(e.clientY-r.top)];}}
@@ -573,7 +573,7 @@ body{{padding:14px}}
 h2{{margin:0;font-size:17px;letter-spacing:-.01em}}
 .report-head{{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin:0 0 12px}}
 .report-kicker{{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--accent)}}
-.report-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:start;position:relative}}
+.report-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:start;position:relative;max-width:1240px;margin:0 auto}}
 .report-card{{min-width:0;background:var(--card);border:1px solid var(--line);border-radius:10px;box-shadow:0 1px 2px rgba(15,23,42,.04);overflow:hidden}}
 .report-card__head{{display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:11px 13px 9px;border-bottom:1px solid var(--line)}}
 .report-card__head h3{{margin:0;font-size:13px;letter-spacing:.01em}}
@@ -594,14 +594,14 @@ canvas{{display:block;background:var(--canvas);border:1px solid var(--line);bord
 .mubar{{position:relative;height:5px;background:#dfe6ee;border-radius:99px}}.mucur{{position:absolute;top:-3px;width:11px;height:11px;border-radius:50%;background:var(--accent);margin-left:-5px;box-shadow:0 0 0 2px #fff}}
 .fe-workspace{{display:block}}
 .fe-plot{{min-width:0;position:relative}}
-.fe-tip{{position:absolute;z-index:40;display:none;overflow-y:auto;background:#fff;border:1px solid var(--line);border-radius:8px;box-shadow:0 6px 18px rgba(15,23,42,.16);padding:8px 10px;font-size:12px}}
+.fe-tip{{position:absolute;z-index:40;display:none;overflow-y:auto;background:#fff;border:1px solid var(--line);border-radius:8px;box-shadow:0 6px 18px rgba(15,23,42,.16);padding:8px 10px;font-size:14px}}
 .fe-tip__head{{font-size:11px;font-weight:700;color:var(--accent);margin-bottom:4px}}
 .fe-tip__foot{{font-size:10px;color:var(--muted);margin-top:4px}}
-.fe-tip .row{{display:grid;grid-template-columns:8px minmax(0,1fr) auto;gap:6px;align-items:center;padding:3px 2px;border-bottom:1px solid #eef2f6}}
+.fe-tip .row{{display:grid;grid-template-columns:10px minmax(0,1fr) auto;gap:8px;align-items:center;padding:4px 2px;border-bottom:1px solid #eef2f6;font-size:14px}}
 .fe-tip .row:last-child{{border-bottom:0}}
 .fe-tip .swatch{{width:8px;height:8px;border-radius:50%}}
 .fe-tip .tname{{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
-.fe-tip .tenergy{{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:10px;color:#4c596d}}
+.fe-tip .tenergy{{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:#4c596d}}
 .fe-note{{font-size:10px;color:var(--muted);margin-top:8px;line-height:1.4}}
 .leg{{display:flex;flex-wrap:wrap;gap:5px;margin-top:10px}}.leg-group{{display:flex;flex-wrap:wrap;gap:4px;min-width:0;margin:2px 0;padding:2px 4px;border-left:2px solid #dfe6ee}}.leg>div{{display:flex;align-items:center;gap:3px;font-size:12px;cursor:pointer;padding:2px 5px;border-radius:3px}}.leg>div:hover{{background:#eef3f6}}.leg-cat{{font-size:10px!important;font-weight:700;color:var(--accent);flex-basis:100%}}.leg-cat:hover{{background:var(--accent-soft)!important}}
 .csub{{font-size:.72em;vertical-align:sub}}.csup{{font-size:.72em;vertical-align:super}}
@@ -631,7 +631,7 @@ var hidden = {{}}; names.forEach(function(n){{hidden[n]=false;}});
 
 _FE_CANVAS_JS = """
 var cv=document.getElementById("cv"), cx=cv.getContext("2d");
-var W=800, H=520, P={l:54,r:16,t:22,b:42};
+var W=800, H=520, P={l:64,r:20,t:24,b:52};
 var minY=-10, maxY=10;
 var cursorEF=null;
 
@@ -665,7 +665,7 @@ function calcE(name,mu,eF){
 
 function drawFE(mu){
   cx.clearRect(0,0,W,H);
-  cx.strokeStyle="#e9edf2";cx.lineWidth=1;cx.fillStyle="#657084";cx.font="14px Arial";
+  cx.strokeStyle="#e9edf2";cx.lineWidth=1;cx.fillStyle="#657084";cx.font="21px Arial";
   for(var i=0;i<=5;i++){
     var x=xPx(i*BG/5);cx.beginPath();cx.moveTo(x,P.t);cx.lineTo(x,H-P.b);cx.stroke();
     cx.textAlign="center";cx.fillText((i*BG/5).toFixed(1),x,H-P.b+18);
@@ -736,7 +736,7 @@ function drawFermi(mu){{
   var x=xPx(ef),label="E_F="+ef.toFixed(2)+" eV (电荷中性)";
   cx.strokeStyle="#16c79a";cx.lineWidth=2;cx.setLineDash([]);
   cx.beginPath();cx.moveTo(x,P.t);cx.lineTo(x,H-P.b);cx.stroke();
-  cx.fillStyle="#16c79a";cx.font="bold 16px Arial";
+  cx.fillStyle="#16c79a";cx.font="bold 24px Arial";
   // Anchor to the plot interior. Near the right edge, paint leftward so the
   // physical E_F annotation is never clipped by the canvas boundary.
   var gap=6,w=cx.measureText(label).width;
