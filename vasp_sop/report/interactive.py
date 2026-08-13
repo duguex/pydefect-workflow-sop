@@ -592,18 +592,20 @@ canvas{{display:block;background:var(--canvas);border:1px solid var(--line);bord
 .murow{{display:grid;grid-template-columns:30px 42px 1fr 42px;gap:6px;align-items:center;margin:3px 0}}
 .muel{{font-weight:700;color:#334155}}.mumin,.mumax{{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:10px;color:#7b8797;text-align:right}}
 .mubar{{position:relative;height:5px;background:#dfe6ee;border-radius:99px}}.mucur{{position:absolute;top:-3px;width:11px;height:11px;border-radius:50%;background:var(--accent);margin-left:-5px;box-shadow:0 0 0 2px #fff}}
-.fe-workspace{{display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:12px;align-items:stretch}}
-.fe-plot{{min-width:0}}
-.fe-inspector{{min-width:0;height:100%;min-height:340px;display:flex;flex-direction:column;border:1px solid var(--line);border-radius:7px;background:#f8fafc;overflow:hidden}}
-.fe-inspector__head{{padding:10px 10px 8px;border-bottom:1px solid var(--line)}}
-.fe-inspector__title{{font-size:12px;font-weight:700}}.fe-inspector__state{{margin-top:2px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;color:var(--accent)}}
-.fe-inspector__assumption{{margin-top:5px;font-size:10px;color:var(--muted);line-height:1.35}}
-.fe-inspector__rows{{overflow:auto;flex:1;padding:4px 6px}}
-.fe-inspector__row{{display:grid;grid-template-columns:9px minmax(0,1fr) auto;gap:6px;align-items:center;padding:5px 3px;border-bottom:1px solid #e7ebf0;font-size:11px}}
-.fe-inspector__row:last-child{{border-bottom:0}}.fe-inspector__swatch{{width:8px;height:8px;border-radius:50%}}.fe-inspector__name{{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}.fe-inspector__energy{{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#4c596d;font-size:10px}}
+.fe-workspace{{display:block}}
+.fe-plot{{min-width:0;position:relative}}
+.fe-tip{{position:absolute;z-index:40;display:none;width:272px;max-height:78%;overflow-y:auto;background:rgba(255,255,255,.97);border:1px solid var(--line);border-radius:8px;box-shadow:0 6px 18px rgba(15,23,42,.16);padding:6px 8px;font-size:11px}}
+.fe-tip__head{{font-size:11px;font-weight:700;color:var(--accent);margin-bottom:4px}}
+.fe-tip__foot{{font-size:10px;color:var(--muted);margin-top:4px}}
+.fe-tip .row{{display:grid;grid-template-columns:8px minmax(0,1fr) auto;gap:6px;align-items:center;padding:3px 2px;border-bottom:1px solid #eef2f6}}
+.fe-tip .row:last-child{{border-bottom:0}}
+.fe-tip .swatch{{width:8px;height:8px;border-radius:50%}}
+.fe-tip .tname{{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.fe-tip .tenergy{{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:10px;color:#4c596d}}
+.fe-note{{font-size:10px;color:var(--muted);margin-top:8px;line-height:1.4}}
 .leg{{display:flex;flex-wrap:wrap;gap:5px;margin-top:10px}}.leg-group{{display:flex;flex-wrap:wrap;gap:4px;min-width:0;margin:2px 0;padding:2px 4px;border-left:2px solid #dfe6ee}}.leg>div{{display:flex;align-items:center;gap:3px;font-size:11px;cursor:pointer;padding:2px 5px;border-radius:3px}}.leg>div:hover{{background:#eef3f6}}.leg-cat{{font-size:10px!important;font-weight:700;color:var(--accent);flex-basis:100%}}.leg-cat:hover{{background:var(--accent-soft)!important}}
 .csub{{font-size:.72em;vertical-align:sub}}.csup{{font-size:.72em;vertical-align:super}}
-@media(max-width:980px){{.report-grid{{grid-template-columns:1fr}}.fe-workspace{{grid-template-columns:1fr}}.fe-inspector{{height:320px;min-height:0}}}}
+@media(max-width:980px){{.report-grid{{grid-template-columns:1fr}}}}
 @media(max-width:560px){{body{{padding:8px}}.report-head{{align-items:flex-start;flex-direction:column}}.report-card__body{{padding:8px}}}}
 </style></head><body>
 <header class="report-head"><h2>{title_html}</h2><span class="report-kicker">Defect thermodynamics</span></header>
@@ -612,7 +614,7 @@ canvas{{display:block;background:var(--canvas);border:1px solid var(--line);bord
 <canvas id="cpd" width="420" height="420"></canvas>
 <section class="selection-card" aria-live="polite"><div class="selection-card__head"><span class="selection-card__title">当前化学条件</span><span id="selection-state" class="selection-card__state">区域内插值</span></div><div id="selection-constraints" class="selection-card__constraints"></div><div id="selection-mu" class="selection-card__mu"></div><div class="mupanel"><div class="mupanel-title">化学势范围 μ (eV)</div><div id="murows"></div></div></section>
 </div></section>
-<section class="report-card" id="feCard"><header class="report-card__head"><h3>缺陷形成能</h3><span class="report-card__hint">移动查询 · 点击锁定 E<sub>F</sub></span></header><div class="report-card__body"><div class="fe-workspace"><div class="fe-plot"><canvas id="cv" width="800" height="520"></canvas><div class="leg" id="leg"></div></div><aside class="fe-inspector" aria-live="polite"><div class="fe-inspector__head"><div class="fe-inspector__title">形成能检查器</div><div id="inspector-state" class="fe-inspector__state">移动图面查询</div><div class="fe-inspector__assumption">本征缺陷 · 300 K · 未含自由载流子<br>仅列当前可见缺陷，按 E<sub>f</sub> 升序</div></div><div id="inspector-rows" class="fe-inspector__rows"></div></aside></div></div></section>
+<section class="report-card" id="feCard"><header class="report-card__head"><h3>缺陷形成能</h3><span class="report-card__hint">移动查询 E<sub>F</sub></span></header><div class="report-card__body"><div class="fe-workspace"><div class="fe-plot"><canvas id="cv" width="800" height="520"></canvas><div class="leg" id="leg"></div><div class="fe-note">查询层按 E<sub>f</sub> 升序列出当前可见缺陷 · 本征缺陷 · 300 K · 未含自由载流子</div><div id="tip" class="fe-tip"></div></div></div></div></section>
 </main>
 <script>"""
 
@@ -757,44 +759,76 @@ function segHtml(segs){
   return h;
 }
 
-var pinnedEF=null;
-function renderInspector(ef,pinned){
-  if(ef===null||!curMu)return;
+var tip=document.getElementById("tip");
+var tipHover=false;
+function fillTip(ef){
   var rows=[];
   names.forEach(function(n,i){if(!hidden[n])rows.push({name:n,idx:i,e:calcE(n,curMu,ef)});});
   rows.sort(function(a,b){return a.e-b.e;});
-  var box=document.getElementById("inspector-rows");box.innerHTML="";
+  var h="<div class='fe-tip__head'>E_F = "+ef.toFixed(3)+" eV</div>";
   rows.forEach(function(r){
-    var row=document.createElement("div");row.className="fe-inspector__row";
-    row.innerHTML="<span class='fe-inspector__swatch' style='background:"+CL[r.idx]+"'></span>"+
-      "<span class='fe-inspector__name'>"+segHtml(DISP[r.name])+"</span>"+
-      "<span class='fe-inspector__energy'>"+(r.e>=0?"+":"")+r.e.toFixed(3)+" eV</span>";
-    box.appendChild(row);
+    h+="<div class='row'><span class='swatch' style='background:"+CL[r.idx]+"'></span>"+
+      "<span class='tname'>"+segHtml(DISP[r.name])+"</span>"+
+      "<span class='tenergy'>"+(r.e>=0?"+":"")+r.e.toFixed(3)+" eV</span></div>";
   });
-  document.getElementById("inspector-state").textContent=
-    (pinned?"已锁定 · ":"查询 · ")+"E_F = "+ef.toFixed(3)+" eV · "+rows.length+" 条";
+  h+="<div class='fe-tip__foot'>共 "+rows.length+" 条 · 本征缺陷 · 300 K · 未含自由载流子</div>";
+  tip.innerHTML=h;
 }
-function setInspection(ef,pinned){
-  cursorEF=ef;
-  if(curMu)drawFE(curMu);
-  renderInspector(ef,pinned);
+function showTip(ef,clientX,clientY){
+  fillTip(ef);
+  tip.style.display="block";
+  var r=cv.getBoundingClientRect(),plot=tip.parentElement.getBoundingClientRect();
+  var x=clientX-r.left+16,y=clientY-r.top+16;
+  if(x+tip.offsetWidth>plot.width-4)x=Math.max(4,clientX-r.left-tip.offsetWidth-16);
+  if(y+tip.offsetHeight>plot.height-4)y=Math.max(4,clientY-r.top-tip.offsetHeight-16);
+  tip.style.left=x+"px";tip.style.top=y+"px";
 }
-cv.addEventListener("mousemove",function(ev){
-  if(pinnedEF!==null)return;
-  var r=cv.getBoundingClientRect(),ef=xInv(ev.clientX-r.left);
-  if(ef>=0&&ef<=BG)setInspection(ef,false);
-});
-cv.addEventListener("click",function(ev){
+function hideTip(){tip.style.display="none";}
+// Single owner of hover state: the plot wrapper contains BOTH the canvas and
+// the floating panel, so the pointer gliding from canvas onto the scrollable
+// tooltip never re-enters a dead gap — the panel stays and can be scrolled.
+var hoverCapable=window.matchMedia("(hover:hover)").matches;
+var plotEl=cv.parentElement;
+plotEl.addEventListener("mousemove",function(ev){
+  if(!hoverCapable||tipHover)return; // touch: no floating follow; inside the panel: let it scroll
   var r=cv.getBoundingClientRect(),ef=xInv(ev.clientX-r.left);
   if(ef<0||ef>BG)return;
-  pinnedEF=ef;setInspection(ef,true);
+  cursorEF=ef;
+  if(curMu)drawFE(curMu);
+  showTip(ef,ev.clientX,ev.clientY);
 });
-window.addEventListener("keydown",function(ev){
-  if(ev.key!=="Escape"||pinnedEF===null)return;
-  pinnedEF=null;cursorEF=null;
-  if(curMu){drawFE(curMu);renderInspector(calcFermi(curMu),false);}
-  document.getElementById("inspector-state").textContent="移动图面查询";
+plotEl.addEventListener("mouseleave",function(){
+  // Browsers synthesize a compat mouseleave after every tap; on touch-only
+  // devices that must not kill the tapped-on summary — the tap toggles it.
+  if(!hoverCapable)return;
+  cursorEF=null;if(curMu)drawFE(curMu);hideTip();
 });
+tip.addEventListener("mouseenter",function(){tipHover=true;});
+tip.addEventListener("mouseleave",function(){tipHover=false;});
+document.getElementById("leg").addEventListener("mouseenter",hideTip);
+// Touch / non-hover devices: no floating follow. A tap pins a compact
+// summary to the plot; tapping again dismisses it.
+if(!hoverCapable){
+  cv.addEventListener("click",function(ev){
+    var r=cv.getBoundingClientRect(),ef=xInv(ev.clientX-r.left);
+    if(ef<0||ef>BG)return;
+    cursorEF=ef;if(curMu)drawFE(curMu);
+    if(tip.style.display==="block"&&tip.tappedEf===ef){hideTip();tip.tappedEf=null;return;}
+    tip.tappedEf=ef;
+    var rows=[];
+    names.forEach(function(n,i){if(!hidden[n])rows.push({name:n,idx:i,e:calcE(n,curMu,ef)});});
+    rows.sort(function(a,b){return a.e-b.e;});
+    var top=rows.slice(0,5),h="<div class='fe-tip__head'>E_F = "+ef.toFixed(3)+" eV · 最低 5 条</div>";
+    top.forEach(function(r){
+      h+="<div class='row'><span class='swatch' style='background:"+CL[r.idx]+"'></span>"+
+        "<span class='tname'>"+segHtml(DISP[r.name])+"</span>"+
+        "<span class='tenergy'>"+(r.e>=0?"+":"")+r.e.toFixed(3)+" eV</span></div>";
+    });
+    h+="<div class='fe-tip__foot'>共 "+rows.length+" 条 · 再次点击收起</div>";
+    tip.innerHTML=h;tip.style.display="block";
+    tip.style.left="8px";tip.style.top="8px";
+  });
+}
 
 // Chemical-potential range panel: per-element min/current/max over the
 // stability vertices, updated live as the selection moves.
@@ -838,8 +872,7 @@ function updateSelectionCard(mu){
 }
 function update(mu){
   curMu=mu;drawCPD(mu);drawFE(mu);updateMuPanel(mu);updateSelectionCard(mu);
-  var ef=pinnedEF!==null?pinnedEF:calcFermi(mu);
-  renderInspector(ef,pinnedEF!==null);
+  if(tip.style.display==="block"&&cursorEF!==null)fillTip(cursorEF);
 }
 
 // Group the legend by defect KIND (site-independent base name):
@@ -849,7 +882,7 @@ function defectBase(n){return n.replace(/\d+$/,"");}
 function refreshVisibleDefects(){
   if(!curMu)return;
   drawFE(curMu);
-  renderInspector(pinnedEF!==null?pinnedEF:(cursorEF!==null?cursorEF:calcFermi(curMu)),pinnedEF!==null);
+  if(tip.style.display==="block"&&cursorEF!==null)fillTip(cursorEF);
 }
 function toggleGroup(base){
   var anyVisible=false;
@@ -888,8 +921,6 @@ function layout(){
   var fh=Math.max(320,Math.min(520,Math.round(fw*.68)));
   cv.width=fw*dpr;cv.height=fh*dpr;cv.style.width=fw+"px";cv.style.height=fh+"px";
   cx.setTransform(dpr,0,0,dpr,0,0);W=fw;H=fh;
-  var inspector=document.querySelector(".fe-inspector");
-  if(inspector)inspector.style.height=fh+"px";
   if(curMu)update(curMu);
 }
 window.addEventListener("resize",layout);

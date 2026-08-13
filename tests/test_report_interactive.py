@@ -413,14 +413,14 @@ class TestHtmlTemplate:
         assert "<!DOCTYPE html>" in html
         assert "report-grid" in html
         assert "化学势稳定区" in html
-        assert "形成能检查器" in html
         assert "var POLY" in html
         assert "var DEF" in html
         assert "var BG" in html
         assert "function drawFE" in html
         assert "getMu(px,py)" in html
-        assert "function renderInspector" in html
-        assert "function setInspection" in html
+        assert "function fillTip" in html
+        assert "function showTip" in html
+        assert "function hideTip" in html
 
     def test_constraint_phases_and_charge_neutrality_embedded(self):
         html = _html_template(
@@ -520,7 +520,9 @@ class TestHtmlTemplate:
         assert "function updateSelectionCard" in html
         assert "devicePixelRatio" in html
         assert "function layout" in html
-        assert "fe-inspector" in html
+        assert "fe-tip" in html
+        assert "fe-note" in html
+        assert "matchMedia" in html
         # Inspector/legend use typeset HTML names.
         assert "function segHtml" in html
         assert "class='csub'" in html
@@ -593,15 +595,19 @@ class TestGenerateInteractiveHtml:
         # isDoped check present
         assert "isDoped" in content
 
-    def test_inspector_code_present(self, tmp_path):
+    def test_hover_readout_code_present(self, tmp_path):
         root = _write_system(tmp_path)
         out = generate_interactive_html(root)
         content = out.read_text()
         assert "mousemove" in content
-        assert "click" in content
-        assert "Escape" in content
-        assert "形成能检查器" in content
-        assert "renderInspector" in content
+        assert "matchMedia(\"(hover:hover)\")" in content
+        assert "fe-tip" in content
+        assert "fillTip" in content
+        # Hover-only semantics: no click-pin state, no Escape handling,
+        # and the retired fixed panel is fully gone.
+        assert "pinnedEF" not in content
+        assert "形成能检查器" not in content
+        assert "renderInspector" not in content
 
     def test_idempotent(self, tmp_path):
         """Second call overwrites cleanly."""
