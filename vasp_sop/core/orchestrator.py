@@ -35,6 +35,17 @@ from vasp_sop.core.system import (
 
 logger = logging.getLogger(__name__)
 
+# Retry eligibility, budgets, and probes live in the unified retry-policy
+# module (see vasp_sop/core/retry_policy.py) — the executor consumes its
+# decisions instead of re-deriving reasons/budgets locally.
+from vasp_sop.core.retry_policy import (
+    UNCONVERGED_MAX_RESTARTS,
+    evaluate_competing_one_shot,
+    evaluate_cpd,
+    evaluate_defect,
+    has_zbrent_failure,
+)
+
 
 # ── Shared helpers ─────────────────────────────────────────────────────────
 
@@ -79,47 +90,8 @@ def _chain_roots(charges: list[int]) -> set[int]:
     return {qs[n // 2 - 1], qs[n // 2]}
 
 
-# Reasons that justify an automatic ionic restart from CONTCAR for a cpd
-# phase: the structure simply needs more ionic steps.  ``truncated`` is a
-# TIME-LIMIT / killed run — transient, the CONTCAR keeps advancing every
-# round, so it is retried (with a long-QOS tag) instead of capped.
-# Electronic NELM exhaustion is deliberately excluded — identical inputs
-# reproduce the same failure, so blind retries would only burn core-hours.
-_IONIC_RETRY_REASONS = frozenset(
-    {"force_gate_fail", "nsw_exhausted", "nsw_early_exit", "missing_forces",
-     "truncated"}
-)
-
-# Cap on automatic CONTCAR restarts per cpd phase.  A phase whose forces
-# stall (e.g. an over-strict EDIFFG) would otherwise be resubmitted every
-# cycle forever, burning core-hours; past the cap the phase needs a
-# parameter decision, not more iterations.
-_CPD_MAX_IONIC_RESTARTS = 3
-
 # Once-per-process set of dirs already warned about INCAR/OUTCAR drift.
 _drift_warned: set[str] = set()
-
-
-def _has_zbrent_failure(path: Path) -> bool:
-    """True if the last run died in a ZBRENT line-search bracket failure.
-
-    ZBRENT aborts occur when EDIFF=1e-4 leaves too much force noise for
-    the line search (metallic phases; 08-08 protocol EDIFF=1e-7
-    converged the same dirs).  Operator decision 2026-08-11 (issue #119):
-    keep the global EDIFF=1e-4, but re-run dirs whose last attempt died
-    in ZBRENT with EDIFF=1e-6.
-    """
-    outcar = path / "OUTCAR"
-    if not outcar.is_file():
-        return False
-    try:
-        with open(outcar, "rb") as f:
-            f.seek(0, 2)
-            size = f.tell()
-            f.seek(max(0, size - 65536))
-            return b"ZBRENT" in f.read()
-    except OSError:
-        return False
 
 
 def _warn_incar_drift(path: Path, label: str) -> None:
@@ -389,10 +361,12 @@ def wave2_submit(
 
     # ── CPD phase ionic restarts (any phase) ─────────────────────────
     # Phase inference gates COMPLETE on every cpd phase, but once a
-    # system left COMPETING nothing else ever resubmits them.  A phase
-    # that failed ionically (force gate / NSW exhausted) continues from
-    # its own CONTCAR every cycle until it converges.  Electronic NELM
-    # exhaustion is NOT auto-retried (see _IONIC_RETRY_REASONS).
+    # system left COMPETING nothing else ever resubmits them.  Each
+    # unconverged phase is handed to the unified retry policy with
+    # normalized evidence; only an ``automatic`` decision resubmits it
+    # (from its own CONTCAR, truncated runs long-QOS tagged, ZBRENT
+    # downgraded to EDIFF=1e-6, electronic NELM exhaustion never
+    # auto-retried — ADR 0017).
     from vasp_sop.vasp.io import patch_incar, restart_from_contcar
 
     cpd_root = sys.cpd_dir
@@ -402,45 +376,39 @@ def wave2_submit(
                 continue
             if not input_ready(cd) or js.latest(str(cd.resolve())) == "submitted":
                 continue
+            cp = str(cd.resolve())
             verdict = convergence_verdict(cd)
-            if verdict.converged:
+            decision = evaluate_cpd(
+                verdict_reason=getattr(verdict, "reason", None),
+                verdict_converged=verdict.converged,
+                latest_state=js.latest(cp),
+                ionic_restarts=sum(
+                    1 for r in js.history(cp)
+                    if r.get("source") == "ionic_restart"
+                ),
+                has_conticar=(cd / "CONTCAR").is_file(),
+                has_zbrent=has_zbrent_failure(cd),
+            )
+            if decision.disposition == "none":
                 _warn_incar_drift(cd, f"{sys.name}/cpd/{cd.name}")
                 continue
-            # Mocks in tests may omit reason; treat missing as non-retryable.
-            if getattr(verdict, "reason", None) not in _IONIC_RETRY_REASONS:
+            if decision.disposition != "automatic":
+                if decision.explanation.startswith(
+                    "auto-restart budget exhausted"
+                ):
+                    logger.warning("%s/%s: %s", sys.name, cd.name,
+                                   decision.explanation)
                 continue
-            if not (cd / "CONTCAR").is_file():
-                continue
-            # The restart cap guards the force-stall case (every round
-            # burns NSW steps with no progress).  A TIME-LIMIT truncation
-            # ADVANCES the CONTCAR every round — capping it would stall a
-            # converging calc, so it is exempt and resubmitted on a
-            # long-QOS cluster instead.
-            truncated = verdict.reason == "truncated"
-            if not truncated:
-                n_restarts = sum(
-                    1 for r in js.history(str(cd.resolve()))
-                    if r.get("source") == "ionic_restart"
-                )
-                if n_restarts >= _CPD_MAX_IONIC_RESTARTS:
-                    logger.warning(
-                        "%s/%s: %d ionic restart(s) without convergence — "
-                        "auto-restart capped, needs a parameter decision",
-                        sys.name, cd.name, n_restarts,
-                    )
-                    continue
             try:
                 restart_from_contcar(cd)
             except Exception:
                 pass
-            # ZBRENT line-search aborts (metallic phases at EDIFF=1e-4)
-            # re-run with EDIFF=1e-6 instead of failing forever (issue #119).
-            if _has_zbrent_failure(cd):
-                patch_incar(cd, EDIFF="1e-6")
+            if decision.incar_adjustment:
+                patch_incar(cd, **decision.incar_adjustment)
             _submit_or_skip(
                 cd, f"phase:{cd.name}", sys.name, dry_run, info,
-                js=js, source="ionic_restart", priority=priority,
-                tags=["long"] if truncated else None,
+                js=js, source=decision.submission_source, priority=priority,
+                tags=list(decision.tags) if decision.tags else None,
             )
 
     # ── Prepare: build defect structures ─────────────────────────────
@@ -512,23 +480,27 @@ def wave2_submit(
             if latest == "submitted":
                 continue
             if latest in ("failed", "unconverged"):
-                # One-shot auto-rerun (ADR 0007, same policy as defect
-                # dirs): a second failure is terminal forever, armed only
-                # by an explicit `batch run --retry-failed`.
-                if not retry_failed:
-                    continue
-                if any(r.get("source") == "auto_retry"
-                       for r in js.history(cp)):
-                    continue
-                # ADR 0017: a deterministic electronic failure (NELM
-                # exhaustion) reproduces with identical inputs — a rerun
-                # from the pristine POSCAR fails identically, so it is
-                # excluded from auto_retry (needs a parameter decision).
-                if getattr(convergence_verdict(cd), "reason", None) \
-                        == "electronic_not_conv":
+                # One-shot auto-rerun (ADR 0007): the terminal policy is
+                # the shared module's COMPETING decision — a second
+                # failure is terminal forever, armed only by an explicit
+                # `batch run --retry-failed`, and deterministic NELM
+                # exhaustion is excluded (ADR 0017).
+                verdict = convergence_verdict(cd)
+                decision = evaluate_competing_one_shot(
+                    latest_state=latest,
+                    verdict_converged=verdict.converged,
+                    verdict_reason=getattr(verdict, "reason", None),
+                    already_auto_retried=any(
+                        r.get("source") == "auto_retry"
+                        for r in js.history(cp)
+                    ),
+                    retry_failed_armed=retry_failed,
+                )
+                if decision.disposition != "automatic":
                     continue
                 _submit_or_skip(cd, f"phase:{cd.name}", sys.name, dry_run, info,
-                                js=js, source="auto_retry", priority=priority)
+                                js=js, source=decision.submission_source,
+                                priority=priority)
                 continue
             _submit_or_skip(cd, f"phase:{cd.name}", sys.name, dry_run, info,
                             js=js, priority=priority)
@@ -710,12 +682,12 @@ def wave2_submit(
             # Seeding applies ONLY to the first submission of a non-root
             # charge: a dir with submission history never re-seeds from a
             # sibling (its own partial CONTCAR is a better continuation —
-            # see the restart branch below).  A dir with no history waits
+            # see the retry branch below).  A dir with no history waits
             # for a converged sibling to seed its geometry.
             q = _defect_charge(child.name)
             g = groups.get(_defect_group_key(child.name)) if q is not None else None
-            if g is not None and q not in g["roots"]:
-                if not js.history(str(child.resolve())):
+            if not js.history(str(child.resolve())):
+                if g is not None and q not in g["roots"]:
                     conv_siblings = [
                         c for c in g["dirs"]
                         if c is not child and verdicts.get(str(c.resolve()), False)
@@ -743,37 +715,44 @@ def wave2_submit(
                         priority=priority,
                     )
                     continue
-
-            if latest in ("failed", "unconverged", "pending") or (
-                latest == "converged"
-                and not verdicts.get(str(child.resolve()), False)
-            ):
-                # ADR 0010 revision: any dir that already ran once
-                # continues from its own partial CONTCAR instead of
-                # re-seeding from a sibling (or starting over).  Auto
-                # restarts every cycle until convergence.  ADR 0016: a
-                # stale converged record (pre-electronic-gate backfill)
-                # whose verdict is now unconverged restarts too.
-                if (child / "CONTCAR").is_file():
-                    from vasp_sop.vasp.io import restart_from_contcar
-                    try:
-                        restart_from_contcar(child)
-                    except Exception:
-                        pass
-                # ZBRENT line-search aborts (metallic phases at
-                # EDIFF=1e-4) re-run with EDIFF=1e-6 instead of failing
-                # forever (issue #119 — same policy as cpd restarts).
-                if _has_zbrent_failure(child):
-                    from vasp_sop.vasp.io import patch_incar
-                    patch_incar(child, EDIFF="1e-6")
-                _submit_or_skip(
-                    child, f"df-{child.name}", sys.name, dry_run, info,
-                    js=js, source="restart",
-                    priority=priority,
-                )
+                # First submission (never-run dir): plain fresh submit.
+                _submit_or_skip(child, f"df-{child.name}", sys.name, dry_run,
+                                info, js=js, priority=priority)
                 continue
-            _submit_or_skip(child, f"df-{child.name}", sys.name, dry_run, info, js=js,
-                            priority=priority)
+
+            # ── Retry decision (has run before) ───────────────────────
+            # Handed to the unified module with normalized evidence: any
+            # restart-eligible latest state (failed/unconverged/pending) or
+            # a stale "converged" record whose disk verdict is unconverged
+            # (ADR 0016) auto-restarts every cycle — reason-blind (not even
+            # electronic_not_conv demotes it), CONTCAR-shaped (own CONTCAR
+            # → continuation, none → fresh submission), never re-seeded
+            # from a sibling.  submitted → wait; verdict converged → skip.
+            verdict = convergence_verdict(child)
+            decision = evaluate_defect(
+                latest_state=latest,
+                verdict_converged=verdict.converged,
+                verdict_reason=getattr(verdict, "reason", None),
+                has_conticar=(child / "CONTCAR").is_file(),
+                has_zbrent=has_zbrent_failure(child),
+            )
+            if decision.disposition != "automatic":
+                continue
+            if decision.continue_from_contcar:
+                from vasp_sop.vasp.io import restart_from_contcar
+                try:
+                    restart_from_contcar(child)
+                except Exception:
+                    pass
+            if decision.incar_adjustment:
+                from vasp_sop.vasp.io import patch_incar
+                patch_incar(child, **decision.incar_adjustment)
+            _submit_or_skip(
+                child, f"df-{child.name}", sys.name, dry_run, info,
+                js=js, source=decision.submission_source,
+                priority=priority,
+            )
+            continue
 
     # ADR 0014: two-phase SOC — supplement converged non-SOC dirs.
     # Stage 1 converges without LSORBIT; stage 2 adds it (Bi_* dirs
@@ -1075,8 +1054,6 @@ def cpd_only(
 # Whole-system advance + batch loop (moved from cli/main.py)
 # ══════════════════════════════════════════════════════════════════════════
 
-_MAX_RESTART = 5
-
 
 def advance_one_system(
     s: dict, *, dry_run: bool = False, log_to_logger: bool = False,
@@ -1329,7 +1306,7 @@ class BatchOrchestrator:
                                 break
                         break
 
-            if attempt >= _MAX_RESTART:
+            if attempt >= UNCONVERGED_MAX_RESTARTS:
                 self.js.record(
                     wd_str, "failed",
                     reason=f"unconverged,max_f={cur_f:.4f}",
