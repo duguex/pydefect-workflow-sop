@@ -678,27 +678,23 @@ function drawFE(mu){
   cx.fillStyle="#475569";cx.textAlign="center";cx.fillText("E − E_VBM (eV)",W/2,H-5);
   cx.save();cx.translate(14,H/2);cx.rotate(-Math.PI/2);cx.fillText("Formation energy E_f (eV)",0,0);cx.restore();
 
-  var lineData=[];
   names.forEach(function(n,i){
     if(hidden[n])return;
     cx.globalAlpha=.76;cx.strokeStyle=CL[i];cx.lineWidth=1.65;
     var isDoped={is_doped_str};cx.setLineDash(isDoped?[6,3]:[]);
-    cx.beginPath();var first=true,pts=[];
+    cx.beginPath();var first=true;
     for(var k=0;k<nEF;k++){
       var ef=k*BG/(nEF-1),e=calcE(n,mu,ef),x=xPx(ef),y=yPx(e);
       if(isNaN(y)||y<P.t||y>H-P.b)continue;
-      pts.push({ef:ef,e:e,x:x,y:y});
       if(first){cx.moveTo(x,y);first=false;}else cx.lineTo(x,y);
     }
     cx.stroke();cx.setLineDash([]);cx.globalAlpha=1;
-    lineData.push({name:n,idx:i,pts:pts});
   });
   if(cursorEF!==null){
     cx.strokeStyle="rgba(22,155,120,.55)";cx.lineWidth=1;cx.setLineDash([4,4]);
     cx.beginPath();cx.moveTo(xPx(cursorEF),P.t);cx.lineTo(xPx(cursorEF),H-P.b);cx.stroke();cx.setLineDash([]);
   }
   drawFermi(mu);
-  cx.storedLines=lineData;
 }
 """
 
@@ -761,16 +757,17 @@ function segHtml(segs){
 
 var tip=document.getElementById("tip");
 var tipHover=false;
+function rowHtml(r){
+  return "<div class='row'><span class='swatch' style='background:"+CL[r.idx]+"'></span>"+
+    "<span class='tname'>"+segHtml(DISP[r.name])+"</span>"+
+    "<span class='tenergy'>"+(r.e>=0?"+":"")+r.e.toFixed(3)+" eV</span></div>";
+}
 function fillTip(ef){
   var rows=[];
   names.forEach(function(n,i){if(!hidden[n])rows.push({name:n,idx:i,e:calcE(n,curMu,ef)});});
   rows.sort(function(a,b){return a.e-b.e;});
   var h="<div class='fe-tip__head'>E_F = "+ef.toFixed(3)+" eV</div>";
-  rows.forEach(function(r){
-    h+="<div class='row'><span class='swatch' style='background:"+CL[r.idx]+"'></span>"+
-      "<span class='tname'>"+segHtml(DISP[r.name])+"</span>"+
-      "<span class='tenergy'>"+(r.e>=0?"+":"")+r.e.toFixed(3)+" eV</span></div>";
-  });
+  rows.forEach(function(r){h+=rowHtml(r);});
   h+="<div class='fe-tip__foot'>共 "+rows.length+" 条 · 本征缺陷 · 300 K · 未含自由载流子</div>";
   tip.innerHTML=h;
 }
@@ -791,7 +788,12 @@ var hoverCapable=window.matchMedia("(hover:hover)").matches;
 var plotEl=cv.parentElement;
 plotEl.addEventListener("mousemove",function(ev){
   if(!hoverCapable||tipHover)return; // touch: no floating follow; inside the panel: let it scroll
-  var r=cv.getBoundingClientRect(),ef=xInv(ev.clientX-r.left);
+  var r=cv.getBoundingClientRect();
+  // Follow only while the pointer is over the canvas itself. Over the legend
+  // the panel must stay hidden so legend rows stay clickable; over the panel
+  // the tipHover guard above already applies.
+  if(ev.clientX<r.left||ev.clientX>r.right||ev.clientY<r.top||ev.clientY>r.bottom)return;
+  var ef=xInv(ev.clientX-r.left);
   if(ef<0||ef>BG)return;
   cursorEF=ef;
   if(curMu)drawFE(curMu);
@@ -818,12 +820,8 @@ if(!hoverCapable){
     var rows=[];
     names.forEach(function(n,i){if(!hidden[n])rows.push({name:n,idx:i,e:calcE(n,curMu,ef)});});
     rows.sort(function(a,b){return a.e-b.e;});
-    var top=rows.slice(0,5),h="<div class='fe-tip__head'>E_F = "+ef.toFixed(3)+" eV · 最低 5 条</div>";
-    top.forEach(function(r){
-      h+="<div class='row'><span class='swatch' style='background:"+CL[r.idx]+"'></span>"+
-        "<span class='tname'>"+segHtml(DISP[r.name])+"</span>"+
-        "<span class='tenergy'>"+(r.e>=0?"+":"")+r.e.toFixed(3)+" eV</span></div>";
-    });
+    var h="<div class='fe-tip__head'>E_F = "+ef.toFixed(3)+" eV · 最低 5 条</div>";
+    rows.slice(0,5).forEach(function(r){h+=rowHtml(r);});
     h+="<div class='fe-tip__foot'>共 "+rows.length+" 条 · 再次点击收起</div>";
     tip.innerHTML=h;tip.style.display="block";
     tip.style.left="8px";tip.style.top="8px";
@@ -910,7 +908,7 @@ Object.keys(CATS).forEach(function(base){
 });
 
 // Responsive sizing: each scientific card owns its native chart ratio.
-// On narrow displays the CSS grid stacks cards and the inspector moves below.
+// On narrow displays the CSS grid stacks the two cards.
 function layout(){
   var dpr=window.devicePixelRatio||1;
   var cpdCard=document.getElementById("cpdCard");
@@ -952,24 +950,6 @@ def _html_template(
     """Render the self-contained interactive HTML page."""
     js = json.dumps
 
-    cpd_hints = {
-        1: "Single chemical condition (no dragging)",
-        2: "Drag along the line to change chemical potentials",
-        3: "Drag inside the triangle to set chemical potentials",
-        4: "Drag inside the polygon to set chemical potentials",
-    }
-    cpd_hint = cpd_hints.get(n_vertices, "Drag to set chemical potentials")
-
-    # Per-vertex constraint text: which compounds pin this vertex.
-    # Unstable (impurity) dopant phases are intentionally NOT listed —
-    # the label stays uniform across doped and undoped systems.
-    constraint_parts: list[str] = []
-    for name, ph in zip(vertex_names, vertex_phases):
-        comp = " · ".join(_formula_html(p) for p in ph.get("competing", []))
-        if comp:
-            constraint_parts.append(f"顶点 {name}: {comp}（约束）")
-    constraint_html = "<br>".join(constraint_parts)
-
     # Compute impurity elements (in vertex_mu but not host vertex_elements)
     host_set = set(vertex_elements)
     impurity_set: set[str] = set()
@@ -991,13 +971,11 @@ def _html_template(
     )
 
     fe_canvas = _FE_CANVAS_JS.replace("{is_doped_str}", is_doped_str)
-    fe_canvas = fe_canvas.replace("{exo_json}", exo_json)
     fermi_js = _FERMI_JS.replace("{exo_json}", exo_json)
 
     return (
         _COMMON_HTML_HEAD.format(
             title=host_name, title_html=_formula_html(host_name),
-            cpd_hint=cpd_hint, constraint_html=constraint_html,
         )
         + "\n"
         + _COMMON_JS_DECLS.format(
