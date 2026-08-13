@@ -39,12 +39,12 @@ logger = logging.getLogger(__name__)
 from pathlib import Path
 from typing import Any
 
-# ── colour palette (stable, high-contrast) ─────────────────────────
+# ── colour palette (stable, color-blind-safe scientific series) ─────
 _COLORS: list[str] = [
-    "#e94560", "#0f3460", "#16c79a", "#f5a623", "#7c3aed", "#ec4899",
-    "#06b6d4", "#84cc16", "#f472b6", "#64748b", "#eab308", "#22c55e",
-    "#a855f7", "#38bdf8", "#fb923c", "#4ade80", "#2dd4bf", "#fbbf24",
-    "#c084fc", "#fb7185", "#34d399", "#facc15", "#818cf8", "#f97316",
+    "#0072B2", "#D55E00", "#CC79A7", "#009E73", "#56B4E9", "#E69F00",
+    "#6A5ACD", "#8C564B", "#17BECF", "#BCBD22", "#4C78A8", "#F58518",
+    "#54A24B", "#B279A2", "#72B7B2", "#E45756", "#79706E", "#FF9DA6",
+    "#9D755D", "#BAB0AC", "#59A14F", "#EDC948", "#AF7AA1", "#76B7B2",
 ]
 
 # ── elements whose defects are considered *doped* (vs intrinsic) ───
@@ -78,13 +78,16 @@ def _load_inputs(system_dir: Path) -> tuple[Any, Any]:
 
 def _extract_vertex_data(
     cpd: Any,
-) -> tuple[list[dict[str, float]], list[str], str, list[str]]:
-    """Return (vertex_mu, vertex_names, host_name, vertex_elements).
+) -> tuple[list[dict[str, float]], list[str], str, list[str], list[dict[str, list[str]]]]:
+    """Return (vertex_mu, vertex_names, host_name, vertex_elements, vertex_phases).
 
     *vertex_mu*: ``[{elem: μ, ...}]`` — ALL element chemical potentials per
                  cyclically-ordered vertex.
     *vertex_names*: vertex labels (e.g. ``["A", "C", "D", "B"]``).
     *vertex_elements*: ordered list of host elements (from CPD).
+    *vertex_phases*: per-vertex ``{"competing": [...], "impurity": [...]}``
+                 (the phases that pin this vertex / the dopant phases that
+                 are unstable at it).
     """
     rcp_raw: dict = cpd.rel_chem_pots
 
@@ -97,14 +100,34 @@ def _extract_vertex_data(
     # Collect per-vertex mu dicts — only keys with numeric chemical potentials
     _meta_keys = {"target", "chem_pot", "competing_phases", "impurity_phases"}
     def _mu_dict(v: Any) -> dict[str, float]:
+        if not isinstance(v, dict):
+            return {}
+        # target-vertices records nest μ under ``chem_pot``; the summary's
+        # rel_chem_pots are flat. Accept both.
+        src = v.get("chem_pot")
+        if isinstance(src, dict):
+            v = src
+        return {k: float(vv) for k, vv in v.items()
+                if k not in _meta_keys and isinstance(vv, (int, float))}
+
+    def _phase_list(v: Any, key: str) -> list[str]:
         if isinstance(v, dict):
-            return {k: float(vv) for k, vv in v.items()
-                    if k not in _meta_keys and isinstance(vv, (int, float))}
-        return {}
+            raw = v.get(key)
+            if isinstance(raw, list):
+                return [str(x) for x in raw if x is not None]
+        return []
+
     vert_names = [k for k, v in rcp_raw.items()
                   if isinstance(v, dict) and _mu_dict(v)]
     raw_vert_mu: list[dict[str, float]] = [
         _mu_dict(rcp_raw[vn]) for vn in vert_names
+    ]
+    vertex_phases: list[dict[str, list[str]]] = [
+        {
+            "competing": _phase_list(rcp_raw[vn], "competing_phases"),
+            "impurity": _phase_list(rcp_raw[vn], "impurity_phases"),
+        }
+        for vn in vert_names
     ]
 
     # Build 2D coordinates for cyclic sort
@@ -138,8 +161,9 @@ def _extract_vertex_data(
 
     vertex_mu = [raw_vert_mu[i] for i in order]
     vertex_names = [vert_names[i] for i in order]
+    vertex_phases = [vertex_phases[i] for i in order]
 
-    return vertex_mu, vertex_names, host_name, vertex_elements
+    return vertex_mu, vertex_names, host_name, vertex_elements, vertex_phases
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -189,6 +213,30 @@ def _sort_defect_names(defects: dict[str, Any]) -> list[str]:
 
 _SUBSCRIPT_TRANS = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
 _SUPERSCRIPT_TRANS = str.maketrans("0123456789+-", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻")
+
+
+def _dopant_elements(system_dir: Path) -> list[str]:
+    """Return dopant elements from ``plan.yaml`` (e.g. ``["Bi"]``).
+
+    Empty when the plan is absent or has no ``dopant_elements``.  These
+    elements mark exogenous defects (``Bi_*``) that must be excluded from
+    the intrinsic charge-neutrality Fermi-level balance.
+    """
+    import yaml as _yaml
+
+    plan = system_dir / "plan.yaml"
+    if not plan.is_file():
+        return []
+    try:
+        loaded = _yaml.safe_load(plan.read_text())
+    except Exception:
+        return []
+    if not isinstance(loaded, dict):
+        return []
+    dopants = loaded.get("dopant_elements")
+    if not isinstance(dopants, list):
+        return []
+    return [str(e) for e in dopants]
 
 
 def _formula_subscripts(text: str) -> str:
@@ -349,6 +397,7 @@ def _cpd_canvas_js(
     poly_2d: list[list[float]],
     vertex_mu: list[dict[str, float]],
     vertex_names: list[str],
+    vertex_phases: list[dict[str, list[str]]],
     ax0: str,
     ax1: str,
     a0_range: tuple[float, float],
@@ -362,8 +411,18 @@ var cc = document.getElementById("cpd"), cctx = cc.getContext("2d");
 var cW = 300, cH = 300, cP = {{l:35,r:10,t:20,b:25}};
 var a0R = [{a0_range[0]},{a0_range[1]}], a1R = [{a1_range[0]},{a1_range[1]}];
 var POLY = {js(poly_2d)};
-var VNAMES = {js(vertex_names)};
+var VPHASES = {js(vertex_phases)};
 var VERTEX_MU = {js(vertex_mu)};
+var selectionMode = "区域内插值";
+
+function selectedVertex(mu){{
+  var best=-1,dist=Infinity;
+  VERTEX_MU.forEach(function(vm,i){{
+    var dx=cX(vm["{ax0}"])-cX(mu["{ax0}"]),dy=cY(vm["{ax1}"])-cY(mu["{ax1}"]);
+    var d=Math.sqrt(dx*dx+dy*dy);if(d<dist){{dist=d;best=i;}}
+  }});
+  return dist<=14?best:-1;
+}}
 
 function cX(v){{return cP.l+(v-a0R[0])/(a0R[1]-a0R[0])*(cW-cP.l-cP.r);}}
 function cY(v){{return cP.t+(1-(v-a1R[0])/(a1R[1]-a1R[0]))*(cH-cP.t-cP.b);}}
@@ -412,21 +471,20 @@ function drawCPD(mu){{
   cctx.clearRect(0,0,cW,cH);
   var x0=cX(POLY[0][0]),y0=cY(POLY[0][1]);
   var x1=cX(POLY[1][0]),y1=cY(POLY[1][1]);
-  cctx.strokeStyle="#d63031";cctx.lineWidth=3;cctx.lineCap="round";
+  cctx.strokeStyle="#64748b";cctx.lineWidth=2.5;cctx.lineCap="round";
   cctx.beginPath();cctx.moveTo(x0,y0);cctx.lineTo(x1,y1);cctx.stroke();
-  cctx.fillStyle="#d63031";cctx.font="bold 12px Arial";
-  cctx.fillText(VNAMES[0],x0-10,y0-10);cctx.fillText(VNAMES[1],x1+10,y1-10);
+  [[x0,y0],[x1,y1]].forEach(function(p,i){{
+    cctx.fillStyle="#334155";cctx.beginPath();cctx.arc(p[0],p[1],3.5,0,2*Math.PI);cctx.fill();
+    cctx.font="600 11px Arial";cctx.textAlign="left";cctx.fillText("V"+(i+1),p[0]+6,p[1]-6);
+  }});
   if(mu){{
-    var t=(mu["{ax0}"]-POLY[0][0])/(POLY[1][0]-POLY[0][0]);
     var mx=cX(mu["{ax0}"]),my=cY(mu["{ax1}"]);
     cctx.beginPath();cctx.arc(mx,my,6,0,2*Math.PI);
-    cctx.fillStyle="#16c79a";cctx.fill();
-    cctx.strokeStyle="#fff";cctx.lineWidth=2;cctx.stroke();
+    cctx.fillStyle="#169b78";cctx.fill();cctx.strokeStyle="#fff";cctx.lineWidth=2;cctx.stroke();
   }}
-  cctx.fillStyle="#555";cctx.font="11px Arial";cctx.textAlign="center";
-  cctx.fillText("μ_{ax0} (eV)",cW/2,cH-2);
-  cctx.save();cctx.translate(10,cH/2);cctx.rotate(-Math.PI/2);
-  cctx.fillText("μ_{ax1} (eV)",0,0);cctx.restore();
+  cctx.fillStyle="#657084";cctx.font="11px Arial";cctx.textAlign="center";
+  cctx.fillText("μ_{ax0} (eV)",cW/2,cH-4);
+  cctx.save();cctx.translate(13,cH/2);cctx.rotate(-Math.PI/2);cctx.fillText("μ_{ax1} (eV)",0,0);cctx.restore();
 }}
 function ptrT(e){{
   var r=cc.getBoundingClientRect();
@@ -438,8 +496,8 @@ function ptrT(e){{
   var t=((cx-x0)*dx+(cy-y0)*dy)/len2;
   return Math.max(0,Math.min(1,t));
 }}
-cc.addEventListener("pointerdown",function(e){{cc.setPointerCapture(e.pointerId);var t=ptrT(e);update(getMu(t));}});
-cc.addEventListener("pointermove",function(e){{if(!e.buttons)return;var t=ptrT(e);update(getMu(t));}});
+cc.addEventListener("pointerdown",function(e){{cc.setPointerCapture(e.pointerId);var t=ptrT(e);selectionMode="边界插值";update(getMu(t));}});
+cc.addEventListener("pointermove",function(e){{if(!e.buttons)return;var t=ptrT(e);selectionMode="边界插值";update(getMu(t));}});
 var curMu=getMu(0.5);
 """
 
@@ -461,29 +519,33 @@ function getMu(px,py){{
   for(var k=0;k<TRIS.length;k++){{
     var bc=BARYS[k](px,py);
     if(bc[3]){{
-      var mu={{}};var t=TRIS[k];var v0=VERTEX_MU[t[0]],v1=VERTEX_MU[t[1]],v2=VERTEX_MU[t[2]];
+      selectionMode="区域内插值";
+      var mu={{}},t=TRIS[k],v0=VERTEX_MU[t[0]],v1=VERTEX_MU[t[1]],v2=VERTEX_MU[t[2]];
       for(var e in v0){{mu[e]=bc[0]*v0[e]+bc[1]*v1[e]+bc[2]*v2[e];}}
       return mu;
     }}
   }}
-  var e=projectToEdge(px,py,EDGES);
-  var mu={{}},v0=VERTEX_MU[e.i],v1=VERTEX_MU[e.j];
-  for(var k in v0){{mu[k]=v0[k]+e.t*(v1[k]-v0[k]);}}
+  selectionMode="边界插值";
+  var edge=projectToEdge(px,py,EDGES),mu={{}},v0=VERTEX_MU[edge.i],v1=VERTEX_MU[edge.j];
+  for(var e in v0){{mu[e]=v0[e]+edge.t*(v1[e]-v0[e]);}}
   return mu;
 }}
 function drawCPD(mu){{
   cctx.clearRect(0,0,cW,cH);
-  cctx.strokeStyle="#ccc";cctx.lineWidth=0.5;cctx.fillStyle="#666";cctx.font="11px Arial";cctx.textAlign="center";
-  for(var i=0;i<=4;i++){{var v=a0R[0]+i/4*(a0R[1]-a0R[0]);cctx.beginPath();cctx.moveTo(cX(v),cP.t);cctx.lineTo(cX(v),cH-cP.b);cctx.stroke();cctx.fillText(v.toFixed(2),cX(v),cH-cP.b+12);}}
+  cctx.strokeStyle="#e9edf2";cctx.lineWidth=1;cctx.fillStyle="#718096";cctx.font="10px Arial";cctx.textAlign="center";
+  for(var i=0;i<=4;i++){{var v=a0R[0]+i/4*(a0R[1]-a0R[0]);cctx.beginPath();cctx.moveTo(cX(v),cP.t);cctx.lineTo(cX(v),cH-cP.b);cctx.stroke();cctx.fillText(v.toFixed(2),cX(v),cH-cP.b+13);}}
   cctx.textAlign="right";
-  for(var i=0;i<=4;i++){{var v=a1R[0]+i/4*(a1R[1]-a1R[0]);cctx.beginPath();cctx.moveTo(cP.l,cY(v));cctx.lineTo(cW-cP.r,cY(v));cctx.stroke();cctx.fillText(v.toFixed(2),cP.l-4,cY(v)+3);}}
-  cctx.strokeStyle="#d63031";cctx.lineWidth=2;cctx.beginPath();
-  POLY.forEach(function(v,i){{i==0?cctx.moveTo(cX(v[0]),cY(v[1])):cctx.lineTo(cX(v[0]),cY(v[1]));}});
-  cctx.closePath();cctx.stroke();cctx.fillStyle="rgba(214,48,49,0.08)";cctx.fill();
-  POLY.forEach(function(v,i){{cctx.fillStyle="#d63031";cctx.font="bold 13px Arial";cctx.fillText(VNAMES[i],cX(v[0])+5,cY(v[1])-5);}});
-  if(mu){{cctx.beginPath();cctx.arc(cX(mu["{ax0}"]),cY(mu["{ax1}"]),6,0,2*Math.PI);cctx.fillStyle="#16c79a";cctx.fill();cctx.strokeStyle="#fff";cctx.lineWidth=2;cctx.stroke();}}
-  cctx.fillStyle="#555";cctx.font="11px Arial";cctx.textAlign="center";cctx.fillText("μ_{ax0} (eV)",cW/2,cH-2);
-  cctx.save();cctx.translate(10,cH/2);cctx.rotate(-Math.PI/2);cctx.fillText("μ_{ax1} (eV)",0,0);cctx.restore();
+  for(var i=0;i<=4;i++){{var v=a1R[0]+i/4*(a1R[1]-a1R[0]);cctx.beginPath();cctx.moveTo(cP.l,cY(v));cctx.lineTo(cW-cP.r,cY(v));cctx.stroke();cctx.fillText(v.toFixed(2),cP.l-5,cY(v)+3);}}
+  cctx.strokeStyle="#475569";cctx.lineWidth=2;cctx.beginPath();
+  POLY.forEach(function(v,i){{i===0?cctx.moveTo(cX(v[0]),cY(v[1])):cctx.lineTo(cX(v[0]),cY(v[1]));}});
+  cctx.closePath();cctx.stroke();cctx.fillStyle="rgba(22,155,120,0.09)";cctx.fill();
+  POLY.forEach(function(v,i){{
+    var x=cX(v[0]),y=cY(v[1]);cctx.fillStyle="#334155";cctx.beginPath();cctx.arc(x,y,3.5,0,2*Math.PI);cctx.fill();
+    cctx.font="600 11px Arial";cctx.textAlign="left";cctx.fillText("V"+(i+1),x+6,y-6);
+  }});
+  if(mu){{var mx=cX(mu["{ax0}"]),my=cY(mu["{ax1}"]);cctx.beginPath();cctx.arc(mx,my,6,0,2*Math.PI);cctx.fillStyle="#169b78";cctx.fill();cctx.strokeStyle="#fff";cctx.lineWidth=2;cctx.stroke();}}
+  cctx.fillStyle="#657084";cctx.font="11px Arial";cctx.textAlign="center";cctx.fillText("μ_{ax0} (eV)",cW/2,cH-4);
+  cctx.save();cctx.translate(13,cH/2);cctx.rotate(-Math.PI/2);cctx.fillText("μ_{ax1} (eV)",0,0);cctx.restore();
 }}
 function ptrPos(e){{var r=cc.getBoundingClientRect();return[invX(e.clientX-r.left),invY(e.clientY-r.top)];}}
 cc.addEventListener("pointerdown",function(e){{cc.setPointerCapture(e.pointerId);var p=ptrPos(e);var mu=getMu(p[0],p[1]);if(mu)update(mu);}});
@@ -504,41 +566,54 @@ _COMMON_HTML_HEAD = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{title} Formation Energy</title>
 <style>
-html,body{{height:100%;overflow:hidden;font-family:Arial,sans-serif;margin:0;padding:0;background:#fff;color:#222}}
-body{{padding:10px;box-sizing:border-box}}
-h2{{margin:0 0 8px;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
-.panel{{display:flex;gap:12px;align-items:flex-start}}
-.col{{display:flex;flex-direction:column;gap:8px;min-width:0}}
-canvas{{background:#f5f5f5;border-radius:8px;display:block}}
-.leg{{display:flex;flex-wrap:wrap;gap:4px;margin:6px 0}}
-.leg>div{{display:flex;align-items:center;gap:3px;font-size:12px;cursor:pointer;padding:2px 6px;border-radius:3px}}
-.leg>div:hover{{background:#eee}}
-.info{{font-size:12px;color:#666;margin:3px 0}}
-.mupanel{{font-size:12px;color:#444;min-width:260px}}
-.mupanel-title{{font-weight:bold;margin:2px 0 4px;color:#333}}
-.murow{{display:grid;grid-template-columns:30px 48px 1fr 48px;gap:6px;align-items:center;margin:3px 0}}
-.muel{{font-weight:bold;color:#333}}
-.mumin,.mumax{{font-family:monospace;font-size:11px;color:#888;text-align:right}}
-.mubar{{position:relative;height:6px;background:#eee;border-radius:3px}}
-.mucur{{position:absolute;top:-2px;width:10px;height:10px;border-radius:50%;background:#16c79a;margin-left:-5px}}
-.csub{{font-size:0.72em;vertical-align:sub}}
-.csup{{font-size:0.72em;vertical-align:super}}
-#tooltip{{position:absolute;background:rgba(245,245,245,0.95);border:1px solid #d63031;border-radius:4px;padding:6px 10px;font-size:12px;pointer-events:none;display:none;z-index:10;color:#333}}
+:root{{--ink:#172033;--muted:#657084;--line:#dbe1e9;--grid:#e9edf2;--card:#fff;--canvas:#fbfcfe;--accent:#169b78;--accent-soft:#e7f6f1}}
+*{{box-sizing:border-box}}
+html,body{{min-height:100%;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;margin:0;background:#f4f6f9;color:var(--ink)}}
+body{{padding:14px}}
+h2{{margin:0;font-size:17px;letter-spacing:-.01em}}
+.report-head{{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin:0 0 12px}}
+.report-kicker{{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--accent)}}
+.report-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:start}}
+.report-card{{min-width:0;background:var(--card);border:1px solid var(--line);border-radius:10px;box-shadow:0 1px 2px rgba(15,23,42,.04);overflow:hidden}}
+.report-card__head{{display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:11px 13px 9px;border-bottom:1px solid var(--line)}}
+.report-card__head h3{{margin:0;font-size:13px;letter-spacing:.01em}}
+.report-card__hint{{font-size:11px;color:var(--muted)}}
+.report-card__body{{padding:12px}}
+.cpd-card__body{{display:flex;flex-direction:column;align-items:center;gap:10px}}
+canvas{{display:block;background:var(--canvas);border:1px solid var(--line);border-radius:7px}}
+.selection-card{{width:100%;border:1px solid var(--line);border-radius:7px;background:#f8fafc;padding:10px 11px}}
+.selection-card__head{{display:flex;justify-content:space-between;gap:8px;align-items:baseline;margin-bottom:7px}}
+.selection-card__title{{font-size:12px;font-weight:700}}
+.selection-card__state{{font-size:11px;color:var(--accent);font-weight:650}}
+.selection-card__constraints{{font-size:12px;line-height:1.45;color:#39465b;min-height:18px}}
+.selection-card__mu{{margin:7px 0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;line-height:1.45;color:#4c596d;word-break:break-word}}
+.mupanel{{font-size:12px;color:#444}}
+.mupanel-title{{font-size:11px;font-weight:700;color:var(--muted);margin:2px 0 5px;letter-spacing:.02em}}
+.murow{{display:grid;grid-template-columns:30px 42px 1fr 42px;gap:6px;align-items:center;margin:3px 0}}
+.muel{{font-weight:700;color:#334155}}.mumin,.mumax{{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:10px;color:#7b8797;text-align:right}}
+.mubar{{position:relative;height:5px;background:#dfe6ee;border-radius:99px}}.mucur{{position:absolute;top:-3px;width:11px;height:11px;border-radius:50%;background:var(--accent);margin-left:-5px;box-shadow:0 0 0 2px #fff}}
+.fe-workspace{{display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:12px;align-items:stretch}}
+.fe-plot{{min-width:0}}
+.fe-inspector{{min-width:0;height:100%;min-height:340px;display:flex;flex-direction:column;border:1px solid var(--line);border-radius:7px;background:#f8fafc;overflow:hidden}}
+.fe-inspector__head{{padding:10px 10px 8px;border-bottom:1px solid var(--line)}}
+.fe-inspector__title{{font-size:12px;font-weight:700}}.fe-inspector__state{{margin-top:2px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;color:var(--accent)}}
+.fe-inspector__assumption{{margin-top:5px;font-size:10px;color:var(--muted);line-height:1.35}}
+.fe-inspector__rows{{overflow:auto;flex:1;padding:4px 6px}}
+.fe-inspector__row{{display:grid;grid-template-columns:9px minmax(0,1fr) auto;gap:6px;align-items:center;padding:5px 3px;border-bottom:1px solid #e7ebf0;font-size:11px}}
+.fe-inspector__row:last-child{{border-bottom:0}}.fe-inspector__swatch{{width:8px;height:8px;border-radius:50%}}.fe-inspector__name{{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}.fe-inspector__energy{{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#4c596d;font-size:10px}}
+.leg{{display:flex;flex-wrap:wrap;gap:5px;margin-top:10px}}.leg-group{{display:flex;flex-wrap:wrap;gap:4px;min-width:0;margin:2px 0;padding:2px 4px;border-left:2px solid #dfe6ee}}.leg>div{{display:flex;align-items:center;gap:3px;font-size:11px;cursor:pointer;padding:2px 5px;border-radius:3px}}.leg>div:hover{{background:#eef3f6}}.leg-cat{{font-size:10px!important;font-weight:700;color:var(--accent);flex-basis:100%}}.leg-cat:hover{{background:var(--accent-soft)!important}}
+.csub{{font-size:.72em;vertical-align:sub}}.csup{{font-size:.72em;vertical-align:super}}
+@media(max-width:980px){{.report-grid{{grid-template-columns:1fr}}.fe-workspace{{grid-template-columns:1fr}}.fe-inspector{{height:320px;min-height:0}}}}
+@media(max-width:560px){{body{{padding:8px}}.report-head{{align-items:flex-start;flex-direction:column}}.report-card__body{{padding:8px}}}}
 </style></head><body>
-<h2>{title_html} — Formation Energy</h2>
-<div class="panel">
-<div class="col">
-<div class="info">{cpd_hint}</div>
-<div id="cpdWrap"><canvas id="cpd" width="420" height="420"></canvas></div>
-<div class="info" id="muinfo">&mu; = &mdash; eV</div>
-<div class="mupanel"><div class="mupanel-title">化学势范围 &mu; (eV)</div><div id="murows"></div></div>
-</div>
-<div class="col" style="flex:1">
-<div id="cvWrap"><canvas id="cv" width="800" height="520"></canvas></div>
-<div class="leg" id="leg"></div>
-</div>
-</div>
-<div id="tooltip"></div>
+<header class="report-head"><h2>{title_html}</h2><span class="report-kicker">Defect thermodynamics</span></header>
+<main class="report-grid">
+<section class="report-card" id="cpdCard"><header class="report-card__head"><h3>化学势稳定区</h3><span class="report-card__hint">拖动或点击选择化学条件</span></header><div class="report-card__body cpd-card__body">
+<canvas id="cpd" width="420" height="420"></canvas>
+<section class="selection-card" aria-live="polite"><div class="selection-card__head"><span class="selection-card__title">当前化学条件</span><span id="selection-state" class="selection-card__state">区域内插值</span></div><div id="selection-constraints" class="selection-card__constraints"></div><div id="selection-mu" class="selection-card__mu"></div><div class="mupanel"><div class="mupanel-title">化学势范围 μ (eV)</div><div id="murows"></div></div></section>
+</div></section>
+<section class="report-card" id="feCard"><header class="report-card__head"><h3>缺陷形成能</h3><span class="report-card__hint">移动查询 · 点击锁定 E<sub>F</sub></span></header><div class="report-card__body"><div class="fe-workspace"><div class="fe-plot"><canvas id="cv" width="800" height="520"></canvas><div class="leg" id="leg"></div></div><aside class="fe-inspector" aria-live="polite"><div class="fe-inspector__head"><div class="fe-inspector__title">形成能检查器</div><div id="inspector-state" class="fe-inspector__state">移动图面查询</div><div class="fe-inspector__assumption">本征缺陷 · 300 K · 未含自由载流子<br>仅列当前可见缺陷，按 E<sub>f</sub> 升序</div></div><div id="inspector-rows" class="fe-inspector__rows"></div></aside></div></div></section>
+</main>
 <script>"""
 
 _COMMON_JS_DECLS = """var DEF = {def_json};
@@ -553,137 +628,122 @@ var hidden = {{}}; names.forEach(function(n){{hidden[n]=false;}});
 
 _FE_CANVAS_JS = """
 var cv=document.getElementById("cv"), cx=cv.getContext("2d");
-var W=800, H=520, P={l:60,r:160,t:20,b:40};
+var W=800, H=520, P={l:54,r:16,t:22,b:42};
 var minY=-10, maxY=10;
 var cursorEF=null;
-
-// Typeset name segments: [style,text] with style n=normal, s=subscript,
-// p=superscript. Unicode has no subscript Latin letters, so sub/sup are
-// drawn with a smaller font at an offset baseline.
-function segWidth(segs){
-  var w=0;
-  segs.forEach(function(seg){
-    cx.font=(seg[0]==="n"?"12px":"9px")+" Arial";
-    w+=cx.measureText(seg[1]).width;
-  });
-  cx.font="12px Arial";
-  return w;
-}
-function drawSegs(x,y,segs){
-  var w=0;
-  segs.forEach(function(seg){
-    cx.font=(seg[0]==="n"?"12px":"9px")+" Arial";
-    var dy=(seg[0]==="s"?3:(seg[0]==="p"?-3:0));
-    cx.fillText(seg[1],x+w,y+dy);
-    w+=cx.measureText(seg[1]).width;
-  });
-  cx.font="12px Arial";
-}
 
 function xPx(v){return P.l+(v/BG)*(W-P.l-P.r);}
 function yPx(v){return P.t+(1-(v-minY)/(maxY-minY))*(H-P.t-P.b);}
 function xInv(x){return (x-P.l)/(W-P.l-P.r)*BG;}
 
-// Compute global y-range from all vertices (E_F=0 and E_F=BG)
+// Keep the y extent stable while legend visibility changes: display state
+// must not rescale the scientific frame of reference.
 function calcGlobalYRange(){
   var allE=[];
   VERTEX_MU.forEach(function(vm){
-    var mu={};
-    for(var e in vm) mu[e]=vm[e];
     names.forEach(function(n){
-      if(hidden[n]) return;
-      var ms=0, d=DEF[n];
-      for(var e in d.delta) if(mu[e]!==undefined) ms-=d.delta[e]*mu[e];
+      var ms=0,d=DEF[n];
+      for(var e in d.delta) if(vm[e]!==undefined) ms-=d.delta[e]*vm[e];
       d.charges.forEach(function(c){allE.push(c.e0+ms);allE.push(c.e0+c.q*BG+ms);});
     });
   });
-  if(allE.length==0){minY=-2;maxY=6;return;}
-  var dm=Math.min.apply(null,allE), dx=Math.max.apply(null,allE);
-  var pad=Math.max(0.5,(dx-dm)*0.1);
-  minY=Math.floor(dm-pad);maxY=Math.ceil(dx+pad);
-  // Round to nice multiples
-  var step=Math.pow(10,Math.floor(Math.log10((maxY-minY)/8)));
-  minY=Math.floor(minY/step)*step;maxY=Math.ceil(maxY/step)*step;
+  if(allE.length===0){minY=-2;maxY=6;return;}
+  var lo=Math.min.apply(null,allE),hi=Math.max.apply(null,allE),pad=Math.max(.5,(hi-lo)*.1);
+  minY=Math.floor(lo-pad);maxY=Math.ceil(hi+pad);
 }
 calcGlobalYRange();
 
 function calcE(name,mu,eF){
   var d=DEF[name],me=Infinity,ms=0;
-  for(var e in d.delta){if(mu[e]!==undefined) ms-=d.delta[e]*mu[e];}
+  for(var e in d.delta) if(mu[e]!==undefined) ms-=d.delta[e]*mu[e];
   d.charges.forEach(function(c){var v=c.e0+c.q*eF+ms;if(v<me)me=v;});
   return me;
 }
 
 function drawFE(mu){
   cx.clearRect(0,0,W,H);
-
-  // Grid & axes
-  cx.strokeStyle="#ddd";cx.lineWidth=1;
-  for(var i=0;i<=5;i++){var x=xPx(i*BG/5);cx.beginPath();cx.moveTo(x,P.t);cx.lineTo(x,H-P.b);cx.stroke();cx.fillStyle="#666";cx.font="12px Arial";cx.textAlign="center";cx.fillText((i*BG/5).toFixed(1),x,H-P.b+18);}
+  cx.strokeStyle="#e9edf2";cx.lineWidth=1;cx.fillStyle="#657084";cx.font="11px Arial";
+  for(var i=0;i<=5;i++){
+    var x=xPx(i*BG/5);cx.beginPath();cx.moveTo(x,P.t);cx.lineTo(x,H-P.b);cx.stroke();
+    cx.textAlign="center";cx.fillText((i*BG/5).toFixed(1),x,H-P.b+18);
+  }
   var step=(maxY-minY)/8;
-  for(var i=0;i<=8;i++){var y=yPx(minY+i*step);cx.beginPath();cx.moveTo(P.l,y);cx.lineTo(W-P.r,y);cx.stroke();cx.fillStyle="#666";cx.textAlign="right";cx.fillText((minY+i*step).toFixed(1),P.l-8,y+4);}
-  cx.strokeStyle="#bbb";cx.lineWidth=1.5;
-  cx.beginPath();cx.moveTo(P.l,P.t);cx.lineTo(P.l,H-P.b);cx.lineTo(W-P.r,H-P.b);cx.stroke();
-  cx.fillStyle="#555";cx.textAlign="center";cx.fillText("E - E_VBM (eV)",W/2,H-2);
-  cx.save();cx.translate(14,H/2);cx.rotate(-Math.PI/2);cx.fillText("Formation Energy (eV)",0,0);cx.restore();
-
-  // Sort defects by formation energy at cursor E_F (default BG)
-  var orderEF=(cursorEF!==null)?cursorEF:BG;
-  var sorted=[];
-  names.forEach(function(n,i){
-    if(!hidden[n]) sorted.push({name:n,idx:i,ef:calcE(n,mu,orderEF)});
-  });
-  sorted.sort(function(a,b){return b.ef-a.ef;});
-
-  // Update legend order
-  var leg=document.getElementById("leg");
-  sorted.forEach(function(s,i){
-    var div=Array.from(leg.children).filter(function(d){return d.getAttribute("data-name")===s.name;})[0];
-    if(div) leg.appendChild(div);
-  });
+  for(var j=0;j<=8;j++){
+    var y=yPx(minY+j*step);cx.beginPath();cx.moveTo(P.l,y);cx.lineTo(W-P.r,y);cx.stroke();
+    cx.textAlign="right";cx.fillText((minY+j*step).toFixed(1),P.l-7,y+4);
+  }
+  cx.strokeStyle="#94a3b8";cx.lineWidth=1.25;cx.beginPath();cx.moveTo(P.l,P.t);cx.lineTo(P.l,H-P.b);cx.lineTo(W-P.r,H-P.b);cx.stroke();
+  cx.fillStyle="#475569";cx.textAlign="center";cx.fillText("E − E_VBM (eV)",W/2,H-5);
+  cx.save();cx.translate(14,H/2);cx.rotate(-Math.PI/2);cx.fillText("Formation energy E_f (eV)",0,0);cx.restore();
 
   var lineData=[];
-  sorted.forEach(function(s,si){
-    var n=s.name, i=s.idx;
-    cx.strokeStyle=CL[i];cx.lineWidth=2;
-    var isDoped={is_doped_str};
-    cx.setLineDash(isDoped?[8,4]:[]);
-    cx.beginPath();var f=true;var pts=[];
-    for(var j=0;j<nEF;j++){
-      var ef=j*BG/(nEF-1),e=calcE(n,mu,ef),x=xPx(ef),y=yPx(e);
+  names.forEach(function(n,i){
+    if(hidden[n])return;
+    cx.globalAlpha=.76;cx.strokeStyle=CL[i];cx.lineWidth=1.65;
+    var isDoped={is_doped_str};cx.setLineDash(isDoped?[6,3]:[]);
+    cx.beginPath();var first=true,pts=[];
+    for(var k=0;k<nEF;k++){
+      var ef=k*BG/(nEF-1),e=calcE(n,mu,ef),x=xPx(ef),y=yPx(e);
       if(isNaN(y)||y<P.t||y>H-P.b)continue;
       pts.push({ef:ef,e:e,x:x,y:y});
-      if(f){cx.moveTo(x,y);f=false;}else cx.lineTo(x,y);
+      if(first){cx.moveTo(x,y);first=false;}else cx.lineTo(x,y);
     }
-    cx.stroke();cx.setLineDash([]);
+    cx.stroke();cx.setLineDash([]);cx.globalAlpha=1;
     lineData.push({name:n,idx:i,pts:pts});
   });
-
-  // Right-edge labels: always sorted by formation energy at BG
-  var rightSorted=[];
-  names.forEach(function(n,i){
-    if(!hidden[n]) rightSorted.push({name:n,idx:i,ef:calcE(n,mu,BG)});
-  });
-  rightSorted.sort(function(a,b){return b.ef-a.ef;});
-  rightSorted.forEach(function(s){
-    cx.fillStyle=CL[s.idx];cx.textAlign="left";
-    var nx=W-P.r+6, ny=yPx(s.ef);
-    drawSegs(nx,ny,DISP[s.name]);
-    cx.font="12px Arial";
-    cx.fillText((s.ef>=0?"+":"")+s.ef.toFixed(2)+"eV",nx+segWidth(DISP[s.name])+5,ny);
-  });
-
-  // Vertical cursor line
   if(cursorEF!==null){
-    cx.strokeStyle="rgba(0,0,0,0.3)";cx.lineWidth=1;cx.setLineDash([4,4]);
-    cx.beginPath();cx.moveTo(xPx(cursorEF),P.t);cx.lineTo(xPx(cursorEF),H-P.b);cx.stroke();
-    cx.setLineDash([]);
+    cx.strokeStyle="rgba(22,155,120,.55)";cx.lineWidth=1;cx.setLineDash([4,4]);
+    cx.beginPath();cx.moveTo(xPx(cursorEF),P.t);cx.lineTo(xPx(cursorEF),H-P.b);cx.stroke();cx.setLineDash([]);
   }
-
+  drawFermi(mu);
   cx.storedLines=lineData;
-  cx.fillStyle="#333";cx.textAlign="left";cx.font="13px Arial";
-  Object.keys(mu).forEach(function(k,i){cx.fillText(k+" = "+mu[k].toFixed(4)+" eV",P.l+10,P.t+18+16*i);});
 }
+"""
+
+_FERMI_JS = """
+// Intrinsic-defect charge-neutrality: only defects whose name does NOT
+// start with an exogenous (dopant) element prefix enter the balance.
+var EXO = {exo_json};
+var KT = 0.0259;
+function isIntrinsic(n){{
+  for(var i=0;i<EXO.length;i++) if(n.indexOf(EXO[i]+"_")===0) return false;
+  return true;
+}}
+function calcFermi(mu){{
+  var best=null, bestQ=Infinity;
+  for(var j=0;j<=400;j++){{
+    var ef=j*BG/400;
+    var qs=0, ws=0;
+    names.forEach(function(n){{
+      // Display hiding (legend click) must NOT change the physics:
+      // the charge-neutrality level uses ALL intrinsic defects.
+      if(!isIntrinsic(n)) return;
+      var d=DEF[n], ms=0;
+      for(var e in d.delta) if(mu[e]!==undefined) ms-=d.delta[e]*mu[e];
+      d.charges.forEach(function(c){{
+        var E=c.e0+c.q*ef+ms;
+        var w=Math.exp(-Math.max(E,-8)/KT);
+        qs+=c.q*w; ws+=w;
+      }});
+    }});
+    var qn=(ws>0)?qs/ws:0;
+    if(Math.abs(qn)<Math.abs(bestQ)){{bestQ=qn;best=ef;}}
+  }}
+  return best;
+}}
+function drawFermi(mu){{
+  var ef=calcFermi(mu);
+  if(ef===null) return;
+  var x=xPx(ef),label="E_F="+ef.toFixed(2)+" eV (电荷中性)";
+  cx.strokeStyle="#16c79a";cx.lineWidth=2;cx.setLineDash([]);
+  cx.beginPath();cx.moveTo(x,P.t);cx.lineTo(x,H-P.b);cx.stroke();
+  cx.fillStyle="#16c79a";cx.font="bold 12px Arial";
+  // Anchor to the plot interior. Near the right edge, paint leftward so the
+  // physical E_F annotation is never clipped by the canvas boundary.
+  var gap=6,w=cx.measureText(label).width;
+  if(x+gap+w>W-P.r){{cx.textAlign="right";cx.fillText(label,x-gap,P.t+14);}}
+  else{{cx.textAlign="left";cx.fillText(label,x+gap,P.t+14);}}
+}}
 """
 
 _COMMON_JS_FOOTER = """
@@ -697,25 +757,44 @@ function segHtml(segs){
   return h;
 }
 
-var tip=document.getElementById("tooltip");
-cv.addEventListener("mousemove",function(ev){
-  var r=cv.getBoundingClientRect();var x=ev.clientX-r.left;var ef=xInv(x);
-  cursorEF=(ef>=0&&ef<=BG)?ef:null;
-  if(curMu) drawFE(curMu);
-  if(cursorEF===null){tip.style.display="none";return;}
-  var lines=cx.storedLines;if(!lines||lines.length==0){tip.style.display="none";return;}
-  var html="<b>E-E<sub>VBM</sub> = "+ef.toFixed(3)+" eV</b><br>";
-  lines.forEach(function(ld){
-    if(ld.pts.length<2)return;var lo=0,hi=ld.pts.length-1;
-    while(hi-lo>1){var md=(lo+hi)>>1;if(ld.pts[md].ef<=ef)lo=md;else hi=md;}
-    var p0=ld.pts[lo],p1=ld.pts[hi];
-    if(p1.ef-p0.ef<1e-10)return;
-    var t=(ef-p0.ef)/(p1.ef-p0.ef);var e=p0.e+(p1.e-p0.e)*t;
-    html+="<span style='color:"+CL[ld.idx]+"'>"+segHtml(DISP[ld.name])+": "+(e>=0?"+":"")+e.toFixed(3)+" eV</span><br>";
+var pinnedEF=null;
+function renderInspector(ef,pinned){
+  if(ef===null||!curMu)return;
+  var rows=[];
+  names.forEach(function(n,i){if(!hidden[n])rows.push({name:n,idx:i,e:calcE(n,curMu,ef)});});
+  rows.sort(function(a,b){return a.e-b.e;});
+  var box=document.getElementById("inspector-rows");box.innerHTML="";
+  rows.forEach(function(r){
+    var row=document.createElement("div");row.className="fe-inspector__row";
+    row.innerHTML="<span class='fe-inspector__swatch' style='background:"+CL[r.idx]+"'></span>"+
+      "<span class='fe-inspector__name'>"+segHtml(DISP[r.name])+"</span>"+
+      "<span class='fe-inspector__energy'>"+(r.e>=0?"+":"")+r.e.toFixed(3)+" eV</span>";
+    box.appendChild(row);
   });
-  tip.innerHTML=html;tip.style.display="block";tip.style.left=(x+15)+"px";tip.style.top=Math.max(5,ev.clientY-r.top-10)+"px";
+  document.getElementById("inspector-state").textContent=
+    (pinned?"已锁定 · ":"查询 · ")+"E_F = "+ef.toFixed(3)+" eV · "+rows.length+" 条";
+}
+function setInspection(ef,pinned){
+  cursorEF=ef;
+  if(curMu)drawFE(curMu);
+  renderInspector(ef,pinned);
+}
+cv.addEventListener("mousemove",function(ev){
+  if(pinnedEF!==null)return;
+  var r=cv.getBoundingClientRect(),ef=xInv(ev.clientX-r.left);
+  if(ef>=0&&ef<=BG)setInspection(ef,false);
 });
-cv.addEventListener("mouseleave",function(){tip.style.display="none";cursorEF=null;if(curMu) drawFE(curMu);});
+cv.addEventListener("click",function(ev){
+  var r=cv.getBoundingClientRect(),ef=xInv(ev.clientX-r.left);
+  if(ef<0||ef>BG)return;
+  pinnedEF=ef;setInspection(ef,true);
+});
+window.addEventListener("keydown",function(ev){
+  if(ev.key!=="Escape"||pinnedEF===null)return;
+  pinnedEF=null;cursorEF=null;
+  if(curMu){drawFE(curMu);renderInspector(calcFermi(curMu),false);}
+  document.getElementById("inspector-state").textContent="移动图面查询";
+});
 
 // Chemical-potential range panel: per-element min/current/max over the
 // stability vertices, updated live as the selection moves.
@@ -740,47 +819,82 @@ function buildMuPanel(){
 var muRows=buildMuPanel();
 function updateMuPanel(mu){
   for(var e in muRows){
-    var r=muRows[e],v=mu[e];
-    if(v===undefined)continue;
-    var pct=(r.mx>r.mn)?(v-r.mn)/(r.mx-r.mn)*100:50;
-    r.cur.style.left=pct+"%";
+    var r=muRows[e],v=mu[e];if(v===undefined)continue;
+    r.cur.style.left=((r.mx>r.mn)?(v-r.mn)/(r.mx-r.mn)*100:50)+"%";
   }
 }
-
-function update(mu){curMu=mu;drawCPD(mu);drawFE(mu);updateMuPanel(mu);
-  var s="";Object.keys(mu).forEach(function(k){s+=k+"="+mu[k].toFixed(4)+" ";});
-  if(s)document.getElementById("muinfo").innerHTML=s;
+function updateSelectionCard(mu){
+  var idx=selectedVertex(mu),state=document.getElementById("selection-state"),constraints=document.getElementById("selection-constraints");
+  if(idx>=0){
+    var phases=(VPHASES[idx].competing||[]).join(" · ");
+    state.textContent="当前顶点 V"+(idx+1);
+    constraints.textContent="V"+(idx+1)+(phases?" · "+phases+"（约束）":" · 无相约束记录");
+  }else{
+    state.textContent=selectionMode;
+    constraints.textContent=selectionMode==="边界插值"?"沿稳定区边界插值；无单一顶点约束":"稳定区内部插值；无单一顶点约束";
+  }
+  var entries=[];Object.keys(mu).sort().forEach(function(k){entries.push("μ_"+k+" = "+mu[k].toFixed(4)+" eV");});
+  document.getElementById("selection-mu").textContent=entries.join(" · ");
+}
+function update(mu){
+  curMu=mu;drawCPD(mu);drawFE(mu);updateMuPanel(mu);updateSelectionCard(mu);
+  var ef=pinnedEF!==null?pinnedEF:calcFermi(mu);
+  renderInspector(ef,pinnedEF!==null);
 }
 
-var leg=document.getElementById("leg");
+// Group the legend by defect KIND (site-independent base name):
+// Va_O1 / Va_O2 / Va_O13 all collapse under "Va_O"; Ga_Sb1/Ga_Sb2
+// under "Ga_Sb". Clicking a group heading toggles the whole kind.
+function defectBase(n){return n.replace(/\d+$/,"");}
+function refreshVisibleDefects(){
+  if(!curMu)return;
+  drawFE(curMu);
+  renderInspector(pinnedEF!==null?pinnedEF:(cursorEF!==null?cursorEF:calcFermi(curMu)),pinnedEF!==null);
+}
+function toggleGroup(base){
+  var anyVisible=false;
+  CATS[base].forEach(function(d){if(!hidden[d.getAttribute("data-name")])anyVisible=true;});
+  var hide=anyVisible;
+  CATS[base].forEach(function(d){
+    var n=d.getAttribute("data-name");hidden[n]=hide;d.style.opacity=hide?".4":"1";
+  });
+  refreshVisibleDefects();
+}
+var leg=document.getElementById("leg"),CATS={};
 names.forEach(function(n,i){
-  var d=document.createElement("div");
-  d.setAttribute("data-name",n);
-  d.innerHTML="<span style='display:inline-block;width:12px;height:12px;border-radius:3px;background:"+CL[i]+";margin-right:4px'></span>"+segHtml(DISP[n]);
-  d.onclick=function(){hidden[n]=!hidden[n];d.style.opacity=hidden[n]?".4":"1";if(curMu)drawFE(curMu);};
-  leg.appendChild(d);
+  var d=document.createElement("div");d.setAttribute("data-name",n);
+  d.innerHTML="<span style='display:inline-block;width:10px;height:10px;border-radius:50%;background:"+CL[i]+";margin-right:3px'></span>"+segHtml(DISP[n]);
+  d.onclick=function(){hidden[n]=!hidden[n];d.style.opacity=hidden[n]?".4":"1";refreshVisibleDefects();};
+  var base=defectBase(n);if(!CATS[base])CATS[base]=[];CATS[base].push(d);
+});
+// Fixed layout: kind headings (in generation-time order) + members.
+// The legend NEVER reorders on drag or E_F hover.
+Object.keys(CATS).forEach(function(base){
+  var g=document.createElement("div");g.className="leg-group";
+  var h=document.createElement("div");h.className="leg-cat";h.textContent=base+"（"+CATS[base].length+"）";
+  h.title="点击隐藏/显示该缺陷种类";h.onclick=function(){toggleGroup(base);};
+  g.appendChild(h);CATS[base].forEach(function(d){g.appendChild(d);});leg.appendChild(g);
 });
 
-// Responsive sizing: canvas backing stores scale by devicePixelRatio
-// (crisp on hiDPI screens) and CSS sizes track the iframe viewport so
-// the page always fits without a scrollbar.
+// Responsive sizing: each scientific card owns its native chart ratio.
+// On narrow displays the CSS grid stacks cards and the inspector moves below.
 function layout(){
   var dpr=window.devicePixelRatio||1;
-  var pw=document.body.clientWidth, ph=window.innerHeight;
-  var cw=Math.max(240,Math.min(430,Math.round(Math.min(pw*0.36,ph-330))));
+  var cpdCard=document.getElementById("cpdCard");
+  var cw=Math.max(250,Math.min(520,cpdCard.clientWidth-30));
   cc.width=cw*dpr;cc.height=cw*dpr;cc.style.width=cw+"px";cc.style.height=cw+"px";
-  cctx.setTransform(dpr,0,0,dpr,0,0);
-  var fw=Math.max(320,pw-cw-44);
-  var fh=Math.max(280,Math.min(540,ph-110));
+  cctx.setTransform(dpr,0,0,dpr,0,0);cW=cw;cH=cw;
+  var plot=cv.parentElement,fw=Math.max(300,Math.round(plot.clientWidth));
+  var fh=Math.max(320,Math.min(520,Math.round(fw*.68)));
   cv.width=fw*dpr;cv.height=fh*dpr;cv.style.width=fw+"px";cv.style.height=fh+"px";
-  cx.setTransform(dpr,0,0,dpr,0,0);
-  cW=cw;cH=cw;W=fw;H=fh;
+  cx.setTransform(dpr,0,0,dpr,0,0);W=fw;H=fh;
+  var inspector=document.querySelector(".fe-inspector");
+  if(inspector)inspector.style.height=fh+"px";
   if(curMu)update(curMu);
 }
 window.addEventListener("resize",layout);
-
-update(curMu);
 layout();
+update(curMu);
 </script></body></html>"""
 
 
@@ -791,6 +905,7 @@ def _html_template(
     poly_2d: list[list[float]],
     vertex_mu: list[dict[str, float]],
     vertex_names: list[str],
+    vertex_phases: list[dict[str, list[str]]],
     vertex_elements: list[str],
     defects: dict[str, Any],
     sorted_names: list[str],
@@ -801,6 +916,7 @@ def _html_template(
     ax1: str,
     a0_range: tuple[float, float],
     a1_range: tuple[float, float],
+    exo_elements: list[str],
 ) -> str:
     """Render the self-contained interactive HTML page."""
     js = json.dumps
@@ -812,6 +928,16 @@ def _html_template(
         4: "Drag inside the polygon to set chemical potentials",
     }
     cpd_hint = cpd_hints.get(n_vertices, "Drag to set chemical potentials")
+
+    # Per-vertex constraint text: which compounds pin this vertex.
+    # Unstable (impurity) dopant phases are intentionally NOT listed —
+    # the label stays uniform across doped and undoped systems.
+    constraint_parts: list[str] = []
+    for name, ph in zip(vertex_names, vertex_phases):
+        comp = " · ".join(_formula_html(p) for p in ph.get("competing", []))
+        if comp:
+            constraint_parts.append(f"顶点 {name}: {comp}（约束）")
+    constraint_html = "<br>".join(constraint_parts)
 
     # Compute impurity elements (in vertex_mu but not host vertex_elements)
     host_set = set(vertex_elements)
@@ -825,17 +951,22 @@ def _html_template(
         pattern = "|".join(sorted(impurity_set))
         is_doped_str = f"!!n.match(/^({pattern})_/)"
 
+    exo = list(exo_elements) or sorted(impurity_set)
+    exo_json = js(exo)
+
     cpd_js = _cpd_canvas_js(
-        n_vertices, poly_2d, vertex_mu, vertex_names,
+        n_vertices, poly_2d, vertex_mu, vertex_names, vertex_phases,
         ax0, ax1, a0_range, a1_range,
     )
 
     fe_canvas = _FE_CANVAS_JS.replace("{is_doped_str}", is_doped_str)
+    fe_canvas = fe_canvas.replace("{exo_json}", exo_json)
+    fermi_js = _FERMI_JS.replace("{exo_json}", exo_json)
 
     return (
         _COMMON_HTML_HEAD.format(
             title=host_name, title_html=_formula_html(host_name),
-            cpd_hint=cpd_hint,
+            cpd_hint=cpd_hint, constraint_html=constraint_html,
         )
         + "\n"
         + _COMMON_JS_DECLS.format(
@@ -846,7 +977,7 @@ def _html_template(
             names_json=js(sorted_names),
             disp_json=js({n: _defect_segments(n) for n in sorted_names}),
         )
-        + "\n" + cpd_js + "\n" + fe_canvas + "\n" + _COMMON_JS_FOOTER
+        + "\n" + cpd_js + "\n" + fe_canvas + fermi_js + "\n" + _COMMON_JS_FOOTER
     )
 
 
@@ -872,9 +1003,13 @@ def generate_interactive_html(system_dir: Path) -> Path | None:
         return None
 
     try:
-        vertex_mu, vertex_names, host_name, vertex_elements = _extract_vertex_data(
-            cpd
-        )
+        (
+            vertex_mu,
+            vertex_names,
+            host_name,
+            vertex_elements,
+            vertex_phases,
+        ) = _extract_vertex_data(cpd)
     except (ValueError, TypeError) as exc:
         import logging
         logging.getLogger(__name__).warning(
@@ -918,11 +1053,14 @@ def generate_interactive_html(system_dir: Path) -> Path | None:
     poly_2d = [poly_2d[i] for i in hull_idx]
     vertex_mu = [vertex_mu[i] for i in hull_idx]
     vertex_names = [vertex_names[i] for i in hull_idx]
+    vertex_phases = [vertex_phases[i] for i in hull_idx]
     n_vertices = len(hull_idx)
 
     all_ax0 = [p[0] for p in poly_2d]
     all_ax1 = [p[1] for p in poly_2d]
     pad = 0.3
+
+    exo_elements = _dopant_elements(system_dir)
 
     html = _html_template(
         host_name=host_name,
@@ -930,6 +1068,7 @@ def generate_interactive_html(system_dir: Path) -> Path | None:
         poly_2d=poly_2d,
         vertex_mu=vertex_mu,
         vertex_names=vertex_names,
+        vertex_phases=vertex_phases,
         vertex_elements=vertex_elements,
         defects=defects,
         sorted_names=sorted_names,
@@ -940,6 +1079,7 @@ def generate_interactive_html(system_dir: Path) -> Path | None:
         ax1=ax1,
         a0_range=(min(all_ax0) - pad, max(all_ax0) + pad),
         a1_range=(min(all_ax1) - pad, max(all_ax1) + pad),
+        exo_elements=exo_elements,
     )
 
     out_path = system_dir / "formation_energy_interactive.html"
