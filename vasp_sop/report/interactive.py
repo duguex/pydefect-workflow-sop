@@ -520,6 +520,7 @@ var VPHASES = {js(vertex_phases)};
 var VERTEX_MU = {js(vertex_mu)};
 var HOST_ELS = {js(host_elements)};
 var selectionMode = "区域内插值";
+var pickPath = "slider";   // provenance of the current mu: vertex|edge|facet|fan|slider
 
 // Exact stability-region geometry in mu space: the vertices' convex hull in
 // its r-dim affine subspace. Membership = every facet signed distance >= 0;
@@ -595,13 +596,21 @@ function buildHull(){{
       for(var j=start;j<=n-k+cur.length;j++){{cur.push(j);combos(j+1,k,cur);cur.pop();}}
     }}
     combos(0,r,[]);
-    // A non-simplicial facet (k>r coplanar vertices) is enumerated once per
-    // r-subset: keep one entry per distinct plane.
-    var seenPlanes={{}};
+    // Clean up near-coplanar slivers: a facet through the same vertex group
+    // is enumerated once per r-subset with planes wobbling by the vertex
+    // scatter — dedupe by VERTEX SET (all vertices within tol of the plane),
+    // then drop subfaces (a facet whose vertices all lie on a bigger facet).
+    // Verdict-unaffected: duplicates/subfaces carry the same plane distances.
+    var seenFaces={{}};
     facets=facets.filter(function(f){{
-      var key=f.n.map(function(x){{return x.toFixed(5);}}).join(",")+"|"+f.c.toFixed(5);
-      if(seenPlanes[key])return false;
-      seenPlanes[key]=true;return true;
+      var key=f.verts.slice().sort(function(a,b){{return a-b;}}).join(",");
+      if(seenFaces[key])return false;
+      seenFaces[key]=true;return true;
+    }});
+    facets=facets.filter(function(f){{
+      return !facets.some(function(g){{
+        return g!==f&&g.verts.length>f.verts.length&&f.verts.every(function(v){{return g.verts.indexOf(v)>=0;}});
+      }});
     }});
   }}
   return {{proj:proj,facets:facets,r:r,tol:HTOL}};
@@ -627,7 +636,20 @@ function hullState(mu){{
 }}
 
 // ---- topological map: true adjacency of the N-dim polytope ----
-var FACET_VERTS = HULL.facets.map(function(f){{return f.verts||[];}});
+// Display/pick faces = the REAL facets only: the competing phase stable on a
+// facet is the intersection of the vertex phase lists over its vertices —
+// non-empty intersection identifies the true region boundary. Near-coplanar
+// sliver facets (empty intersection) are dropped here so a mu matches at most
+// one drawn face (pickMu and markerPos stay mutually exact); the VERDICT
+// (hullState) still uses ALL facets from buildHull.
+var FACET_VERTS = HULL.facets.map(function(f){{return f.verts||[];}}).filter(function(fv){{
+  var inter=(VPHASES[fv[0]].competing||[]);
+  for(var i2=1;i2<fv.length;i2++){{
+    var L2=VPHASES[fv[i2]].competing||[];
+    inter=inter.filter(function(x){{return L2.indexOf(x)>=0;}});
+  }}
+  return inter.length>0;
+}});
 function computeEdges(){{
   var e=[];
   for(var i=0;i<VERTEX_MU.length;i++)for(var j=i+1;j<VERTEX_MU.length;j++){{
@@ -801,13 +823,132 @@ function fitAffine(){{
 var AFF=fitAffine();
 function layPx(p){{return [cP.l+p[0]*(cW-cP.l-cP.r),cP.t+p[1]*(cH-cP.t-cP.b)];}}
 function invLay(x,y){{return [(x-cP.l)/(cW-cP.l-cP.r),(y-cP.t)/(cH-cP.t-cP.b)];}}
+function faceWeights(pts,u){{
+  // Barycentric weights of u inside the convex face polygon pts (r-dim,
+  // coplanar), via a fan from pts[0] in a 2D basis of the face's span.
+  if(pts.length===2){{
+    var den=0,dot=0;
+    for(var k=0;k<u.length;k++){{var dd=pts[1][k]-pts[0][k];den+=dd*dd;dot+=(u[k]-pts[0][k])*dd;}}
+    var t=den>1e-12?dot/den:-1;
+    if(t<-1e-6||t>1+1e-6)return null;
+    return [1-t,t];
+  }}
+  if(pts.length<3)return null;
+  var e0=pts[1].map(function(v,k){{return v-pts[0][k];}});
+  var b0=Math.sqrt(e0.reduce(function(s,x){{return s+x*x;}},0));
+  if(b0<1e-12)return null;
+  e0=e0.map(function(x){{return x/b0;}});
+  var e1=null;
+  for(var i2=2;i2<pts.length;i2++){{
+    var w=pts[i2].map(function(v,k){{return v-pts[0][k];}});
+    var dot=0;for(var k=0;k<w.length;k++)dot+=w[k]*e0[k];
+    for(var k=0;k<w.length;k++)w[k]-=dot*e0[k];
+    var nr=Math.sqrt(w.reduce(function(s,x){{return s+x*x;}},0));
+    if(nr>1e-9){{e1=w.map(function(x){{return x/nr;}});break;}}
+  }}
+  if(!e1)return null;
+  function to2(p){{var w=p.map(function(v,k){{return v-pts[0][k];}});var d1=0,d2=0;
+    for(var k=0;k<w.length;k++){{d1+=w[k]*e0[k];d2+=w[k]*e1[k];}}return[d1,d2];}}
+  var q=to2(u),P=pts.map(to2);
+  for(var k=1;k<P.length-1;k++){{
+    var tb=triBary(P[0],P[k],P[k+1],q[0],q[1]);
+    if(tb&&tb[0]>=-1e-9&&tb[1]>=-1e-9&&tb[2]>=-1e-9){{
+      var w2=new Array(pts.length).fill(0);
+      w2[0]=tb[0];w2[k]=tb[1];w2[k+1]=tb[2];
+      // u must lie ON the facet plane (it is a combo of this facet's vertices),
+      // not merely inside its 2D projection: drifted near-coplanar facets warp
+      // slightly and would otherwise swallow points of neighboring facets.
+      var res=0;
+      for(var c=0;c<pts[0].length;c++){{
+        var s=0;for(var k2=0;k2<pts.length;k2++)s+=w2[k2]*pts[k2][c];
+        var dr=u[c]-s;res+=dr*dr;
+      }}
+      if(Math.sqrt(res)<=0.1*HULL.tol)return w2;
+    }}
+  }}
+  return null;
+}}
+function insideDrawnHull(p,order){{
+  for(var k=1;k<order.length-1;k++){{
+    var tb=triBary(layPx(LAY[order[0]]),layPx(LAY[order[k]]),layPx(LAY[order[k+1]]),p[0],p[1]);
+    if(tb&&tb[0]>=-1e-9&&tb[1]>=-1e-9&&tb[2]>=-1e-9)return true;
+  }}
+  return false;
+}}
+function closestBoundary(p,order){{
+  var best=null,bd=Infinity;
+  for(var k=0;k<order.length;k++){{
+    var a=layPx(LAY[order[k]]),b=layPx(LAY[order[(k+1)%order.length]]);
+    var dx=b[0]-a[0],dy=b[1]-a[1],len2=dx*dx+dy*dy;
+    var t=len2>1e-9?((p[0]-a[0])*dx+(p[1]-a[1])*dy)/len2:0;
+    t=Math.max(0,Math.min(1,t));
+    var qx=a[0]+t*dx,qy=a[1]+t*dy;
+    var d=(p[0]-qx)*(p[0]-qx)+(p[1]-qy)*(p[1]-qy);
+    if(d<bd){{bd=d;best=[qx,qy];}}
+  }}
+  return best||p;
+}}
 function markerPos(mu){{
+  var u=HULL.proj(mu);
+  var ins=hullState(mu).inside;
+  if(ins){{
+    // Exact inverse of pickMu: locate u in the true-space face fan and map
+    // the barycentric weights through the drawn polygons. Near-coplanar
+    // sliver facets make u match several facets, so pick the LARGEST drawn
+    // area (the real facet) — same rule as pickMu — keeping clicks/drags
+    // exactly on the cursor.
+    var bestW=null,bestA=-1;
+    for(var fi=0;fi<FACET_HULLS.length;fi++){{
+      var F=FACET_HULLS[fi];
+      if(F.length<2)continue;
+      var w=faceWeights(F.map(function(vi){{return HULL.proj(VERTEX_MU[vi]);}}),u);
+      if(w){{
+        var A=drawnArea(F);
+        if(A>bestA){{bestA=A;bestW=[F,w];}}
+      }}
+    }}
+    // Gap selections (pickMu's drawn-hull fan): same fan here. A fan mu can
+    // lie exactly on a facet plane (silhouette fan triangle coplanar with a
+    // facet), so the provenance (pickPath) decides which face to map through.
+    var orderG=hull2D(LAY.map(function(pp,i){{return i;}}),LAY);
+    var wg=(orderG.length>=3)?faceWeights(orderG.map(function(vi){{return HULL.proj(VERTEX_MU[vi]);}}),u):null;
+    if(pickPath==="fan"&&wg){{
+      var x=0,y=0;
+      orderG.forEach(function(vi,k){{var q=layPx(LAY[vi]);x+=wg[k]*q[0];y+=wg[k]*q[1];}});
+      return [x,y];
+    }}
+    if(bestW){{
+      var x=0,y=0;
+      bestW[0].forEach(function(vi,k){{var q=layPx(LAY[vi]);x+=bestW[1][k]*q[0];y+=bestW[1][k]*q[1];}});
+      return [x,y];
+    }}
+    if(wg){{
+      var x=0,y=0;
+      orderG.forEach(function(vi,k){{var q=layPx(LAY[vi]);x+=wg[k]*q[0];y+=wg[k]*q[1];}});
+      return [x,y];
+    }}
+  }}
+  // Outside the region, or an interior point on no face (sliders): affine
+  // image clamped to the drawn region — the marker never contradicts the
+  // verdict (outside mu sits on the boundary with the red ring + 区域外 card).
   var x=AFF.o[0],y=AFF.o[1];
   if(HULL.r>0){{
-    var u=HULL.proj(mu);
-    for(var k=0;k<HULL.r;k++){{x+=AFF.M[0][k]*u[k];y+=AFF.M[1][k]*u[k];}}
+    var uu=HULL.proj(mu);
+    for(var k=0;k<HULL.r;k++){{x+=AFF.M[0][k]*uu[k];y+=AFF.M[1][k]*uu[k];}}
   }}
-  return layPx([x,y]);
+  var p=layPx([x,y]);
+  var order=hull2D(LAY.map(function(pp,i){{return i;}}),LAY);
+  if(!ins)return closestBoundary(p,order);
+  if(order.length>=3&&insideDrawnHull(p,order))return p;
+  return closestBoundary(p,order);
+}}
+function drawnArea(F){{
+  var a=0;
+  for(var k=1;k<F.length-1;k++){{
+    var p0=layPx(LAY[F[0]]),p1=layPx(LAY[F[k]]),p2=layPx(LAY[F[k+1]]);
+    a+=Math.abs((p1[0]-p0[0])*(p2[1]-p0[1])-(p1[1]-p0[1])*(p2[0]-p0[0]));
+  }}
+  return a;
 }}
 function selectedVertex(mu){{
   if(!mu)return -1;
@@ -825,7 +966,8 @@ function triBary(a,b,c,px,py){{
   var den=d00*d11-d01*d01;
   if(Math.abs(den)<1e-12)return null;
   var v=(d11*d20-d01*d21)/den,w=(d00*d21-d01*d20)/den;
-  return [1-v-w,v,w];
+  // v = weight of c (v0 = c-a), w = weight of b (v1 = b-a)
+  return [1-v-w,w,v];
 }}
 function facetMu(F,px,py){{
   var pts=F.map(function(i){{return layPx(LAY[i]);}});
@@ -851,13 +993,19 @@ function pickMu(px,py){{
     if(d<bd){{bd=d;best=i;}}
   }});
   if(bd<=14){{
+    pickPath="vertex";
     selectionMode="当前顶点 V"+(best+1);
     return JSON.parse(JSON.stringify(VERTEX_MU[best]));
   }}
-  for(var fi=FACET_HULLS.length-1;fi>=0;fi--){{
+  var bestFace=null,bestFaceA=-1;
+  for(var fi=0;fi<FACET_HULLS.length;fi++){{
     var mu=facetMu(FACET_HULLS[fi],px,py);
-    if(mu){{selectionMode="区域内插值";return mu;}}
+    if(mu){{
+      var A=drawnArea(FACET_HULLS[fi]);
+      if(A>bestFaceA){{bestFaceA=A;bestFace=mu;}}
+    }}
   }}
+  if(bestFace){{pickPath="facet";selectionMode="区域内插值";return bestFace;}}
   var bestT=-1,bestE=-1,be=Infinity;
   EDGES.forEach(function(e,ei){{
     var a=layPx(LAY[e[0]]),b=layPx(LAY[e[1]]);
@@ -869,12 +1017,33 @@ function pickMu(px,py){{
     if(d<be){{be=d;bestT=t;bestE=ei;}}
   }});
   if(bestE>=0&&be<=8){{
+    pickPath="edge";
     selectionMode="边界插值";
     var e=EDGES[bestE],va=VERTEX_MU[e[0]],vb=VERTEX_MU[e[1]],mu={{}};
     for(var el in va)mu[el]=va[el]*(1-bestT)+vb[el]*bestT;
     return mu;
   }}
+  // Click inside the drawn region but in a gap between drawn facets (r>=3):
+  // interpolate within the drawn-hull fan (silhouette vertices) — the mu maps
+  // back to exactly this click position, so the marker tracks the cursor.
+  var orderH=hull2D(LAY.map(function(l,i){{return i;}}),LAY);
+  var inH=orderH.length>=3?insideDrawnHull([px,py],orderH):true;
+  if(inH&&orderH.length>=3){{
+    for(var kk=1;kk<orderH.length-1;kk++){{
+      var tb2=triBary(layPx(LAY[orderH[0]]),layPx(LAY[orderH[kk]]),layPx(LAY[orderH[kk+1]]),px,py);
+      if(tb2&&tb2[0]>=-1e-9&&tb2[1]>=-1e-9&&tb2[2]>=-1e-9){{
+        var w4=new Array(orderH.length).fill(0);
+        w4[0]=tb2[0];w4[kk]=tb2[1];w4[kk+1]=tb2[2];
+        var mu4={{}};
+        orderH.forEach(function(vi,kk4){{for(var e in VERTEX_MU[vi])mu4[e]=(mu4[e]||0)+w4[kk4]*VERTEX_MU[vi][e];}});
+        pickPath="fan";
+        selectionMode="区域内插值";
+        return mu4;
+      }}
+    }}
+  }}
   if(best>=0){{
+    pickPath="vertex";
     selectionMode="当前顶点 V"+(best+1);
     return JSON.parse(JSON.stringify(VERTEX_MU[best]));
   }}
@@ -1331,6 +1500,7 @@ function buildMuPanel(){
     box.appendChild(row);
     var slider=row.querySelector(".muslider");
     slider.addEventListener("input",function(){
+      pickPath="slider";
       curMu[e]=parseFloat(slider.value);
       selectionMode="逐元素";
       update(curMu);

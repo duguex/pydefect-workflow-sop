@@ -655,6 +655,16 @@ class TestGenerateInteractiveHtml:
         assert "var EDGES, LAY, FACET_HULLS;" in content
         assert "function pickMu(px,py)" in content
         assert "function markerPos(mu)" in content
+        # marker = exact inverse of pickMu (no affine drift on face points)
+        assert "function faceWeights(pts,u)" in content
+        assert "function insideDrawnHull(p,order)" in content
+        assert "function closestBoundary(p,order)" in content
+        assert "function drawnArea(F)" in content
+        # marker tracks the cursor: pickMu provenance + on-plane face match
+        assert 'var pickPath = "slider";' in content
+        assert 'pickPath="facet"' in content
+        assert 'pickPath="fan"' in content
+        assert "0.1*HULL.tol" in content
         assert "function selectedVertex(mu)" in content
         assert "function facetMu(F,px,py)" in content
         assert "function triBary(a,b,c,px,py)" in content
