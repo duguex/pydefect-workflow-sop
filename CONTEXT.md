@@ -135,7 +135,7 @@ The convergence verdict refuses an OUTCAR that contains VASP's NELM-exhaustion w
 _Avoid_: 只信 "reached required accuracy", 忽略 NELM 警告
 
 **形成能交互报告 (formation-energy interactive report)**:
-The self-contained HTML artifact (`formation_energy_interactive.html`) written into a system dir by the report generator (`vasp_sop.report.interactive.generate_interactive_html`): one page embedding the CPD vertex selector and per-charge formation-energy plot as an interactive canvas widget. Generated after defect analysis (analysis pipeline and `vasp-sop report --interactive`); consumed read-only by the crisp webui reports view (crisp ADR 0005) — vasp-sop stays the single source of the widget's logic.
+The self-contained HTML artifact (`formation_energy_interactive.html`) written into a system dir by the report generator (`vasp_sop.report.interactive.generate_interactive_html`): one page embedding the CPD vertex selector and per-charge formation-energy plot as an interactive canvas widget. The CPD selector is a non-Euclidean 2D map of the target phase's stability region: geometry lives in the host-element subspace (impurity μ is a per-vertex branch, not a region dimension), drawn as the exact 2D polygon (3 host elements) or a spring-layout embedding of the 3D polytope (4+ hosts), with each boundary segment labeled by the competing phase that bounds it there (edge phase = intersection of the endpoint phase lists). Generated after defect analysis (analysis pipeline and `vasp-sop report --interactive`); consumed read-only by the crisp webui reports view (crisp ADR 0005) — vasp-sop stays the single source of the widget's logic.
 _Avoid_: 交互图, FE widget, 报告页 (as the artifact)
 
 **形成能停靠读数 (formation-energy docked readout)**:

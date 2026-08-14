@@ -486,18 +486,29 @@ def _cpd_canvas_js(
     vertex_mu: list[dict[str, float]],
     vertex_names: list[str],
     vertex_phases: list[dict[str, list[str]]],
+    host_elements: list[str],
 ) -> str:
     """Return the CPD canvas JS block for *n_vertices*.
 
-    The stability region is drawn as a TOPOLOGICAL map of the high-dim
-    convex polytope (its true combinatorial structure): vertices at
-    deterministic spring-layout positions seeded by the 2D projection,
-    real N-dim edges as lines, facets as filled regions. Selection is
-    face-level exact: a vertex click picks the exact vertex mu, a facet
-    region click the N-dim barycentric combination of that facet's
-    vertices (weights from the 2D drawing), an edge click interpolates
-    its endpoints. Every canvas selection is inside the polytope by
-    construction — 区域外 can only come from the per-element sliders.
+    Draws the target phase's stability region as a 2D non-Euclidean
+    diagram of the N-dim polytope (no axes — μ values live in the panel
+    below): the region's shape/outline plus the competing phase that
+    bounds each boundary segment, derived from the polytope topology.
+
+    Geometry lives in the HOST-element subspace: impurity-element μ
+    (Bi, Fe, Mn, …) is a per-vertex branch of the impurity equilibrium,
+    not an intrinsic dimension of the stability region. In that subspace
+    the region is 2D for 3 host elements (drawn in its exact shape) and
+    3D for 4+ hosts (spring-layout topological embedding; outer outline
+    = 2D hull of the drawing, whose edges are true polytope edges).
+
+    Boundary labels: the competing phases of an edge = intersection of
+    the endpoint phase lists (1 phase on a 2D-region edge, 2 on a 3D
+    region edge). Selection is face-level exact: vertex click = exact
+    vertex μ, region click = N-dim barycentric combination of that face's
+    vertices, edge click = endpoint interpolation. Every canvas selection
+    is inside the polytope by construction — 区域外 can only come from
+    the per-element sliders.
     """
     js = json.dumps
 
@@ -507,6 +518,7 @@ var cW = 300, cH = 300, cP = {{l:35,r:10,t:20,b:25}};
 var POLY = {js(poly_2d)};   // 2D projection — spring-layout seed only
 var VPHASES = {js(vertex_phases)};
 var VERTEX_MU = {js(vertex_mu)};
+var HOST_ELS = {js(host_elements)};
 var selectionMode = "区域内插值";
 
 // Exact stability-region geometry in mu space: the vertices' convex hull in
@@ -518,7 +530,10 @@ var selectionMode = "区域内插值";
 // exact, but the boundary distance may deviate by up to the gap (~0.02 eV).
 var HULL=buildHull();
 function buildHull(){{
-  var el=[];VERTEX_MU.forEach(function(vm){{for(var e in vm)if(el.indexOf(e)<0)el.push(e);}});
+  // Geometry lives in the HOST-element subspace: impurity μ is a per-vertex
+  // branch of the impurity equilibrium, not an intrinsic region dimension —
+  // including it inflates the hull rank with sliver facets.
+  var el=HOST_ELS.filter(function(e){{return VERTEX_MU.some(function(v){{return v[e]!==undefined;}});}});
   var n=VERTEX_MU.length,v0=VERTEX_MU[0],basis=[];
   function proj(mu){{
     var w=el.map(function(e){{return (mu[e]!==undefined?mu[e]:0)-(v0[e]!==undefined?v0[e]:0);}});
@@ -530,12 +545,15 @@ function buildHull(){{
     var n0=Math.sqrt(w0.reduce(function(s,x){{return s+x*x;}},0));
     if(n0>maxNrm)maxNrm=n0;
   }}
-  var tol=1e-4*maxNrm;
+  // Rank tolerance is coarse (1e-3): batch drift puts vertices a few meV off
+  // the true region subspace; facet/verdict tolerance is tight (1e-4) and
+  // applies inside the projected subspace where that drift is gone.
+  var RTOL=1e-3*maxNrm,HTOL=1e-4*maxNrm;
   for(var i=1;i<n;i++){{
     var w=el.map(function(e){{return (VERTEX_MU[i][e]!==undefined?VERTEX_MU[i][e]:0)-(v0[e]!==undefined?v0[e]:0);}});
     basis.forEach(function(b){{var dot=0;for(var k=0;k<w.length;k++)dot+=w[k]*b[k];for(var k=0;k<w.length;k++)w[k]-=dot*b[k];}});
     var nrm=Math.sqrt(w.reduce(function(s,x){{return s+x*x;}},0));
-    if(nrm>tol){{for(var k=0;k<w.length;k++)w[k]/=nrm;basis.push(w);}}
+    if(nrm>RTOL){{for(var k=0;k<w.length;k++)w[k]/=nrm;basis.push(w);}}
   }}
   var r=basis.length,U=VERTEX_MU.map(proj),facets=[];
   if(r===0){{
@@ -564,12 +582,12 @@ function buildHull(){{
       var c=0;for(var k=0;k<nv.length;k++)c+=nv[k]*U[F[0]][k];
       var mn=Infinity,mx=-Infinity;
       U.forEach(function(u){{var s=0;for(var k=0;k<nv.length;k++)s+=nv[k]*u[k];s-=c;if(s<mn)mn=s;if(s>mx)mx=s;}});
-      if(mn<-tol){{
-        if(mx>tol)return;                 // plane cuts the hull: not a facet
+      if(mn<-HTOL){{
+        if(mx>HTOL)return;                 // plane cuts the hull: not a facet
         for(var k=0;k<nv.length;k++)nv[k]*=-1;c=-c;mn=-mx;  // all on minus side: flip
       }}
       var fv=[];
-      U.forEach(function(u,i){{var s=0;for(var k=0;k<nv.length;k++)s+=nv[k]*u[k];s-=c;if(Math.abs(s)<=tol)fv.push(i);}});
+      U.forEach(function(u,i){{var s=0;for(var k=0;k<nv.length;k++)s+=nv[k]*u[k];s-=c;if(Math.abs(s)<=HTOL)fv.push(i);}});
       facets.push({{n:nv,c:c,verts:fv}});
     }}
     function combos(start,k,cur){{
@@ -586,7 +604,7 @@ function buildHull(){{
       seenPlanes[key]=true;return true;
     }});
   }}
-  return {{proj:proj,facets:facets,r:r,tol:tol}};
+  return {{proj:proj,facets:facets,r:r,tol:HTOL}};
 }}
 function hullState(mu){{
   var u=HULL.proj(mu);
@@ -653,28 +671,95 @@ function springLayout(seed,edges){{
   var sx=(x1-x0)||1,sy=(y1-y0)||1;
   return pos.map(function(p){{return [0.06+0.88*(p[0]-x0)/sx,0.06+0.88*(p[1]-y0)/sy];}});
 }}
-var EDGES=computeEdges();
-var LAY=springLayout(POLY,EDGES);
-function hull2D(idx){{
-  var pts=idx.map(function(i){{return {{i:i,x:LAY[i][0],y:LAY[i][1]}};}});
-  if(pts.length<3)return idx.slice();
-  pts.sort(function(a,b){{return a.x!==b.x?a.x-b.x:a.y-b.y;}});
+var EDGES, LAY, FACET_HULLS;
+if(HULL.r===2){{
+  // True region shape (2D geometry of the region) as the seed; genuine
+  // regions can be extreme slivers (2nd singular value down to ~0.006 of the
+  // 1st — the region is a thin band), so the map is non-Euclidean: spring
+  // layout of the polygon cycle (seed = true shape) keeps it legible.
+  var raw2=VERTEX_MU.map(function(v){{return HULL.proj(v);}});
+  var x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+  raw2.forEach(function(p){{if(p[0]<x0)x0=p[0];if(p[0]>x1)x1=p[0];if(p[1]<y0)y0=p[1];if(p[1]>y1)y1=p[1];}});
+  var sx2=(x1-x0)||1,sy2=(y1-y0)||1,pad2=0.06,span2=1-2*pad2;
+  var seed2=raw2.map(function(p){{return[pad2+(p[0]-x0)/sx2*span2,pad2+(p[1]-y0)/sy2*span2];}});
+  var order2=hull2D(raw2.map(function(p,i){{return i;}}),seed2);
+  EDGES=[];for(var k2=0;k2<order2.length;k2++)EDGES.push([order2[k2],order2[(k2+1)%order2.length]]);
+  LAY=springLayout(seed2,EDGES);
+  var hull2f=hull2D(LAY.map(function(p,i){{return i;}}),LAY);
+  FACET_HULLS=[];for(var k3=1;k3<hull2f.length-1;k3++)FACET_HULLS.push([hull2f[0],hull2f[k3],hull2f[k3+1]]);
+}}else{{
+  EDGES=computeEdges();
+  LAY=springLayout(POLY,EDGES);
+  FACET_HULLS=FACET_VERTS.map(function(F){{return hull2D(F,LAY);}});
+}}
+function hull2D(idx,pts){{
+  var P=pts||LAY;
+  var pts2=idx.map(function(i){{return {{i:i,x:P[i][0],y:P[i][1]}};}});
+  if(pts2.length<3)return idx.slice();
+  pts2.sort(function(a,b){{return a.x!==b.x?a.x-b.x:a.y-b.y;}});
   function cross(o,a,b){{return (a.x-o.x)*(b.y-o.y)-(a.y-o.y)*(b.x-o.x);}}
   var lo=[];
-  pts.forEach(function(p){{
+  pts2.forEach(function(p){{
     while(lo.length>=2&&cross(lo[lo.length-2],lo[lo.length-1],p)<=0)lo.pop();
     lo.push(p);
   }});
   var up=[];
-  for(var i=pts.length-1;i>=0;i--){{
-    var p=pts[i];
+  for(var i=pts2.length-1;i>=0;i--){{
+    var p=pts2[i];
     while(up.length>=2&&cross(up[up.length-2],up[up.length-1],p)<=0)up.pop();
     up.push(p);
   }}
   lo.pop();up.pop();
   return lo.concat(up).map(function(p){{return p.i;}});
 }}
-var FACET_HULLS=FACET_VERTS.map(hull2D);
+function outerSegments(){{
+  // The drawing's outline = 2D hull of the layout; each hull edge is a true
+  // polytope edge (verified across all 13 live systems), with collinear
+  // intermediate vertices chained so every outline piece is an edge.
+  var hull=hull2D(LAY.map(function(p,i){{return i;}}),LAY),segs=[];
+  for(var k=0;k<hull.length;k++){{
+    var a=hull[k],b=hull[(k+1)%hull.length];
+    var ax=LAY[a][0],ay=LAY[a][1],bx=LAY[b][0],by=LAY[b][1];
+    var mids=[];
+    LAY.forEach(function(l,i){{
+      if(i===a||i===b)return;
+      var cr=(bx-ax)*(l[1]-ay)-(by-ay)*(l[0]-ax);
+      if(Math.abs(cr)>1e-6)return;
+      var t=((l[0]-ax)*(bx-ax)+(l[1]-ay)*(by-ay))/((bx-ax)*(bx-ax)+(by-ay)*(by-ay));
+      if(t>1e-9&&t<1-1e-9)mids.push([t,i]);
+    }});
+    mids.sort(function(x,y){{return x[0]-y[0];}});
+    var chain=[a];mids.forEach(function(m){{chain.push(m[1]);}});chain.push(b);
+    for(var c=0;c<chain.length-1;c++){{
+      var p=chain[c],q=chain[c+1];
+      var isE=EDGES.some(function(e){{return(e[0]===p&&e[1]===q)||(e[0]===q&&e[1]===p);}});
+      segs.push({{i:p,j:q,edge:isE}});
+    }}
+  }}
+  return segs;
+}}
+var OUTER=outerSegments();
+function edgePhases(i,j){{
+  var a=VPHASES[i].competing||[],b=VPHASES[j].competing||[];
+  return a.filter(function(x){{return b.indexOf(x)>=0;}});
+}}
+function drawEdgeLabel(i,j){{
+  var ph=edgePhases(i,j).join(" · ");
+  if(!ph)return;
+  var a=layPx(LAY[i]),b=layPx(LAY[j]);
+  var mx=(a[0]+b[0])/2,my=(a[1]+b[1])/2;
+  var dx=b[0]-a[0],dy=b[1]-a[1],L=Math.sqrt(dx*dx+dy*dy)||1;
+  var nx=-dy/L,ny=dx/L;
+  var cx=0,cy=0;LAY.forEach(function(l){{cx+=l[0];cy+=l[1];}});cx/=LAY.length;cy/=LAY.length;
+  var px=cP.l+cx*(cW-cP.l-cP.r),py=cP.t+cy*(cH-cP.t-cP.b);
+  if((mx-px)*nx+(my-py)*ny<0){{nx=-nx;ny=-ny;}}
+  var tx=mx+nx*11,ty=my+ny*11;
+  cctx.font="600 10px Arial";cctx.textAlign="center";cctx.textBaseline="middle";
+  var w=cctx.measureText(ph).width+8;
+  cctx.fillStyle="rgba(255,255,255,0.88)";
+  cctx.fillRect(tx-w/2,ty-8,w,16);
+  cctx.fillStyle="#374151";cctx.fillText(ph,tx,ty+1);
+}}
 function fitAffine(){{
   var r=HULL.r;
   if(r===0)return {{M:[[0],[0]],o:[0.5,0.5]}};
@@ -811,27 +896,58 @@ var curMu=JSON.parse(JSON.stringify(VERTEX_MU[0]));
     return common + f"""
 function drawCPD(mu){{
   cctx.clearRect(0,0,cW,cH);
-  FACET_HULLS.forEach(function(F){{
-    if(F.length<3)return;
-    cctx.beginPath();
-    F.forEach(function(vi,i){{
+  if(HULL.r===1){{
+    // binary: the stability region IS the segment; label endpoints too
+    var a0=layPx(LAY[0]),b0=layPx(LAY[1]);
+    cctx.strokeStyle="#475569";cctx.lineWidth=2;
+    cctx.beginPath();cctx.moveTo(a0[0],a0[1]);cctx.lineTo(b0[0],b0[1]);cctx.stroke();
+    drawEdgeLabel(0,1);
+    [0,1].forEach(function(vi){{
+      var ph=(VPHASES[vi].competing||[]).join(" · ");
       var p=layPx(LAY[vi]);
-      i===0?cctx.moveTo(p[0],p[1]):cctx.lineTo(p[0],p[1]);
+      cctx.font="600 10px Arial";cctx.textAlign="center";cctx.textBaseline="middle";
+      var w=cctx.measureText(ph).width+8;
+      var tx=p[0],ty=p[1]+(vi===0?-16:16);
+      cctx.fillStyle="rgba(255,255,255,0.88)";cctx.fillRect(tx-w/2,ty-8,w,16);
+      cctx.fillStyle="#374151";cctx.fillText(ph,tx,ty+1);
     }});
+  }}else if(HULL.r===2){{
+    // exact 2D region shape: filled polygon, labeled boundary edges
+    var order2=hull2D(LAY.map(function(p,i){{return i;}}),LAY);
+    cctx.beginPath();
+    order2.forEach(function(vi,i){{var p=layPx(LAY[vi]);i===0?cctx.moveTo(p[0],p[1]):cctx.lineTo(p[0],p[1]);}});
     cctx.closePath();
-    cctx.fillStyle="rgba(22,155,120,0.07)";
-    cctx.fill();
-  }});
-  cctx.strokeStyle="#64748b";cctx.lineWidth=1.5;
-  EDGES.forEach(function(e){{
-    var a=layPx(LAY[e[0]]),b=layPx(LAY[e[1]]);
-    cctx.beginPath();cctx.moveTo(a[0],a[1]);cctx.lineTo(b[0],b[1]);cctx.stroke();
-  }});
+    cctx.fillStyle="rgba(22,155,120,0.10)";cctx.fill();
+    cctx.strokeStyle="#475569";cctx.lineWidth=2;cctx.stroke();
+    EDGES.forEach(function(e){{drawEdgeLabel(e[0],e[1]);}});
+  }}else{{
+    FACET_HULLS.forEach(function(F){{
+      if(F.length<3)return;
+      cctx.beginPath();
+      F.forEach(function(vi,i){{
+        var p=layPx(LAY[vi]);
+        i===0?cctx.moveTo(p[0],p[1]):cctx.lineTo(p[0],p[1]);
+      }});
+      cctx.closePath();
+      cctx.fillStyle="rgba(22,155,120,0.07)";
+      cctx.fill();
+    }});
+    cctx.strokeStyle="#d8e0ea";cctx.lineWidth=1;
+    EDGES.forEach(function(e){{
+      var a=layPx(LAY[e[0]]),b=layPx(LAY[e[1]]);
+      cctx.beginPath();cctx.moveTo(a[0],a[1]);cctx.lineTo(b[0],b[1]);cctx.stroke();
+    }});
+    OUTER.forEach(function(s){{
+      var a=layPx(LAY[s.i]),b=layPx(LAY[s.j]);
+      cctx.strokeStyle=s.edge?"#475569":"#94a3b8";
+      cctx.lineWidth=s.edge?2:1.5;
+      cctx.beginPath();cctx.moveTo(a[0],a[1]);cctx.lineTo(b[0],b[1]);cctx.stroke();
+      if(s.edge)drawEdgeLabel(s.i,s.j);
+    }});
+  }}
   LAY.forEach(function(l,i){{
     var p=layPx(l);
-    cctx.fillStyle="#334155";cctx.beginPath();cctx.arc(p[0],p[1],4,0,2*Math.PI);cctx.fill();
-    cctx.font="600 21px Arial";cctx.textAlign="left";
-    cctx.fillText("V"+(i+1),p[0]+6,p[1]-6);
+    cctx.fillStyle="#334155";cctx.beginPath();cctx.arc(p[0],p[1],3.2,0,2*Math.PI);cctx.fill();
   }});
   if(mu){{
     var p=markerPos(mu);
@@ -1349,6 +1465,7 @@ def _html_template(
 
     cpd_js = _cpd_canvas_js(
         n_vertices, poly_2d, vertex_mu, vertex_names, vertex_phases,
+        vertex_elements,
     )
 
     fe_canvas = _FE_CANVAS_JS.replace("{is_doped_str}", is_doped_str)

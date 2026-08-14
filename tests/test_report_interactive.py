@@ -652,12 +652,20 @@ class TestGenerateInteractiveHtml:
         assert "function hullState(mu)" in content
         assert "function computeEdges()" in content
         assert "function springLayout(seed,edges)" in content
-        assert "var LAY=" in content
+        assert "var EDGES, LAY, FACET_HULLS;" in content
         assert "function pickMu(px,py)" in content
         assert "function markerPos(mu)" in content
         assert "function selectedVertex(mu)" in content
         assert "function facetMu(F,px,py)" in content
         assert "function triBary(a,b,c,px,py)" in content
+        # region diagram: host-subspace geometry + boundary-phase labels
+        assert "var HOST_ELS =" in content
+        assert "function outerSegments()" in content
+        assert "var OUTER=outerSegments()" in content
+        assert "function edgePhases(i,j)" in content
+        assert "function drawEdgeLabel(i,j)" in content
+        # no vertex labels (V1..Vn) on the region diagram
+        assert 'fillText("V"' not in content
 
     def test_doped_line_style(self, tmp_path):
         """Doped defects should use dashed lines."""
