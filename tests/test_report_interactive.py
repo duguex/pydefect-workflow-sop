@@ -666,6 +666,16 @@ class TestGenerateInteractiveHtml:
         assert 'pickPath="facet"' in content
         assert 'pickPath="fan"' in content
         assert "0.1*HULL.tol" in content
+        # fixed-mu section: constrain elements → draw the constrained subspace
+        assert "var FIXED = {};" in content
+        assert "var SECTION = null;" in content
+        assert "function buildSection()" in content
+        assert "function pickSection(px,py)" in content
+        assert "function secPos(mu)" in content
+        assert "function sectionLabel(oi,oj)" in content
+        assert "function muFromSection(w)" in content
+        assert "class='mufix'" in content
+        assert "约束下无稳定区" in content
         assert "function selectedVertex(mu)" in content
         assert "function facetMu(F,px,py)" in content
         assert "function triBary(a,b,c,px,py)" in content

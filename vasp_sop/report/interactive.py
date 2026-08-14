@@ -664,6 +664,160 @@ function computeEdges(FV){{
   return e;
 }}
 var ALL_EDGES = computeEdges(ALL_FACET_VERTS);
+
+// ---- fixed-mu section: constrain element chemical potentials ----
+// Fixing host-element mu values cuts the stability polytope by the
+// hyperplane (mu_fixed = c): the section is the convex polygon of the
+// edge×hyperplane intersections (each intersection = one polytope edge,
+// linearly interpolated in full mu space). d = (N_host-1) - n_fixed is the
+// section dimension: 2 → polygon, 1 → segment, 0 → point, empty → no
+// stability region under the constraint. Section edges inherit the
+// competing phase of the target face containing both support edges.
+var FIXED = {{}};
+var SECTION = null;
+function buildSection(){{
+  var fe=[],cv={{}};
+  for(var e in FIXED)if(HOST_ELS.indexOf(e)>=0&&FIXED[e]!==undefined&&FIXED[e]!==null){{fe.push(e);cv[e]=FIXED[e];}}
+  if(!fe.length)return null;
+  var free=HOST_ELS.filter(function(e){{return fe.indexOf(e)<0;}});
+  var seen={{}},pts=[];
+  ALL_EDGES.forEach(function(ed){{
+    var a=VERTEX_MU[ed[0]],b=VERTEX_MU[ed[1]];
+    var t=null,ok=true;
+    fe.forEach(function(e){{
+      var va=a[e],vb=b[e];
+      if(va===undefined||vb===undefined){{ok=false;return;}}
+      var den=vb-va;
+      var ti=Math.abs(den)>1e-12?(cv[e]-va)/den:(Math.abs(cv[e]-va)<1e-9?0:null);
+      if(ti===null){{ok=false;return;}}
+      if(t===null)t=ti;else if(Math.abs(t-ti)>1e-6)ok=false;
+    }});
+    if(!ok||t===null)return;
+    if(t<-1e-9||t>1+1e-9)return;
+    var t2=Math.max(0,Math.min(1,t));
+    var mu={{}};
+    for(var el in a)mu[el]=a[el]*(1-t2)+(b[el]!==undefined?b[el]:a[el])*t2;
+    var key=free.map(function(e){{return mu[e]!==undefined?mu[e].toFixed(5):"x";}}).join(",");
+    if(seen[key])return;
+    seen[key]=true;
+    pts.push({{mu:mu,ed:ed,t:t2}});
+  }});
+  var S={{fe:fe,cv:cv,free:free,pts:pts,d:HOST_ELS.length-1-fe.length,empty:pts.length===0}};
+  if(!S.empty){{
+    if(S.d===2){{
+      var xs=pts.map(function(p){{return p.mu[S.free[0]]||0;}});
+      var ys=pts.map(function(p){{return p.mu[S.free[1]]||0;}});
+      var x0=Math.min.apply(null,xs),x1=Math.max.apply(null,xs);
+      var y0=Math.min.apply(null,ys),y1=Math.max.apply(null,ys);
+      S.box={{x0:x0,y0:y0,sx:(x1-x0)||1,sy:(y1-y0)||1}};
+      var pad=0.07,span=1-2*pad;
+      S.xy=pts.map(function(p){{return[pad+((p.mu[S.free[0]]||0)-x0)/S.box.sx*span,pad+((p.mu[S.free[1]]||0)-y0)/S.box.sy*span];}});
+      S.order=hull2D(pts.map(function(p,i){{return i;}}),S.xy);
+    }}else if(S.d===1){{
+      var vals=pts.map(function(p){{return p.mu[S.free[0]]||0;}});
+      var m0=Math.min.apply(null,vals),m1=Math.max.apply(null,vals);
+      S.box={{x0:m0,y0:0,sx:(m1-m0)||1,sy:1}};
+      var pad1=0.08,span1=1-2*pad1;
+      var xy1=pts.map(function(p){{return[pad1+((p.mu[S.free[0]]||0)-m0)/S.box.sx*span1,0.5];}});
+      S.xy=xy1;
+      S.order=pts.map(function(p,i){{return i;}}).sort(function(a,b){{return xy1[a][0]-xy1[b][0];}});
+    }}else{{
+      S.box={{x0:0,y0:0,sx:1,sy:1}};
+      S.xy=pts.map(function(){{return[0.5,0.5];}});
+      S.order=[];
+    }}
+  }}
+  return S;
+}}
+function sectionLabel(oi,oj){{
+  var ed1=SECTION.pts[SECTION.order[oi]].ed,ed2=SECTION.pts[SECTION.order[oj]].ed;
+  var cand=ALL_FACET_VERTS.filter(function(F){{
+    return F.indexOf(ed1[0])>=0&&F.indexOf(ed1[1])>=0&&F.indexOf(ed2[0])>=0&&F.indexOf(ed2[1])>=0;
+  }});
+  if(!cand.length)return "";
+  var F=cand[0];
+  var inter=(VPHASES[F[0]].competing||[]);
+  for(var i2=1;i2<F.length;i2++){{var L2=VPHASES[F[i2]].competing||[];inter=inter.filter(function(x){{return L2.indexOf(x)>=0;}});}}
+  return inter.join(" · ");
+}}
+function muFromSection(w){{
+  // w: weights over SECTION.pts (index → weight); returns full mu with fixed values
+  var mu={{}};
+  for(var e in SECTION.cv)mu[e]=SECTION.cv[e];
+  SECTION.pts.forEach(function(pt,i){{
+    if(!w[i])return;
+    for(var e2 in pt.mu){{
+      if(SECTION.cv[e2]!==undefined)continue;
+      mu[e2]=(mu[e2]||0)+w[i]*pt.mu[e2];
+    }}
+  }});
+  return mu;
+}}
+function pickSection(px,py){{
+  var n=SECTION.pts.length,ord=SECTION.order;
+  var best=-1,bd=Infinity;
+  SECTION.xy.forEach(function(l,i){{
+    var q=layPx(l),d=Math.hypot(px-q[0],py-q[1]);
+    if(d<bd){{bd=d;best=i;}}
+  }});
+  if(bd<=14){{pickPath="vertex";selectionMode="截面顶点";var w=new Array(n).fill(0);w[best]=1;return muFromSection(w);}}
+  if(SECTION.d===2){{
+    for(var k=1;k<ord.length-1;k++){{
+      var tb=triBary(layPx(SECTION.xy[ord[0]]),layPx(SECTION.xy[ord[k]]),layPx(SECTION.xy[ord[k+1]]),px,py);
+      if(tb&&tb[0]>=-1e-9&&tb[1]>=-1e-9&&tb[2]>=-1e-9){{
+        var w=new Array(n).fill(0);
+        w[ord[0]]=tb[0];w[ord[k]]=tb[1];w[ord[k+1]]=tb[2];
+        pickPath="facet";selectionMode="区域内插值";
+        return muFromSection(w);
+      }}
+    }}
+  }}
+  var bestT=-1,bestE=-1,be=Infinity;
+  for(var e2=0;e2<ord.length;e2++){{
+    var a=layPx(SECTION.xy[ord[e2]]),b2=layPx(SECTION.xy[ord[(e2+1)%ord.length]]);
+    var dx=b2[0]-a[0],dy=b2[1]-a[1],len2=dx*dx+dy*dy;
+    var t=len2>1e-9?((px-a[0])*dx+(py-a[1])*dy)/len2:0;
+    t=Math.max(0,Math.min(1,t));
+    var qx=a[0]+t*dx,qy=a[1]+t*dy;
+    var d=Math.hypot(px-qx,py-qy);
+    if(d<be){{be=d;bestT=t;bestE=e2;}}
+  }}
+  if(bestE>=0&&be<=8){{
+    var w=new Array(n).fill(0);
+    w[ord[bestE]]=1-bestT;w[ord[(bestE+1)%ord.length]]=bestT;
+    pickPath="edge";selectionMode="边界插值";
+    return muFromSection(w);
+  }}
+  if(best>=0){{pickPath="vertex";selectionMode="截面顶点";var w=new Array(n).fill(0);w[best]=1;return muFromSection(w);}}
+  return null;
+}}
+function secPos(mu){{
+  // position of mu's free part in the section drawing, clamped to the section
+  if(SECTION.empty)return layPx([0.5,0.5]);
+  var fx=mu[SECTION.free[0]],fy=mu[SECTION.free[1]];
+  if(fx===undefined||fy===undefined)return layPx([0.5,0.5]);
+  var p=layPx([0.07+((fx-SECTION.box.x0)/SECTION.box.sx)*0.86,0.07+((fy-SECTION.box.y0)/SECTION.box.sy)*0.86]);
+  if(SECTION.d===1)return layPx([0.08+((fx-SECTION.box.x0)/SECTION.box.sx)*0.84,0.5]);
+  if(SECTION.d===0)return layPx([0.5,0.5]);
+  // clamp into the section polygon
+  var ord=SECTION.order;
+  for(var k=1;k<ord.length-1;k++){{
+    var tb=triBary(layPx(SECTION.xy[ord[0]]),layPx(SECTION.xy[ord[k]]),layPx(SECTION.xy[ord[k+1]]),p[0],p[1]);
+    if(tb&&tb[0]>=-1e-9&&tb[1]>=-1e-9&&tb[2]>=-1e-9)return p;
+  }}
+  var best=null,bestD=Infinity;
+  for(var e2=0;e2<ord.length;e2++){{
+    var a=layPx(SECTION.xy[ord[e2]]),b2=layPx(SECTION.xy[ord[(e2+1)%ord.length]]);
+    var dx=b2[0]-a[0],dy=b2[1]-a[1],len2=dx*dx+dy*dy;
+    var t=len2>1e-9?((p[0]-a[0])*dx+(p[1]-a[1])*dy)/len2:0;
+    t=Math.max(0,Math.min(1,t));
+    var qx=a[0]+t*dx,qy=a[1]+t*dy;
+    var d=(p[0]-qx)*(p[0]-qx)+(p[1]-qy)*(p[1]-qy);
+    if(d<bestD){{bestD=d;best=[qx,qy];}}
+  }}
+  return best||p;
+}}
+
 function springLayout(seed,edges){{
   var n=seed.length,pos=seed.map(function(p){{return [p[0],p[1]];}});
   if(n<2)return [[0.5,0.5]];
@@ -897,6 +1051,7 @@ function closestBoundary(p,order){{
   return best||p;
 }}
 function markerPos(mu){{
+  if(SECTION)return secPos(mu);
   var u=HULL.proj(mu);
   var ins=hullState(mu).inside;
   if(ins){{
@@ -1003,6 +1158,10 @@ function facetMu(F,px,py){{
   return null;
 }}
 function pickMu(px,py){{
+  if(SECTION&&!SECTION.empty){{
+    var mu=pickSection(px,py);
+    if(mu)return mu;
+  }}
   var p=invLay(px,py),scx=cW-cP.l-cP.r,scy=cH-cP.t-cP.b;
   var best=-1,bd=Infinity;
   LAY.forEach(function(l,i){{
@@ -1083,6 +1242,65 @@ var curMu=JSON.parse(JSON.stringify(VERTEX_MU[0]));
     return common + f"""
 function drawCPD(mu){{
   cctx.clearRect(0,0,cW,cH);
+  if(SECTION){{
+    if(SECTION.empty){{
+      cctx.fillStyle="#555";cctx.font="19px Arial";cctx.textAlign="center";
+      cctx.fillText("约束下无稳定区",cW/2,cH/2-10);
+      var fixDesc=SECTION.fe.map(function(e){{return "μ_"+e+"="+SECTION.cv[e].toFixed(2);}}).join(" · ");
+      cctx.font="13px Arial";
+      cctx.fillText(fixDesc,cW/2,cH/2+12);
+      return;
+    }}
+    if(SECTION.d===2){{
+      var ord=SECTION.order;
+      cctx.beginPath();
+      ord.forEach(function(vi,i){{var p=layPx(SECTION.xy[vi]);i===0?cctx.moveTo(p[0],p[1]):cctx.lineTo(p[0],p[1]);}});
+      cctx.closePath();
+      cctx.fillStyle="rgba(22,155,120,0.10)";cctx.fill();
+      cctx.strokeStyle="#475569";cctx.lineWidth=2;cctx.stroke();
+      for(var e2=0;e2<ord.length;e2++){{
+        var ph=sectionLabel(e2,(e2+1)%ord.length);
+        if(!ph)continue;
+        var a=layPx(SECTION.xy[ord[e2]]),b2=layPx(SECTION.xy[ord[(e2+1)%ord.length]]);
+        var mx=(a[0]+b2[0])/2,my=(a[1]+b2[1])/2;
+        var dx=b2[0]-a[0],dy=b2[1]-a[1],L=Math.sqrt(dx*dx+dy*dy)||1;
+        var nx=-dy/L,ny=dx/L;
+        var cx=0,cy=0;SECTION.xy.forEach(function(l){{cx+=l[0];cy+=l[1];}});cx/=SECTION.xy.length;cy/=SECTION.xy.length;
+        var px0=cP.l+cx*(cW-cP.l-cP.r),py0=cP.t+cy*(cH-cP.t-cP.b);
+        if((mx-px0)*nx+(my-py0)*ny<0){{nx=-nx;ny=-ny;}}
+        var tx=mx+nx*11,ty=my+ny*11;
+        cctx.font="600 10px Arial";cctx.textAlign="center";cctx.textBaseline="middle";
+        var w=cctx.measureText(ph).width+8;
+        cctx.fillStyle="rgba(255,255,255,0.88)";cctx.fillRect(tx-w/2,ty-8,w,16);
+        cctx.fillStyle="#374151";cctx.fillText(ph,tx,ty+1);
+      }}
+      SECTION.xy.forEach(function(l){{var p=layPx(l);cctx.fillStyle="#334155";cctx.beginPath();cctx.arc(p[0],p[1],3.2,0,2*Math.PI);cctx.fill();}});
+    }}else if(SECTION.d===1){{
+      var ord=SECTION.order;
+      var a=layPx(SECTION.xy[ord[0]]),b2=layPx(SECTION.xy[ord[ord.length-1]]);
+      cctx.strokeStyle="#475569";cctx.lineWidth=2;
+      cctx.beginPath();cctx.moveTo(a[0],a[1]);cctx.lineTo(b2[0],b2[1]);cctx.stroke();
+      var ph=sectionLabel(0,ord.length-1);
+      if(ph){{
+        cctx.font="600 10px Arial";cctx.textAlign="center";cctx.textBaseline="middle";
+        var w=cctx.measureText(ph).width+8;
+        cctx.fillStyle="rgba(255,255,255,0.88)";cctx.fillRect((a[0]+b2[0])/2-w/2,(a[1]+b2[1])/2-8,w,16);
+        cctx.fillStyle="#374151";cctx.fillText(ph,(a[0]+b2[0])/2,(a[1]+b2[1])/2+1);
+      }}
+      SECTION.xy.forEach(function(l){{var p=layPx(l);cctx.fillStyle="#334155";cctx.beginPath();cctx.arc(p[0],p[1],3.2,0,2*Math.PI);cctx.fill();}});
+    }}else{{
+      var p=layPx([0.5,0.5]);
+      cctx.fillStyle="#334155";cctx.beginPath();cctx.arc(p[0],p[1],4,0,2*Math.PI);cctx.fill();
+    }}
+    if(mu){{
+      var p=secPos(mu);
+      cctx.beginPath();cctx.arc(p[0],p[1],6,0,2*Math.PI);
+      cctx.fillStyle="#169b78";cctx.fill();
+      cctx.strokeStyle=hullState(mu).inside?"#fff":"#e11d48";
+      cctx.lineWidth=2;cctx.stroke();
+    }}
+    return;
+  }}
   if(HULL.r===1){{
     // binary: the stability region IS the segment; label endpoints too
     var a0=layPx(LAY[0]),b0=layPx(LAY[1]);
@@ -1188,9 +1406,12 @@ canvas{{display:block;background:var(--canvas);border:1px solid var(--line);bord
 .selection-card__mu{{margin:7px 0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;line-height:1.45;color:#4c596d;word-break:break-word}}
 .mupanel{{font-size:12px;color:#444}}
 .mupanel-title{{font-size:11px;font-weight:700;color:var(--muted);margin:2px 0 5px;letter-spacing:.02em}}
-.murow{{display:grid;grid-template-columns:30px 42px 1fr 42px;gap:6px;align-items:center;margin:3px 0}}
+.murow{{display:grid;grid-template-columns:30px 42px 1fr 42px 34px;gap:6px;align-items:center;margin:3px 0}}
 .muel{{font-weight:700;color:#334155}}.mumin,.mumax{{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:10px;color:#7b8797;text-align:right}}
 .muslider{{width:100%;height:16px;accent-color:var(--accent);margin:0;cursor:pointer}}
+.mufix{{font-size:10px;line-height:1;padding:3px 0;border:1px solid var(--line);border-radius:5px;background:#fff;color:#64748b;cursor:pointer;font-weight:700}}
+.mufix.on{{background:var(--accent);border-color:var(--accent);color:#fff}}
+.muslider:disabled{{opacity:.45;cursor:not-allowed}}
 .fe-workspace{{display:block}}
 .fe-plot{{min-width:0;position:relative}}
 .fe-tip{{position:absolute;z-index:40;display:none;overflow-y:auto;background:#fff;border:1px solid var(--line);border-radius:8px;box-shadow:0 6px 18px rgba(15,23,42,.16);padding:8px 10px;font-size:14px}}
@@ -1213,7 +1434,7 @@ canvas{{display:block;background:var(--canvas);border:1px solid var(--line);bord
 <main class="report-grid">
 <section class="report-card" id="cpdCard"><header class="report-card__head"><h3>化学势稳定区</h3><span class="report-card__hint">拖动或点击选择化学条件</span></header><div class="report-card__body cpd-card__body">
 <canvas id="cpd" width="420" height="420"></canvas>
-<section class="selection-card" aria-live="polite"><div class="selection-card__head"><span class="selection-card__title">当前化学条件</span><span id="selection-state" class="selection-card__state">区域内插值</span></div><div id="selection-constraints" class="selection-card__constraints"></div><div id="selection-mu" class="selection-card__mu"></div><div class="mupanel"><div class="mupanel-title">化学势 μ (eV) · 拖动滑块逐元素调节</div><div id="murows"></div></div></section>
+<section class="selection-card" aria-live="polite"><div class="selection-card__head"><span class="selection-card__title">当前化学条件</span><span id="selection-state" class="selection-card__state">区域内插值</span></div><div id="selection-constraints" class="selection-card__constraints"></div><div id="selection-mu" class="selection-card__mu"></div><div class="mupanel"><div class="mupanel-title">化学势 μ (eV) · 拖动滑块逐元素调节 · 点「固定」约束该元素并绘制截面</div><div id="murows"></div></div></section>
 </div></section>
 <section class="report-card" id="feCard"><header class="report-card__head"><h3>缺陷形成能</h3><span class="report-card__hint">移动查询 E<sub>F</sub></span></header><div class="report-card__body"><div class="fe-workspace"><div class="fe-plot"><canvas id="cv" width="800" height="520"></canvas><div class="leg" id="leg"></div><div class="fe-note">查询层按 E<sub>f</sub> 降序列出当前可见缺陷 · 本征缺陷 · 1000 K · 未含自由载流子</div></div></div></div></section>
 <div id="tip" class="fe-tip"></div>
@@ -1519,16 +1740,28 @@ function buildMuPanel(){
     row.innerHTML="<span class='muel'>"+e+"</span>"+
       "<span class='mumin'>"+mn.toFixed(2)+"</span>"+
       "<input type='range' class='muslider' min='"+mn.toFixed(4)+"' max='"+mx.toFixed(4)+"' step='0.001' value='"+init.toFixed(4)+"'>"+
-      "<span class='mumax'>"+mx.toFixed(2)+"</span>";
+      "<span class='mumax'>"+mx.toFixed(2)+"</span>"+
+      "<button type='button' class='mufix' title='固定该元素化学势：绘制固定约束下的截面'>固定</button>";
     box.appendChild(row);
     var slider=row.querySelector(".muslider");
+    var fix=row.querySelector(".mufix");
     slider.addEventListener("input",function(){
       pickPath="slider";
       curMu[e]=parseFloat(slider.value);
       selectionMode="逐元素";
       update(curMu);
     });
-    rows[e]={mn:mn,mx:mx,slider:slider};
+    fix.addEventListener("click",function(){
+      if(FIXED[e]!==undefined&&FIXED[e]!==null){
+        FIXED[e]=null;fix.classList.remove("on");fix.textContent="固定";slider.disabled=false;
+      }else{
+        FIXED[e]=curMu[e]!==undefined?curMu[e]:mn;fix.classList.add("on");fix.textContent="固定✓";slider.disabled=true;
+      }
+      SECTION=buildSection();
+      pickPath="slider";
+      update(curMu);
+    });
+    rows[e]={mn:mn,mx:mx,slider:slider,fix:fix};
   });
   return rows;
 }
@@ -1536,6 +1769,11 @@ var muRows=buildMuPanel();
 function updateMuPanel(mu){
   for(var e in muRows){
     var r=muRows[e],v=mu[e];if(v===undefined)continue;
+    var fixed=FIXED[e]!==undefined&&FIXED[e]!==null;
+    if(fixed!==r.slider.disabled){
+      r.slider.disabled=fixed;
+      if(fixed){r.fix.classList.add("on");r.fix.textContent="固定✓";}else{r.fix.classList.remove("on");r.fix.textContent="固定";}
+    }
     r.slider.value=Math.max(r.mn,Math.min(r.mx,v));
   }
 }
@@ -1555,6 +1793,10 @@ function updateSelectionCard(mu){
     constraints.textContent=selectionMode==="逐元素"
       ?"逐元素自由调节；当前点在稳定区内 · 距边界 +"+hs.dist.toFixed(2)+" eV"
       :(selectionMode==="边界插值"?"沿稳定区边界插值；无单一顶点约束":"稳定区内部插值；无单一顶点约束");
+  }
+  if(SECTION){
+    var fixDesc=SECTION.fe.map(function(e){return "μ_"+e+" = "+SECTION.cv[e].toFixed(4)+" eV（固定）";}).join(" · ");
+    constraints.textContent=fixDesc+" · 截面维数 "+SECTION.d+(SECTION.empty?" · 约束下无稳定区":"");
   }
   var entries=[];Object.keys(mu).sort().forEach(function(k){entries.push("μ_"+k+" = "+mu[k].toFixed(4)+" eV");});
   document.getElementById("selection-mu").textContent=entries.join(" · ");
