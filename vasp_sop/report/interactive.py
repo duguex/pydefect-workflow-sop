@@ -10,10 +10,10 @@ chemical-potential dragging inside the stability region, matching the static
 ``pydefect pe`` PDF plots in a live, interactive form.
 
 Supports:
-  - 2-vertex (binary):    1-D slider with linear interpolation
-  - 3-vertex (ternary):   triangle with barycentric
-  - 4-vertex (ternary):   quadrilateral with two-triangle barycentric
   - 1-vertex (unary):     static plot (no CPD interactivity)
+  - N-vertex (N >= 2):    topological map of the exact N-dim stability
+                          polytope (true N-dim edges and facets); clicks
+                          select vertex / facet-interior / edge μ exactly
 
 Public API
 ----------
@@ -448,35 +448,7 @@ def _defect_segments(name: str) -> list[list[str]]:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# JS helpers — barycentric & lerp code generation
-# ═════════════════════════════════════════════════════════════════════
-
-def _bary_js(
-    verts: list[list[float]], tri: tuple[int, int, int]
-) -> str:
-    """Return a JS function string for barycentric interpolation in *tri*."""
-    i0, i1, i2 = tri
-    t0, t1, t2 = verts[i0], verts[i1], verts[i2]
-
-    d = (t1[1] - t2[1]) * (t0[0] - t2[0]) + (t2[0] - t1[0]) * (t0[1] - t2[1])
-
-    a_c = t1[1] - t2[1]; a_px = -a_c * t2[0]
-    a_d = t2[0] - t1[0]; a_py = -a_d * t2[1]
-    b_c = t2[1] - t0[1]; b_px = -b_c * t2[0]
-    b_d = t0[0] - t2[0]; b_py = -b_d * t2[1]
-
-    lines = [
-        f"function(px,py)", "{",
-        f"  var d={d:.10g};if(Math.abs(d)<1e-15)return null;",
-        f"  var a=({a_c:.10g}*px+{a_px:.10g}+{a_d:.10g}*py+{a_py:.10g})/d;",
-        f"  var b=({b_c:.10g}*px+{b_px:.10g}+{b_d:.10g}*py+{b_py:.10g})/d;",
-        f"  var c=1-a-b;var inside=a>=-0.001&&b>=-0.001&&c>=-0.001;a=Math.max(0,Math.min(1,a));b=Math.max(0,Math.min(1,b));c=1-a-b;if(c<0){{b=1-a;c=0;}}return[a,b,c,inside];}}",
-    ]
-    return "\n".join(lines)
-
-
-# ═════════════════════════════════════════════════════════════════════
-# CPD widget JS (per vertex count)
+# JS helpers — CPD geometry: 2D seed projection
 # ═════════════════════════════════════════════════════════════════════
 
 def _convex_hull(points: list[list[float]]) -> list[int]:
@@ -508,225 +480,373 @@ def _convex_hull(points: list[list[float]]) -> list[int]:
     return [i for _, i in lower[:-1] + upper[:-1]]
 
 
-def _ear_clip(poly: list[list[float]]) -> list[tuple[int, int, int]]:
-    """Ear-clipping triangulation of a simple polygon (concave OK).
-
-    Returns triangle vertex-index tuples (N-2 for N>=3).  Falls back to a
-    fan when no ear is found (numerically degenerate input) rather than
-    raising, so the widget stays functional.
-    """
-    n = len(poly)
-    if n < 3:
-        return []
-    idx = list(range(n))
-    tris: list[tuple[int, int, int]] = []
-    area2 = 0.0
-    for i in range(n):
-        x1, y1 = poly[i]
-        x2, y2 = poly[(i + 1) % n]
-        area2 += x1 * y2 - x2 * y1
-    orient = 1.0 if area2 >= 0 else -1.0
-
-    def cross(o, a, b):
-        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
-
-    def in_tri(p, a, b, c):
-        d1 = cross(a, b, p)
-        d2 = cross(b, c, p)
-        d3 = cross(c, a, p)
-        has_neg = d1 < -1e-9 or d2 < -1e-9 or d3 < -1e-9
-        has_pos = d1 > 1e-9 or d2 > 1e-9 or d3 > 1e-9
-        return not (has_neg and has_pos)
-
-    while len(idx) > 3:
-        ear = None
-        for i in range(len(idx)):
-            i0, i1, i2 = idx[i - 1], idx[i], idx[(i + 1) % len(idx)]
-            a, b, c = poly[i0], poly[i1], poly[i2]
-            if cross(a, b, c) * orient <= 0:
-                continue  # reflex (or degenerate) corner
-            if any(
-                in_tri(poly[j], a, b, c) for j in idx if j not in (i0, i1, i2)
-            ):
-                continue
-            ear = i
-            break
-        if ear is None:
-            for i in range(1, len(idx) - 1):
-                tris.append((idx[0], idx[i], idx[i + 1]))
-            break
-        i0, i1, i2 = idx[ear - 1], idx[ear], idx[(ear + 1) % len(idx)]
-        tris.append((i0, i1, i2))
-        del idx[ear]
-    if len(idx) == 3:
-        tris.append((idx[0], idx[1], idx[2]))
-    return tris
-
-
 def _cpd_canvas_js(
     n_vertices: int,
     poly_2d: list[list[float]],
     vertex_mu: list[dict[str, float]],
     vertex_names: list[str],
     vertex_phases: list[dict[str, list[str]]],
-    ax0: str,
-    ax1: str,
-    a0_range: tuple[float, float],
-    a1_range: tuple[float, float],
 ) -> str:
-    """Return the CPD canvas + getMu JS block for *n_vertices*."""
+    """Return the CPD canvas JS block for *n_vertices*.
+
+    The stability region is drawn as a TOPOLOGICAL map of the high-dim
+    convex polytope (its true combinatorial structure): vertices at
+    deterministic spring-layout positions seeded by the 2D projection,
+    real N-dim edges as lines, facets as filled regions. Selection is
+    face-level exact: a vertex click picks the exact vertex mu, a facet
+    region click the N-dim barycentric combination of that facet's
+    vertices (weights from the 2D drawing), an edge click interpolates
+    its endpoints. Every canvas selection is inside the polytope by
+    construction — 区域外 can only come from the per-element sliders.
+    """
     js = json.dumps
 
     common = f"""
 var cc = document.getElementById("cpd"), cctx = cc.getContext("2d");
 var cW = 300, cH = 300, cP = {{l:35,r:10,t:20,b:25}};
-var a0R = [{a0_range[0]},{a0_range[1]}], a1R = [{a1_range[0]},{a1_range[1]}];
-var POLY = {js(poly_2d)};
+var POLY = {js(poly_2d)};   // 2D projection — spring-layout seed only
 var VPHASES = {js(vertex_phases)};
 var VERTEX_MU = {js(vertex_mu)};
 var selectionMode = "区域内插值";
 
+// Exact stability-region geometry in mu space: the vertices' convex hull in
+// its r-dim affine subspace. Membership = every facet signed distance >= 0;
+// the boundary distance is their minimum (positive inside, negative out).
+// Tolerances are scale-relative (1e-4 of the largest vertex difference)
+// and defined BEFORE buildHull runs. For hulls with near-coplanar vertices
+// the facet planes are ill-conditioned: the inside/outside verdict stays
+// exact, but the boundary distance may deviate by up to the gap (~0.02 eV).
+var HULL=buildHull();
+function buildHull(){{
+  var el=[];VERTEX_MU.forEach(function(vm){{for(var e in vm)if(el.indexOf(e)<0)el.push(e);}});
+  var n=VERTEX_MU.length,v0=VERTEX_MU[0],basis=[];
+  function proj(mu){{
+    var w=el.map(function(e){{return (mu[e]!==undefined?mu[e]:0)-(v0[e]!==undefined?v0[e]:0);}});
+    return basis.map(function(b){{var dot=0;for(var k=0;k<w.length;k++)dot+=w[k]*b[k];return dot;}});
+  }}
+  var maxNrm=0;
+  for(var i=1;i<n;i++){{
+    var w0=el.map(function(e){{return (VERTEX_MU[i][e]!==undefined?VERTEX_MU[i][e]:0)-(v0[e]!==undefined?v0[e]:0);}});
+    var n0=Math.sqrt(w0.reduce(function(s,x){{return s+x*x;}},0));
+    if(n0>maxNrm)maxNrm=n0;
+  }}
+  var tol=1e-4*maxNrm;
+  for(var i=1;i<n;i++){{
+    var w=el.map(function(e){{return (VERTEX_MU[i][e]!==undefined?VERTEX_MU[i][e]:0)-(v0[e]!==undefined?v0[e]:0);}});
+    basis.forEach(function(b){{var dot=0;for(var k=0;k<w.length;k++)dot+=w[k]*b[k];for(var k=0;k<w.length;k++)w[k]-=dot*b[k];}});
+    var nrm=Math.sqrt(w.reduce(function(s,x){{return s+x*x;}},0));
+    if(nrm>tol){{for(var k=0;k<w.length;k++)w[k]/=nrm;basis.push(w);}}
+  }}
+  var r=basis.length,U=VERTEX_MU.map(proj),facets=[];
+  if(r===0){{
+    facets=[];
+  }}else if(r===1){{
+    var L=Math.sqrt(U[1].reduce(function(s,x,i){{return s+x*x;}},0));
+    facets=[{{b:L,verts:[0,1]}}];
+  }}else{{
+    function checkFacet(F){{
+      var base=U[F[0]],span=[];
+      for(var i3=1;i3<F.length;i3++){{
+        var w=U[F[i3]].slice();
+        for(var k3=0;k3<w.length;k3++)w[k3]-=base[k3];
+        span.forEach(function(b){{var dot=0;for(var k3=0;k3<w.length;k3++)dot+=w[k3]*b[k3];for(var k3=0;k3<w.length;k3++)w[k3]-=dot*b[k3];}});
+        var nrm=Math.sqrt(w.reduce(function(s,x){{return s+x*x;}},0));
+        if(nrm>1e-7){{for(var k3=0;k3<w.length;k3++)w[k3]/=nrm;span.push(w);}}
+      }}
+      if(span.length!==r-1)return;
+      // Normal seed: the sum of ALL vertex coordinates.
+      var nv=U[0].slice();
+      for(var i4=1;i4<U.length;i4++)for(var k4=0;k4<nv.length;k4++)nv[k4]+=U[i4][k4];
+      span.forEach(function(b){{var dot=0;for(var k=0;k<nv.length;k++)dot+=nv[k]*b[k];for(var k=0;k<nv.length;k++)nv[k]-=dot*b[k];}});
+      var nn=Math.sqrt(nv.reduce(function(s,x){{return s+x*x;}},0));
+      if(nn<1e-7)return;
+      for(var k=0;k<nv.length;k++)nv[k]/=nn;
+      var c=0;for(var k=0;k<nv.length;k++)c+=nv[k]*U[F[0]][k];
+      var mn=Infinity,mx=-Infinity;
+      U.forEach(function(u){{var s=0;for(var k=0;k<nv.length;k++)s+=nv[k]*u[k];s-=c;if(s<mn)mn=s;if(s>mx)mx=s;}});
+      if(mn<-tol){{
+        if(mx>tol)return;                 // plane cuts the hull: not a facet
+        for(var k=0;k<nv.length;k++)nv[k]*=-1;c=-c;mn=-mx;  // all on minus side: flip
+      }}
+      var fv=[];
+      U.forEach(function(u,i){{var s=0;for(var k=0;k<nv.length;k++)s+=nv[k]*u[k];s-=c;if(Math.abs(s)<=tol)fv.push(i);}});
+      facets.push({{n:nv,c:c,verts:fv}});
+    }}
+    function combos(start,k,cur){{
+      if(cur.length===k){{checkFacet(cur);return;}}
+      for(var j=start;j<=n-k+cur.length;j++){{cur.push(j);combos(j+1,k,cur);cur.pop();}}
+    }}
+    combos(0,r,[]);
+    // A non-simplicial facet (k>r coplanar vertices) is enumerated once per
+    // r-subset: keep one entry per distinct plane.
+    var seenPlanes={{}};
+    facets=facets.filter(function(f){{
+      var key=f.n.map(function(x){{return x.toFixed(5);}}).join(",")+"|"+f.c.toFixed(5);
+      if(seenPlanes[key])return false;
+      seenPlanes[key]=true;return true;
+    }});
+  }}
+  return {{proj:proj,facets:facets,r:r,tol:tol}};
+}}
+function hullState(mu){{
+  var u=HULL.proj(mu);
+  if(HULL.r===0){{
+    var d=Math.sqrt(u.reduce(function(s,x){{return s+x*x;}},0));
+    return {{inside:d<=HULL.tol,dist:d}};
+  }}
+  if(HULL.r===1){{
+    var L=HULL.facets[0].b,t=u[0]/L;
+    if(t<0||t>1)return {{inside:false,dist:Math.min(-t*L,(t-1)*L)}};
+    return {{inside:true,dist:Math.min(t*L,(1-t)*L)}};
+  }}
+  var dist=Infinity,inside=true;
+  HULL.facets.forEach(function(f){{
+    var s=-f.c;for(var k=0;k<f.n.length;k++)s+=f.n[k]*u[k];
+    if(s<dist)dist=s;
+    if(s< -HULL.tol)inside=false;
+  }});
+  return {{inside:inside,dist:dist}};
+}}
+
+// ---- topological map: true adjacency of the N-dim polytope ----
+var FACET_VERTS = HULL.facets.map(function(f){{return f.verts||[];}});
+function computeEdges(){{
+  var e=[];
+  for(var i=0;i<VERTEX_MU.length;i++)for(var j=i+1;j<VERTEX_MU.length;j++){{
+    var T=FACET_VERTS.filter(function(F){{return F.indexOf(i)>=0&&F.indexOf(j)>=0;}});
+    if(!T.length)continue;
+    var common=T[0].slice();
+    T.forEach(function(F){{common=common.filter(function(x){{return F.indexOf(x)>=0;}});}});
+    if(common.length===2)e.push([i,j]);
+  }}
+  return e;
+}}
+function springLayout(seed,edges){{
+  var n=seed.length,pos=seed.map(function(p){{return [p[0],p[1]];}});
+  if(n<2)return [[0.5,0.5]];
+  var k=Math.sqrt(1/n),t=k*2;
+  for(var it=0;it<120;it++){{
+    var disp=pos.map(function(){{return [0,0];}});
+    for(var i=0;i<n;i++)for(var j=i+1;j<n;j++){{
+      var dx=pos[i][0]-pos[j][0],dy=pos[i][1]-pos[j][1];
+      var d=Math.sqrt(dx*dx+dy*dy)||1e-6;
+      var f=k*k/d;
+      disp[i][0]+=dx/d*f;disp[i][1]+=dy/d*f;
+      disp[j][0]-=dx/d*f;disp[j][1]-=dy/d*f;
+    }}
+    edges.forEach(function(e){{
+      var dx=pos[e[0]][0]-pos[e[1]][0],dy=pos[e[0]][1]-pos[e[1]][1];
+      var d=Math.sqrt(dx*dx+dy*dy)||1e-6;
+      var f=d*d/k;
+      disp[e[0]][0]-=dx/d*f;disp[e[0]][1]-=dy/d*f;
+      disp[e[1]][0]+=dx/d*f;disp[e[1]][1]+=dy/d*f;
+    }});
+    pos.forEach(function(p,i){{
+      var dm=Math.sqrt(disp[i][0]*disp[i][0]+disp[i][1]*disp[i][1])||1e-6;
+      var step=Math.min(dm,t);
+      p[0]+=disp[i][0]/dm*step;p[1]+=disp[i][1]/dm*step;
+    }});
+    t*=0.95;
+  }}
+  var x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+  pos.forEach(function(p){{if(p[0]<x0)x0=p[0];if(p[0]>x1)x1=p[0];if(p[1]<y0)y0=p[1];if(p[1]>y1)y1=p[1];}});
+  var sx=(x1-x0)||1,sy=(y1-y0)||1;
+  return pos.map(function(p){{return [0.06+0.88*(p[0]-x0)/sx,0.06+0.88*(p[1]-y0)/sy];}});
+}}
+var EDGES=computeEdges();
+var LAY=springLayout(POLY,EDGES);
+function hull2D(idx){{
+  var pts=idx.map(function(i){{return {{i:i,x:LAY[i][0],y:LAY[i][1]}};}});
+  if(pts.length<3)return idx.slice();
+  pts.sort(function(a,b){{return a.x!==b.x?a.x-b.x:a.y-b.y;}});
+  function cross(o,a,b){{return (a.x-o.x)*(b.y-o.y)-(a.y-o.y)*(b.x-o.x);}}
+  var lo=[];
+  pts.forEach(function(p){{
+    while(lo.length>=2&&cross(lo[lo.length-2],lo[lo.length-1],p)<=0)lo.pop();
+    lo.push(p);
+  }});
+  var up=[];
+  for(var i=pts.length-1;i>=0;i--){{
+    var p=pts[i];
+    while(up.length>=2&&cross(up[up.length-2],up[up.length-1],p)<=0)up.pop();
+    up.push(p);
+  }}
+  lo.pop();up.pop();
+  return lo.concat(up).map(function(p){{return p.i;}});
+}}
+var FACET_HULLS=FACET_VERTS.map(hull2D);
+function fitAffine(){{
+  var r=HULL.r;
+  if(r===0)return {{M:[[0],[0]],o:[0.5,0.5]}};
+  var U=VERTEX_MU.map(function(v){{return HULL.proj(v);}});
+  var m=r+1,ATA=[],ATL=[[],[]];
+  for(var a=0;a<m;a++){{ATA.push([]);for(var b=0;b<m;b++)ATA[a].push(0);}}
+  for(var d=0;d<2;d++)for(var a=0;a<m;a++)ATL[d].push(0);
+  U.forEach(function(u,i){{
+    var row=u.slice();row.push(1);
+    for(var a=0;a<m;a++)for(var b=0;b<m;b++)ATA[a][b]+=row[a]*row[b];
+    for(var a=0;a<m;a++){{ATL[0][a]+=row[a]*LAY[i][0];ATL[1][a]+=row[a]*LAY[i][1];}}
+  }});
+  function solve(rhs){{
+    var A=ATA.map(function(r){{return r.slice();}}),b=rhs.slice();
+    for(var col=0;col<m;col++){{
+      var piv=col;
+      for(var rr=col+1;rr<m;rr++)if(Math.abs(A[rr][col])>Math.abs(A[piv][col]))piv=rr;
+      var t=A[col];A[col]=A[piv];A[piv]=t;t=b[col];b[col]=b[piv];b[piv]=t;
+      if(Math.abs(A[col][col])<1e-12)continue;
+      for(var rr=col+1;rr<m;rr++){{
+        var f=A[rr][col]/A[col][col];
+        for(var cc2=col;cc2<m;cc2++)A[rr][cc2]-=f*A[col][cc2];
+        b[rr]-=f*b[col];
+      }}
+    }}
+    var x=new Array(m).fill(0);
+    for(var rr=m-1;rr>=0;rr--){{
+      var s=b[rr];
+      for(var cc2=rr+1;cc2<m;cc2++)s-=A[rr][cc2]*x[cc2];
+      x[rr]=Math.abs(A[rr][rr])>1e-12?s/A[rr][rr]:0;
+    }}
+    return x;
+  }}
+  var b0=solve(ATL[0]),b1=solve(ATL[1]);
+  var M=[[],[]];
+  for(var k=0;k<r;k++){{M[0].push(b0[k]);M[1].push(b1[k]);}}
+  return {{M:M,o:[b0[r],b1[r]]}};
+}}
+var AFF=fitAffine();
+function layPx(p){{return [cP.l+p[0]*(cW-cP.l-cP.r),cP.t+p[1]*(cH-cP.t-cP.b)];}}
+function invLay(x,y){{return [(x-cP.l)/(cW-cP.l-cP.r),(y-cP.t)/(cH-cP.t-cP.b)];}}
+function markerPos(mu){{
+  var x=AFF.o[0],y=AFF.o[1];
+  if(HULL.r>0){{
+    var u=HULL.proj(mu);
+    for(var k=0;k<HULL.r;k++){{x+=AFF.M[0][k]*u[k];y+=AFF.M[1][k]*u[k];}}
+  }}
+  return layPx([x,y]);
+}}
 function selectedVertex(mu){{
-  var best=-1,dist=Infinity;
-  VERTEX_MU.forEach(function(vm,i){{
-    var dx=cX(vm["{ax0}"])-cX(mu["{ax0}"]),dy=cY(vm["{ax1}"])-cY(mu["{ax1}"]);
+  if(!mu)return -1;
+  var p=markerPos(mu),best=-1,dist=Infinity;
+  LAY.forEach(function(l,i){{
+    var q=layPx(l),dx=q[0]-p[0],dy=q[1]-p[1];
     var d=Math.sqrt(dx*dx+dy*dy);if(d<dist){{dist=d;best=i;}}
   }});
   return dist<=14?best:-1;
 }}
-
-function cX(v){{return cP.l+(v-a0R[0])/(a0R[1]-a0R[0])*(cW-cP.l-cP.r);}}
-function cY(v){{return cP.t+(1-(v-a1R[0])/(a1R[1]-a1R[0]))*(cH-cP.t-cP.b);}}
-function invX(x){{return a0R[0]+(x-cP.l)/(cW-cP.l-cP.r)*(a0R[1]-a0R[0]);}}
-function invY(y){{return a1R[0]+(1-(y-cP.t)/(cH-cP.t-cP.b))*(a1R[1]-a1R[0]);}}
-function projectToEdge(px,py,edges){{
-  var best=Infinity,bestT=0,bestI=0,bestJ=0;
-  for(var k=0;k<edges.length;k++){{
-    var i=edges[k][0],j=edges[k][1];
-    var ax=POLY[i][0],ay=POLY[i][1],bx=POLY[j][0],by=POLY[j][1];
-    var dx=bx-ax,dy=by-ay,len2=dx*dx+dy*dy;
-    if(len2<1e-15)continue;
-    var t=((px-ax)*dx+(py-ay)*dy)/len2;
-    t=Math.max(0,Math.min(1,t));
-    var cx=ax+t*dx,cy=ay+t*dy;
-    var dist=(px-cx)*(px-cx)+(py-cy)*(py-cy);
-    if(dist<best){{best=dist;bestT=t;bestI=i;bestJ=j;}}
+function triBary(a,b,c,px,py){{
+  var v0x=c[0]-a[0],v0y=c[1]-a[1],v1x=b[0]-a[0],v1y=b[1]-a[1];
+  var d00=v0x*v0x+v0y*v0y,d01=v0x*v1x+v0y*v1y,d11=v1x*v1x+v1y*v1y;
+  var d20=(px-a[0])*v0x+(py-a[1])*v0y,d21=(px-a[0])*v1x+(py-a[1])*v1y;
+  var den=d00*d11-d01*d01;
+  if(Math.abs(den)<1e-12)return null;
+  var v=(d11*d20-d01*d21)/den,w=(d00*d21-d01*d20)/den;
+  return [1-v-w,v,w];
+}}
+function facetMu(F,px,py){{
+  var pts=F.map(function(i){{return layPx(LAY[i]);}});
+  if(pts.length<3)return null;
+  var w=new Array(F.length).fill(0);
+  for(var k=1;k<pts.length-1;k++){{
+    var tb=triBary(pts[0],pts[k],pts[k+1],px,py);
+    if(tb&&tb[0]>=-1e-9&&tb[1]>=-1e-9&&tb[2]>=-1e-9){{
+      w[0]=tb[0];w[k]=tb[1];w[k+1]=tb[2];
+      var mu={{}};
+      F.forEach(function(vi,kk){{for(var e in VERTEX_MU[vi])mu[e]=(mu[e]||0)+w[kk]*VERTEX_MU[vi][e];}});
+      return mu;
+    }}
   }}
-  return{{t:bestT,i:bestI,j:bestJ}};
+  return null;
+}}
+function pickMu(px,py){{
+  var p=invLay(px,py),scx=cW-cP.l-cP.r,scy=cH-cP.t-cP.b;
+  var best=-1,bd=Infinity;
+  LAY.forEach(function(l,i){{
+    var dx=(l[0]-p[0])*scx,dy=(l[1]-p[1])*scy;
+    var d=Math.sqrt(dx*dx+dy*dy);
+    if(d<bd){{bd=d;best=i;}}
+  }});
+  if(bd<=14){{
+    selectionMode="当前顶点 V"+(best+1);
+    return JSON.parse(JSON.stringify(VERTEX_MU[best]));
+  }}
+  for(var fi=FACET_HULLS.length-1;fi>=0;fi--){{
+    var mu=facetMu(FACET_HULLS[fi],px,py);
+    if(mu){{selectionMode="区域内插值";return mu;}}
+  }}
+  var bestT=-1,bestE=-1,be=Infinity;
+  EDGES.forEach(function(e,ei){{
+    var a=layPx(LAY[e[0]]),b=layPx(LAY[e[1]]);
+    var dx=b[0]-a[0],dy=b[1]-a[1],len2=dx*dx+dy*dy;
+    var t=len2>1e-9?((px-a[0])*dx+(py-a[1])*dy)/len2:0;
+    t=Math.max(0,Math.min(1,t));
+    var qx=a[0]+t*dx,qy=a[1]+t*dy;
+    var d=Math.sqrt((px-qx)*(px-qx)+(py-qy)*(py-qy));
+    if(d<be){{be=d;bestT=t;bestE=ei;}}
+  }});
+  if(bestE>=0&&be<=8){{
+    selectionMode="边界插值";
+    var e=EDGES[bestE],va=VERTEX_MU[e[0]],vb=VERTEX_MU[e[1]],mu={{}};
+    for(var el in va)mu[el]=va[el]*(1-bestT)+vb[el]*bestT;
+    return mu;
+  }}
+  if(best>=0){{
+    selectionMode="当前顶点 V"+(best+1);
+    return JSON.parse(JSON.stringify(VERTEX_MU[best]));
+  }}
+  return null;
 }}
 """
 
     if n_vertices == 1:
-        # Static: no CPD canvas, getMu returns the single vertex
+        # Static: no CPD map; the single vertex is the only chemical condition
         return common + f"""
-function getMu() {{
-  return {js(vertex_mu[0])};
-}}
 function drawCPD(mu){{
   cctx.clearRect(0,0,cW,cH);
   cctx.fillStyle="#555";cctx.font="21px Arial";cctx.textAlign="center";
-  cctx.fillText("μ fixed at vertex {vertex_names[0]}",cW/2,cH/2);
+  cctx.fillText("mu fixed at vertex {vertex_names[0]}",cW/2,cH/2);
 }}
-var curMu = getMu();
+var curMu=JSON.parse(JSON.stringify(VERTEX_MU[0]));
 """
 
-    if n_vertices == 2:
-        return common + f"""
-function getMu(t){{
-  var mu={{}};
-  var v0=VERTEX_MU[0],v1=VERTEX_MU[1];
-  for(var e in v0){{mu[e]=v0[e]+t*(v1[e]-v0[e]);}}
-  return mu;
-}}
+    return common + f"""
 function drawCPD(mu){{
   cctx.clearRect(0,0,cW,cH);
-  var x0=cX(POLY[0][0]),y0=cY(POLY[0][1]);
-  var x1=cX(POLY[1][0]),y1=cY(POLY[1][1]);
-  cctx.strokeStyle="#64748b";cctx.lineWidth=2.5;cctx.lineCap="round";
-  cctx.beginPath();cctx.moveTo(x0,y0);cctx.lineTo(x1,y1);cctx.stroke();
-  [[x0,y0],[x1,y1]].forEach(function(p,i){{
+  FACET_HULLS.forEach(function(F){{
+    if(F.length<3)return;
+    cctx.beginPath();
+    F.forEach(function(vi,i){{
+      var p=layPx(LAY[vi]);
+      i===0?cctx.moveTo(p[0],p[1]):cctx.lineTo(p[0],p[1]);
+    }});
+    cctx.closePath();
+    cctx.fillStyle="rgba(22,155,120,0.07)";
+    cctx.fill();
+  }});
+  cctx.strokeStyle="#94a3b8";cctx.lineWidth=1;
+  EDGES.forEach(function(e){{
+    var a=layPx(LAY[e[0]]),b=layPx(LAY[e[1]]);
+    cctx.beginPath();cctx.moveTo(a[0],a[1]);cctx.lineTo(b[0],b[1]);cctx.stroke();
+  }});
+  LAY.forEach(function(l,i){{
+    var p=layPx(l);
     cctx.fillStyle="#334155";cctx.beginPath();cctx.arc(p[0],p[1],3.5,0,2*Math.PI);cctx.fill();
-    cctx.font="600 21px Arial";cctx.textAlign="left";cctx.fillText("V"+(i+1),p[0]+6,p[1]-6);
+    cctx.font="600 21px Arial";cctx.textAlign="left";
+    cctx.fillText("V"+(i+1),p[0]+6,p[1]-6);
   }});
   if(mu){{
-    var mx=cX(mu["{ax0}"]),my=cY(mu["{ax1}"]);
-    cctx.beginPath();cctx.arc(mx,my,6,0,2*Math.PI);
-    cctx.fillStyle="#169b78";cctx.fill();cctx.strokeStyle="#fff";cctx.lineWidth=2;cctx.stroke();
+    var p=markerPos(mu);
+    cctx.beginPath();cctx.arc(p[0],p[1],6,0,2*Math.PI);
+    cctx.fillStyle="#169b78";cctx.fill();
+    cctx.strokeStyle=hullState(mu).inside?"#fff":"#e11d48";
+    cctx.lineWidth=2;cctx.stroke();
   }}
-  cctx.fillStyle="#657084";cctx.font="21px Arial";cctx.textAlign="center";
-  cctx.fillText("μ_{ax0} (eV)",cW/2,cH-4);
-  cctx.save();cctx.translate(13,cH/2);cctx.rotate(-Math.PI/2);cctx.fillText("μ_{ax1} (eV)",0,0);cctx.restore();
 }}
-function ptrT(e){{
-  var r=cc.getBoundingClientRect();
-  var cx=e.clientX-r.left, cy=e.clientY-r.top;
-  var x0=cX(POLY[0][0]),y0=cY(POLY[0][1]);
-  var x1=cX(POLY[1][0]),y1=cY(POLY[1][1]);
-  var dx=x1-x0,dy=y1-y0;
-  var len2=dx*dx+dy*dy; if(len2<1e-8) return 0.5;
-  var t=((cx-x0)*dx+(cy-y0)*dy)/len2;
-  return Math.max(0,Math.min(1,t));
-}}
-cc.addEventListener("pointerdown",function(e){{cc.setPointerCapture(e.pointerId);var t=ptrT(e);selectionMode="边界插值";update(getMu(t));}});
-cc.addEventListener("pointermove",function(e){{if(!e.buttons)return;var t=ptrT(e);selectionMode="边界插值";update(getMu(t));}});
-var curMu=getMu(0.5);
+function ptrPos(e){{var r=cc.getBoundingClientRect();return[e.clientX-r.left,e.clientY-r.top];}}
+cc.addEventListener("pointerdown",function(e){{cc.setPointerCapture(e.pointerId);var p=ptrPos(e);var mu=pickMu(p[0],p[1]);if(mu)update(mu);}});
+cc.addEventListener("pointermove",function(e){{if(!e.buttons)return;var p=ptrPos(e);var mu=pickMu(p[0],p[1]);if(mu)update(mu);}});
+var curMu={{}};
+VERTEX_MU.forEach(function(vm){{for(var e in vm)if(vm[e]!==undefined)curMu[e]=(curMu[e]||0)+vm[e]/VERTEX_MU.length;}});
 """
-
-    if n_vertices >= 3:
-        # General N-gon (N>=3): ear-clip into triangles, barycentric in
-        # each, edge projection outside.  Replaces the former 3/4-vertex
-        # special cases — CPDs grow extra vertices when dopant phases
-        # (Fe/Bi) enter the chemical-potential diagram (e.g. 5 vertices
-        # for CaAl4O7 with Fe), and the 2D projection can be concave, so
-        # a plain fan is not safe.
-        tris = _ear_clip(poly_2d)
-        edges = [[i, (i + 1) % n_vertices] for i in range(n_vertices)]
-        barys = "[" + ",".join(_bary_js(poly_2d, t) for t in tris) + "]"
-        return common + f"""
-var BARYS = {barys};
-var TRIS = {js(tris)};
-var EDGES = {js(edges)};
-function getMu(px,py){{
-  for(var k=0;k<TRIS.length;k++){{
-    var bc=BARYS[k](px,py);
-    if(bc[3]){{
-      selectionMode="区域内插值";
-      var mu={{}},t=TRIS[k],v0=VERTEX_MU[t[0]],v1=VERTEX_MU[t[1]],v2=VERTEX_MU[t[2]];
-      for(var e in v0){{mu[e]=bc[0]*v0[e]+bc[1]*v1[e]+bc[2]*v2[e];}}
-      return mu;
-    }}
-  }}
-  selectionMode="边界插值";
-  var edge=projectToEdge(px,py,EDGES),mu={{}},v0=VERTEX_MU[edge.i],v1=VERTEX_MU[edge.j];
-  for(var e in v0){{mu[e]=v0[e]+edge.t*(v1[e]-v0[e]);}}
-  return mu;
-}}
-function drawCPD(mu){{
-  cctx.clearRect(0,0,cW,cH);
-  cctx.strokeStyle="#e9edf2";cctx.lineWidth=1;cctx.fillStyle="#718096";cctx.font="20px Arial";cctx.textAlign="center";
-  for(var i=0;i<=4;i++){{var v=a0R[0]+i/4*(a0R[1]-a0R[0]);cctx.beginPath();cctx.moveTo(cX(v),cP.t);cctx.lineTo(cX(v),cH-cP.b);cctx.stroke();cctx.fillText(v.toFixed(2),cX(v),cH-cP.b+13);}}
-  cctx.textAlign="right";
-  for(var i=0;i<=4;i++){{var v=a1R[0]+i/4*(a1R[1]-a1R[0]);cctx.beginPath();cctx.moveTo(cP.l,cY(v));cctx.lineTo(cW-cP.r,cY(v));cctx.stroke();cctx.fillText(v.toFixed(2),cP.l-5,cY(v)+3);}}
-  cctx.strokeStyle="#475569";cctx.lineWidth=2;cctx.beginPath();
-  POLY.forEach(function(v,i){{i===0?cctx.moveTo(cX(v[0]),cY(v[1])):cctx.lineTo(cX(v[0]),cY(v[1]));}});
-  cctx.closePath();cctx.stroke();cctx.fillStyle="rgba(22,155,120,0.09)";cctx.fill();
-  POLY.forEach(function(v,i){{
-    var x=cX(v[0]),y=cY(v[1]);cctx.fillStyle="#334155";cctx.beginPath();cctx.arc(x,y,3.5,0,2*Math.PI);cctx.fill();
-    cctx.font="600 21px Arial";cctx.textAlign="left";cctx.fillText("V"+(i+1),x+6,y-6);
-  }});
-  if(mu){{var mx=cX(mu["{ax0}"]),my=cY(mu["{ax1}"]);cctx.beginPath();cctx.arc(mx,my,6,0,2*Math.PI);cctx.fillStyle="#169b78";cctx.fill();cctx.strokeStyle="#fff";cctx.lineWidth=2;cctx.stroke();}}
-  cctx.fillStyle="#657084";cctx.font="21px Arial";cctx.textAlign="center";cctx.fillText("μ_{ax0} (eV)",cW/2,cH-4);
-  cctx.save();cctx.translate(13,cH/2);cctx.rotate(-Math.PI/2);cctx.fillText("μ_{ax1} (eV)",0,0);cctx.restore();
-}}
-function ptrPos(e){{var r=cc.getBoundingClientRect();return[invX(e.clientX-r.left),invY(e.clientY-r.top)];}}
-cc.addEventListener("pointerdown",function(e){{cc.setPointerCapture(e.pointerId);var p=ptrPos(e);var mu=getMu(p[0],p[1]);if(mu)update(mu);}});
-cc.addEventListener("pointermove",function(e){{if(!e.buttons)return;var p=ptrPos(e);var mu=getMu(p[0],p[1]);if(mu)update(mu);}});
-var cx0=0,cy0=0;POLY.forEach(function(v){{cx0+=v[0];cy0+=v[1];}});cx0/=POLY.length;cy0/=POLY.length;
-var curMu=getMu(cx0,cy0);
-"""
-
-    raise ValueError(f"Unsupported vertex count: {n_vertices}")
-
 
 # ═════════════════════════════════════════════════════════════════════
 # HTML page template
@@ -762,7 +882,7 @@ canvas{{display:block;background:var(--canvas);border:1px solid var(--line);bord
 .mupanel-title{{font-size:11px;font-weight:700;color:var(--muted);margin:2px 0 5px;letter-spacing:.02em}}
 .murow{{display:grid;grid-template-columns:30px 42px 1fr 42px;gap:6px;align-items:center;margin:3px 0}}
 .muel{{font-weight:700;color:#334155}}.mumin,.mumax{{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:10px;color:#7b8797;text-align:right}}
-.mubar{{position:relative;height:5px;background:#dfe6ee;border-radius:99px}}.mucur{{position:absolute;top:-3px;width:11px;height:11px;border-radius:50%;background:var(--accent);margin-left:-5px;box-shadow:0 0 0 2px #fff}}
+.muslider{{width:100%;height:16px;accent-color:var(--accent);margin:0;cursor:pointer}}
 .fe-workspace{{display:block}}
 .fe-plot{{min-width:0;position:relative}}
 .fe-tip{{position:absolute;z-index:40;display:none;overflow-y:auto;background:#fff;border:1px solid var(--line);border-radius:8px;box-shadow:0 6px 18px rgba(15,23,42,.16);padding:8px 10px;font-size:14px}}
@@ -785,7 +905,7 @@ canvas{{display:block;background:var(--canvas);border:1px solid var(--line);bord
 <main class="report-grid">
 <section class="report-card" id="cpdCard"><header class="report-card__head"><h3>化学势稳定区</h3><span class="report-card__hint">拖动或点击选择化学条件</span></header><div class="report-card__body cpd-card__body">
 <canvas id="cpd" width="420" height="420"></canvas>
-<section class="selection-card" aria-live="polite"><div class="selection-card__head"><span class="selection-card__title">当前化学条件</span><span id="selection-state" class="selection-card__state">区域内插值</span></div><div id="selection-constraints" class="selection-card__constraints"></div><div id="selection-mu" class="selection-card__mu"></div><div class="mupanel"><div class="mupanel-title">化学势范围 μ (eV)</div><div id="murows"></div></div></section>
+<section class="selection-card" aria-live="polite"><div class="selection-card__head"><span class="selection-card__title">当前化学条件</span><span id="selection-state" class="selection-card__state">区域内插值</span></div><div id="selection-constraints" class="selection-card__constraints"></div><div id="selection-mu" class="selection-card__mu"></div><div class="mupanel"><div class="mupanel-title">化学势 μ (eV) · 拖动滑块逐元素调节</div><div id="murows"></div></div></section>
 </div></section>
 <section class="report-card" id="feCard"><header class="report-card__head"><h3>缺陷形成能</h3><span class="report-card__hint">移动查询 E<sub>F</sub></span></header><div class="report-card__body"><div class="fe-workspace"><div class="fe-plot"><canvas id="cv" width="800" height="520"></canvas><div class="leg" id="leg"></div><div class="fe-note">查询层按 E<sub>f</sub> 降序列出当前可见缺陷 · 本征缺陷 · 1000 K · 未含自由载流子</div></div></div></div></section>
 <div id="tip" class="fe-tip"></div>
@@ -814,23 +934,46 @@ function xPx(v){return P.l+(v/BG)*(W-P.l-P.r);}
 function yPx(v){return P.t+(1-(v-minY)/(maxY-minY))*(H-P.t-P.b);}
 function xInv(x){return (x-P.l)/(W-P.l-P.r)*BG;}
 
-// Keep the y extent stable while legend visibility changes: display state
-// must not rescale the scientific frame of reference.
+// The y extent is computed ONCE over the per-element slider box and stays
+// fixed: the box's CORNERS (formation energy is linear in μ, so its
+// extremes over the box sit at corners — 2^N of them) plus each charge
+// state at the E_F endpoints. Any slider position therefore draws inside
+// the frame; the lower bound IS the lowest formation energy of the box (no
+// padding below); the top keeps a 10% pad, hard-capped at +10 eV (higher
+// lines clip at the canvas top). Selection drags and legend toggles never
+// rescale the frame. The docked readout is unaffected — it lists energies
+// as computed, regardless of the visible axis range.
+function boxCorners(){
+  var el=[],mins={},maxs={};
+  VERTEX_MU.forEach(function(vm){for(var e in vm)if(el.indexOf(e)<0)el.push(e);});
+  el.forEach(function(e){
+    var mn=Infinity,mx=-Infinity;
+    VERTEX_MU.forEach(function(vm){var v=vm[e];if(v===undefined)return;if(v<mn)mn=v;if(v>mx)mx=v;});
+    mins[e]=mn;maxs[e]=mx;
+  });
+  var corners=[{}];
+  el.forEach(function(e){
+    var next=[];
+    corners.forEach(function(c){
+      var a={},b={};for(var k in c){a[k]=c[k];b[k]=c[k];}
+      a[e]=mins[e];b[e]=maxs[e];next.push(a,b);
+    });
+    corners=next;
+  });
+  return corners;
+}
 function calcGlobalYRange(){
   var allE=[];
-  VERTEX_MU.forEach(function(vm){
+  boxCorners().forEach(function(mu){
     names.forEach(function(n){
       var ms=0,d=DEF[n];
-      for(var e in d.delta) if(vm[e]!==undefined) ms-=d.delta[e]*vm[e];
+      for(var e in d.delta) if(mu[e]!==undefined) ms-=d.delta[e]*mu[e];
       d.charges.forEach(function(c){allE.push(c.e0+ms);allE.push(c.e0+c.q*BG+ms);});
     });
   });
   if(allE.length===0){minY=-2;maxY=6;return;}
   var lo=Math.min.apply(null,allE),hi=Math.max.apply(null,allE),pad=Math.max(.5,(hi-lo)*.1);
-  minY=Math.floor(lo-pad);maxY=Math.ceil(hi+pad);
-  // The formation-energy axis never extends beyond +10 eV; higher lines
-  // are clipped at the canvas top. The docked readout is unaffected — it
-  // lists energies as computed, regardless of the visible axis range.
+  minY=lo;maxY=Math.ceil(hi+pad);
   if(maxY>10)maxY=10;
   if(minY>=maxY)minY=maxY-5;
 }
@@ -991,20 +1134,26 @@ var READOUT_W_MIN = 240, READOUT_W_MAX = 320, READOUT_INSET = 10, READOUT_GAP = 
 function sizeTip(){
   if(tip.style.display!=="block")return;
   var c=document.getElementById("cpdCard");
+  var canv=document.getElementById("cpd");
   // Measure the rendered content in the same synchronous block the caller
   // runs in: the browser cannot paint between measurement and positioning.
   var w=Math.min(READOUT_W_MAX,Math.max(READOUT_W_MIN,tip.offsetWidth));
   tip.style.width=w+"px";
   tip.style.left=(c.offsetLeft + c.clientWidth - w - READOUT_INSET)+"px";
   var maxH=window.innerHeight - tip.getBoundingClientRect().top - READOUT_GAP;
+  // The readout never extends below the CPD canvas: the per-element
+  // slider panel below it stays fully visible and draggable.
+  var canvBottom=canv.offsetTop+canv.clientHeight-tip.offsetTop;
+  if(canvBottom<maxH)maxH=canvBottom;
   if(maxH<READOUT_MIN_H)maxH=READOUT_MIN_H;
   tip.style.maxHeight=maxH+"px";
 }
 function dockTip(ef){
   var c=document.getElementById("cpdCard");
+  var canv=document.getElementById("cpd");
   fillTip(ef);
   tip.style.display="block";
-  tip.style.top=(c.offsetTop+READOUT_GAP)+"px";
+  tip.style.top=(canv.offsetTop+2)+"px";
   sizeTip();
 }
 function undockTip(){tip.style.display="none";}
@@ -1045,8 +1194,10 @@ if(!hoverCapable){
   });
 }
 
-// Chemical-potential range panel: per-element min/current/max over the
-// stability vertices, updated live as the selection moves.
+// Chemical-potential panel: per-element sliders over the vertex brackets.
+// Dragging a slider sets that element's μ freely (the selection may leave
+// the stability region — the canvas labels it 区域外); dragging the CPD
+// canvas re-constrains the selection to the polygon and re-syncs sliders.
 function buildMuPanel(){
   var box=document.getElementById("murows");
   var elems=[];VERTEX_MU.forEach(function(vm){for(var e in vm)if(elems.indexOf(e)<0)elems.push(e);});
@@ -1055,13 +1206,20 @@ function buildMuPanel(){
   elems.forEach(function(e){
     var mn=Infinity,mx=-Infinity;
     VERTEX_MU.forEach(function(vm){var v=vm[e];if(v<mn)mn=v;if(v>mx)mx=v;});
+    var init=(curMu&&curMu[e]!==undefined)?curMu[e]:mn;
     var row=document.createElement("div");row.className="murow";
     row.innerHTML="<span class='muel'>"+e+"</span>"+
       "<span class='mumin'>"+mn.toFixed(2)+"</span>"+
-      "<div class='mubar'><span class='mucur'></span></div>"+
+      "<input type='range' class='muslider' min='"+mn.toFixed(4)+"' max='"+mx.toFixed(4)+"' step='0.001' value='"+init.toFixed(4)+"'>"+
       "<span class='mumax'>"+mx.toFixed(2)+"</span>";
     box.appendChild(row);
-    rows[e]={mn:mn,mx:mx,cur:row.querySelector(".mucur")};
+    var slider=row.querySelector(".muslider");
+    slider.addEventListener("input",function(){
+      curMu[e]=parseFloat(slider.value);
+      selectionMode="逐元素";
+      update(curMu);
+    });
+    rows[e]={mn:mn,mx:mx,slider:slider};
   });
   return rows;
 }
@@ -1069,18 +1227,25 @@ var muRows=buildMuPanel();
 function updateMuPanel(mu){
   for(var e in muRows){
     var r=muRows[e],v=mu[e];if(v===undefined)continue;
-    r.cur.style.left=((r.mx>r.mn)?(v-r.mn)/(r.mx-r.mn)*100:50)+"%";
+    r.slider.value=Math.max(r.mn,Math.min(r.mx,v));
   }
 }
 function updateSelectionCard(mu){
   var idx=selectedVertex(mu),state=document.getElementById("selection-state"),constraints=document.getElementById("selection-constraints");
-  if(idx>=0){
+  var hs=hullState(mu);
+  var outside=selectionMode==="逐元素"&&!hs.inside;
+  if(idx>=0&&!outside){
     var phases=(VPHASES[idx].competing||[]).join(" · ");
     state.textContent="当前顶点 V"+(idx+1);
     constraints.textContent="V"+(idx+1)+(phases?" · "+phases+"（约束）":" · 无相约束记录");
+  }else if(outside){
+    state.textContent="区域外";
+    constraints.textContent="逐元素自由调节超出稳定区 "+(-hs.dist).toFixed(2)+" eV（亚稳/非平衡参考）；拖回 CPD 图内恢复稳定区选择";
   }else{
     state.textContent=selectionMode;
-    constraints.textContent=selectionMode==="边界插值"?"沿稳定区边界插值；无单一顶点约束":"稳定区内部插值；无单一顶点约束";
+    constraints.textContent=selectionMode==="逐元素"
+      ?"逐元素自由调节；当前点在稳定区内 · 距边界 +"+hs.dist.toFixed(2)+" eV"
+      :(selectionMode==="边界插值"?"沿稳定区边界插值；无单一顶点约束":"稳定区内部插值；无单一顶点约束");
   }
   var entries=[];Object.keys(mu).sort().forEach(function(k){entries.push("μ_"+k+" = "+mu[k].toFixed(4)+" eV");});
   document.getElementById("selection-mu").textContent=entries.join(" · ");
@@ -1158,10 +1323,6 @@ def _html_template(
     ref_mu: dict[str, float],
     colors: list[str],
     cbm: float,
-    ax0: str,
-    ax1: str,
-    a0_range: tuple[float, float],
-    a1_range: tuple[float, float],
     exo_elements: list[str],
     mags: dict[str, dict[int, float]] | None = None,
     vox: dict[str, dict[str, Any]] | None = None,
@@ -1188,7 +1349,6 @@ def _html_template(
 
     cpd_js = _cpd_canvas_js(
         n_vertices, poly_2d, vertex_mu, vertex_names, vertex_phases,
-        ax0, ax1, a0_range, a1_range,
     )
 
     fe_canvas = _FE_CANVAS_JS.replace("{is_doped_str}", is_doped_str)
@@ -1299,10 +1459,6 @@ def generate_interactive_html(system_dir: Path) -> Path | None:
     vertex_phases = [vertex_phases[i] for i in hull_idx]
     n_vertices = len(hull_idx)
 
-    all_ax0 = [p[0] for p in poly_2d]
-    all_ax1 = [p[1] for p in poly_2d]
-    pad = 0.3
-
     exo_elements = _dopant_elements(system_dir)
 
     html = _html_template(
@@ -1318,10 +1474,6 @@ def generate_interactive_html(system_dir: Path) -> Path | None:
         ref_mu=ref_mu,
         colors=colors,
         cbm=cbm_val,
-        ax0=ax0,
-        ax1=ax1,
-        a0_range=(min(all_ax0) - pad, max(all_ax0) + pad),
-        a1_range=(min(all_ax1) - pad, max(all_ax1) + pad),
         exo_elements=exo_elements,
         mags=mags,
         vox=vox,

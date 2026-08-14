@@ -8,7 +8,6 @@ import pytest
 import yaml
 
 from vasp_sop.report.interactive import (
-    _bary_js,
     _build_defects,
     _defect_segments,
     _extract_vertex_data,
@@ -436,32 +435,6 @@ class TestDisplayNames:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# _bary_js_func
-# ═════════════════════════════════════════════════════════════════════
-
-
-class TestBaryJsFunc:
-    @pytest.fixture
-    def verts(self):
-        return [[-1.20, -3.76, -2.42, -2.60],
-                [-0.50, -3.10, -1.80, -1.90],
-                [-1.50, -4.00, -3.10, -3.20],
-                [-0.80, -4.20, -2.90, -3.50]]
-
-    def test_produces_valid_function(self, verts):
-        js = _bary_js(verts, (0, 1, 2))
-        assert js.startswith("function(px,py)")
-        assert "return[a,b,c,inside]" in js
-    def test_no_double_dash_bug(self, verts):
-        """The '--' operator must NOT appear in JS output."""
-        js12 = _bary_js(verts, (0, 1, 2))
-        js23 = _bary_js(verts, (0, 2, 3))
-        # Should not have JS decrement '--' (with no space)
-        assert "--" not in js12.replace("- ", "").replace(" -", " - ")
-        assert "--" not in js23.replace("- ", "").replace(" -", " - ")
-
-
-# ═════════════════════════════════════════════════════════════════════
 # _html_template
 # ═════════════════════════════════════════════════════════════════════
 
@@ -491,9 +464,6 @@ class TestHtmlTemplate:
             ref_mu={"Br": -1.20, "Cs": -3.76, "Pb": -2.42},
             colors=["#e94560"],
             cbm=2.4095,
-            ax0="Br", ax1="Cs",
-            a0_range=(-1.8, -0.2),
-            a1_range=(-4.5, -2.8),
             exo_elements=["Bi"],
         )
         # Core rendering and the two-card scientific workspace exist.
@@ -504,12 +474,24 @@ class TestHtmlTemplate:
         assert "var DEF" in html
         assert "var BG" in html
         assert "function drawFE" in html
-        assert "getMu(px,py)" in html
+        assert "function pickMu(px,py)" in html
         assert "function fillTip" in html
         assert "function dockTip" in html
         assert "function undockTip" in html
-        # Formation-energy axis never exceeds +10 eV.
+        # Formation-energy axis: lower bound = global data minimum across
+        # all vertices (no padding below); top keeps 10% pad, never > +10.
+        # Computed once at load — the frame never follows the selection.
         assert "if(maxY>10)maxY=10" in html
+        assert "minY=lo;maxY=Math.ceil(hi+pad)" in html
+        assert "function calcGlobalYRange" in html
+        assert "function calcYRange" not in html
+        # Per-element μ sliders over vertex brackets, free-form selection
+        # with stability-region labeling, and a y-range covering the box.
+        assert "function boxCorners" in html
+        assert "function hullState" in html
+        assert "muslider" in html
+        assert "区域外" in html
+        assert "距边界" in html
 
     def test_constraint_phases_and_charge_neutrality_embedded(self):
         html = _html_template(
@@ -535,9 +517,6 @@ class TestHtmlTemplate:
             ref_mu={"Br": -1.20, "Cs": -3.76, "Pb": -2.42},
             colors=["#e94560"],
             cbm=2.4095,
-            ax0="Br", ax1="Cs",
-            a0_range=(-1.8, -0.2),
-            a1_range=(-4.5, -2.8),
             exo_elements=["Bi"],
         )
         # Constraint phases remain encoded in VPHASES; the currently selected
@@ -593,9 +572,6 @@ class TestHtmlTemplate:
             ref_mu={"Br": -1.20, "Cs": -3.76, "Pb": -2.42},
             colors=["#e94560"],
             cbm=2.4095,
-            ax0="Br", ax1="Cs",
-            a0_range=(-1.8, -0.2),
-            a1_range=(-4.5, -2.8),
             exo_elements=["Bi"],
         )
         # Typeset title (HTML <sub>) and display-name segment map.
@@ -603,7 +579,7 @@ class TestHtmlTemplate:
         assert '"Bi_Pb1": [["n", "Bi"], ["s", "Pb1"]]' in html
         # Chemical-potential card and responsive native chart sizing.
         assert "当前化学条件" in html
-        assert "化学势范围" in html
+        assert "拖动滑块逐元素调节" in html
         assert "function buildMuPanel" in html
         assert "function updateMuPanel" in html
         assert "function updateSelectionCard" in html
@@ -667,14 +643,21 @@ class TestGenerateInteractiveHtml:
         # Check BG is set to cbm
         assert "var BG = 2.4095" in content
 
-    def test_bary_functions_defined(self, tmp_path):
+    def test_topological_map_functions_defined(self, tmp_path):
         root = _write_system(tmp_path)
         out = generate_interactive_html(root)
         content = out.read_text()
-        # unified N-gon path: barycentric functions live in the BARYS array
-        assert "var BARYS = [" in content
-        assert "var TRIS = [" in content
-        assert content.count("function(px,py)") >= 1
+        # topological N-dim map: exact hull + true adjacency
+        assert "var HULL=buildHull()" in content
+        assert "function hullState(mu)" in content
+        assert "function computeEdges()" in content
+        assert "function springLayout(seed,edges)" in content
+        assert "var LAY=" in content
+        assert "function pickMu(px,py)" in content
+        assert "function markerPos(mu)" in content
+        assert "function selectedVertex(mu)" in content
+        assert "function facetMu(F,px,py)" in content
+        assert "function triBary(a,b,c,px,py)" in content
 
     def test_doped_line_style(self, tmp_path):
         """Doped defects should use dashed lines."""
