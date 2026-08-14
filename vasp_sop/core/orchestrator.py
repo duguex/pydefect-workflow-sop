@@ -319,6 +319,19 @@ def wave1_optimize(
         if convergence_verdict(td).converged:
             js.record(str(td.resolve()), "converged")
         elif input_ready(td):
+            # ZBRENT line-search aborts (metallic phases at EDIFF=1e-4)
+            # re-run with EDIFF=1e-6 from the last CONTCAR (issue #119).
+            # The cpd restart branch does this for regular phases; the
+            # target (main) phase is submitted here and needs the same
+            # treatment or it loops on EDIFF=1e-4 forever.
+            if _has_zbrent_failure(td):
+                try:
+                    from vasp_sop.vasp.io import restart_from_contcar
+                    restart_from_contcar(td)
+                    from vasp_sop.vasp.io import patch_incar
+                    patch_incar(td, EDIFF="1e-6")
+                except Exception:
+                    pass
             _submit_or_skip(td, "target", sys.name, dry_run, info, js=js,
                             priority=priority)
 
