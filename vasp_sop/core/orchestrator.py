@@ -442,10 +442,31 @@ def wave2_submit(
                         sys.name, cd.name, n_restarts,
                     )
                     continue
+            # Continuation discipline (ADR 0014/0022): every ionic retry
+            # MUST continue from the latest CONTCAR — a retry that falls
+            # back to a stale POSCAR restarts the relaxation from the
+            # same old geometry every round (spinning in place, burning
+            # core-hours; Ti8Bi9_mp-640045 2026-08-14).  A failed copy
+            # must not be silent, and a POSCAR that did not advance
+            # afterwards must be loud so the break is observable.
             try:
                 restart_from_contcar(cd)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "%s/%s: CONTCAR restart failed: %s", sys.name, cd.name, exc
+                )
+            else:
+                try:
+                    if ((cd / "POSCAR").is_file() and (cd / "CONTCAR").is_file()
+                            and (cd / "POSCAR").stat().st_mtime
+                            < (cd / "CONTCAR").stat().st_mtime):
+                        logger.warning(
+                            "%s/%s: POSCAR older than CONTCAR after restart — "
+                            "continuation not in effect, next round may spin",
+                            sys.name, cd.name,
+                        )
+                except OSError:
+                    pass
             # ZBRENT line-search aborts (metallic phases at EDIFF=1e-4)
             # re-run with EDIFF=1e-6 instead of failing forever (issue #119).
             if _has_zbrent_failure(cd):
