@@ -636,13 +636,15 @@ function hullState(mu){{
 }}
 
 // ---- topological map: true adjacency of the N-dim polytope ----
-// Display/pick faces = the REAL facets only: the competing phase stable on a
-// facet is the intersection of the vertex phase lists over its vertices —
-// non-empty intersection identifies the true region boundary. Near-coplanar
-// sliver facets (empty intersection) are dropped here so a mu matches at most
-// one drawn face (pickMu and markerPos stay mutually exact); the VERDICT
-// (hullState) still uses ALL facets from buildHull.
-var FACET_VERTS = HULL.facets.map(function(f){{return f.verts||[];}}).filter(function(fv){{
+// ALL_FACET_VERTS: every hull facet — drives the layout, the full edge set
+// and the region fill, so the drawing shows the true polytope structure.
+// FACET_VERTS: the REAL facets only (competing phase stable on the facet =
+// non-empty intersection of the vertex phase lists) — drives click picking
+// and the marker, where near-coplanar slivers would make a mu match several
+// faces (pickMu and markerPos stay mutually exact). The VERDICT (hullState)
+// uses ALL facets from buildHull.
+var ALL_FACET_VERTS = HULL.facets.map(function(f){{return f.verts||[];}});
+var FACET_VERTS = ALL_FACET_VERTS.filter(function(fv){{
   var inter=(VPHASES[fv[0]].competing||[]);
   for(var i2=1;i2<fv.length;i2++){{
     var L2=VPHASES[fv[i2]].competing||[];
@@ -650,10 +652,10 @@ var FACET_VERTS = HULL.facets.map(function(f){{return f.verts||[];}}).filter(fun
   }}
   return inter.length>0;
 }});
-function computeEdges(){{
+function computeEdges(FV){{
   var e=[];
   for(var i=0;i<VERTEX_MU.length;i++)for(var j=i+1;j<VERTEX_MU.length;j++){{
-    var T=FACET_VERTS.filter(function(F){{return F.indexOf(i)>=0&&F.indexOf(j)>=0;}});
+    var T=FV.filter(function(F){{return F.indexOf(i)>=0&&F.indexOf(j)>=0;}});
     if(!T.length)continue;
     var common=T[0].slice();
     T.forEach(function(F){{common=common.filter(function(x){{return F.indexOf(x)>=0;}});}});
@@ -661,6 +663,7 @@ function computeEdges(){{
   }}
   return e;
 }}
+var ALL_EDGES = computeEdges(ALL_FACET_VERTS);
 function springLayout(seed,edges){{
   var n=seed.length,pos=seed.map(function(p){{return [p[0],p[1]];}});
   if(n<2)return [[0.5,0.5]];
@@ -693,7 +696,7 @@ function springLayout(seed,edges){{
   var sx=(x1-x0)||1,sy=(y1-y0)||1;
   return pos.map(function(p){{return [0.06+0.88*(p[0]-x0)/sx,0.06+0.88*(p[1]-y0)/sy];}});
 }}
-var EDGES, LAY, FACET_HULLS;
+var EDGES, LAY, FACET_HULLS, ALL_FACET_HULLS;
 if(HULL.r===2){{
   // True region shape (2D geometry of the region) as the seed; genuine
   // regions can be extreme slivers (2nd singular value down to ~0.006 of the
@@ -709,10 +712,15 @@ if(HULL.r===2){{
   LAY=springLayout(seed2,EDGES);
   var hull2f=hull2D(LAY.map(function(p,i){{return i;}}),LAY);
   FACET_HULLS=[];for(var k3=1;k3<hull2f.length-1;k3++)FACET_HULLS.push([hull2f[0],hull2f[k3],hull2f[k3+1]]);
+  ALL_FACET_HULLS=FACET_HULLS;
 }}else{{
-  EDGES=computeEdges();
+  // Layout and the full edge set use ALL true edges — a vertex whose edges
+  // were filtered to display faces alone would be pushed to the drawing
+  // hull by the repulsion, producing non-edge chords on the outline.
+  EDGES=ALL_EDGES;
   LAY=springLayout(POLY,EDGES);
   FACET_HULLS=FACET_VERTS.map(function(F){{return hull2D(F,LAY);}});
+  ALL_FACET_HULLS=ALL_FACET_VERTS.map(function(F){{return hull2D(F,LAY);}});
 }}
 function hull2D(idx,pts){{
   var P=pts||LAY;
@@ -922,6 +930,16 @@ function markerPos(mu){{
       bestW[0].forEach(function(vi,k){{var q=layPx(LAY[vi]);x+=bestW[1][k]*q[0];y+=bestW[1][k]*q[1];}});
       return [x,y];
     }}
+    // Edge selections: a mu exactly on a true edge whose facets were
+    // filtered out maps through the edge's own drawn segment.
+    for(var ei=0;ei<ALL_EDGES.length;ei++){{
+      var E=ALL_EDGES[ei];
+      var we=faceWeights([HULL.proj(VERTEX_MU[E[0]]),HULL.proj(VERTEX_MU[E[1]])],u);
+      if(we){{
+        var q0=layPx(LAY[E[0]]),q1=layPx(LAY[E[1]]);
+        return [q0[0]+we[1]*(q1[0]-q0[0]),q0[1]+we[1]*(q1[1]-q0[1])];
+      }}
+    }}
     if(wg){{
       var x=0,y=0;
       orderG.forEach(function(vi,k){{var q=layPx(LAY[vi]);x+=wg[k]*q[0];y+=wg[k]*q[1];}});
@@ -1090,7 +1108,7 @@ function drawCPD(mu){{
     cctx.strokeStyle="#475569";cctx.lineWidth=2;cctx.stroke();
     EDGES.forEach(function(e){{drawEdgeLabel(e[0],e[1]);}});
   }}else{{
-    FACET_HULLS.forEach(function(F){{
+    ALL_FACET_HULLS.forEach(function(F){{
       if(F.length<3)return;
       cctx.beginPath();
       F.forEach(function(vi,i){{
@@ -1106,6 +1124,11 @@ function drawCPD(mu){{
       var a=layPx(LAY[e[0]]),b=layPx(LAY[e[1]]);
       cctx.beginPath();cctx.moveTo(a[0],a[1]);cctx.lineTo(b[0],b[1]);cctx.stroke();
     }});
+    // The outline = the drawn region's boundary. True polytope edges get the
+    // bold stroke + competing-phase label (endpoint intersection; empty only
+    // while the live batch's vertex phases are mid-drift). A rare layout
+    // chord (non-edge outline segment, e.g. 8-vertex BaAl2B2O7) stays light
+    // and unlabeled — it is a drawing artifact, not a phase boundary.
     OUTER.forEach(function(s){{
       var a=layPx(LAY[s.i]),b=layPx(LAY[s.j]);
       cctx.strokeStyle=s.edge?"#475569":"#94a3b8";

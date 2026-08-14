@@ -650,9 +650,10 @@ class TestGenerateInteractiveHtml:
         # topological N-dim map: exact hull + true adjacency
         assert "var HULL=buildHull()" in content
         assert "function hullState(mu)" in content
-        assert "function computeEdges()" in content
+        assert "function computeEdges(FV)" in content
+        assert "var ALL_EDGES = computeEdges(ALL_FACET_VERTS);" in content
         assert "function springLayout(seed,edges)" in content
-        assert "var EDGES, LAY, FACET_HULLS;" in content
+        assert "var EDGES, LAY, FACET_HULLS, ALL_FACET_HULLS;" in content
         assert "function pickMu(px,py)" in content
         assert "function markerPos(mu)" in content
         # marker = exact inverse of pickMu (no affine drift on face points)
