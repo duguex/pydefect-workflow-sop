@@ -5,7 +5,7 @@
 > **待办（重建）**：
 > 1. **Y2Ti2O7 → mp-5373（Fd-3m 烧绿石）**：plan 复制、`poscar_src` 替换、全量重建（unitcell ISIF=3 → doped 88 原子常规胞 → cpd 主相 → defect 枚举 → 全缺陷 → 解析）。
 > 2. **BaAl4O7 → mp-1019534（Pnma 排列B）**：同上全量重建。
-> 3. 新协议（仅重建两体系，其余 8 维持现状，CSV 带 protocol 列）：perfect ISIF=3 定平衡晶格；缺陷一律 ISIF=2 固定；ENCUT 全链 520；88 原子起步，门不过再升级 12 Å。
+> 3. 新协议（仅重建两体系，其余 8 维持现状，CSV 带 protocol 列）：perfect ISIF=3 定平衡晶格；缺陷一律 ISIF=2 固定；ENCUT 按体系默认（encut null，不固定）；88 原子起步，门不过再升级 12 Å。
 > 4. **验收门（任一不过即回查）**：配对反位反应 > −0.5 eV；E_diff 中位 ∈ +3…+9 eV；E_perfect 每 f.u. vs cpd 主相 ≤ ±0.05 eV。
 > 5. 重建前必须过既有审批 discipline（ADR 0019 git 基线 + defect_in/电荷态/cpd 相集显式批准）。
 > **关联**：ADR `docs/adr/0023-reference-phase-host-identity.md`；术语 CONTEXT.md「参考相」「宿主身份」；issue #149。

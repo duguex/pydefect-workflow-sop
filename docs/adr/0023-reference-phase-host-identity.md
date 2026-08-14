@@ -33,7 +33,7 @@ MP 公式搜索默认按 material_id 升序返回，`_docs[0]` = id 最小的多
    - 宿主晶格：perfect 先 ISIF=3 弛豫得到平衡晶格；
    - 缺陷：一律 ISIF=2 固定该平衡晶格；
    - 超胞：Y₂Ti₂O₇ 从 88 原子常规胞（min_distance=10）起步，验收门不过再升级；
-   - ENCUT：全链统一 520（与 unitcell/cpd 一致）；其余电子参数沿用（PBEsol、Ti U=4、两阶段 SOC per ADR 0014/0022）。
+   - ENCUT：按体系默认（plan `encut: null`），不固定跨体系值（2026-08-14 用户裁定：ENCUT 跟随体系）；其余电子参数沿用（PBEsol、Ti U=4、两阶段 SOC per ADR 0014/0022）。
 4. **验收门**（任一不满足即回查，不逐级放宽）：
    - 配对反位反应 E(Ti_Y+q)+E(Y_Ti−q)−2E_perfect > −0.5 eV；
    - E_diff = E_def−E_perfect 全体中位落于 +3…+9 eV；
