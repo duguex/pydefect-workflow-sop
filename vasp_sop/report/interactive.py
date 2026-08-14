@@ -822,14 +822,14 @@ function drawCPD(mu){{
     cctx.fillStyle="rgba(22,155,120,0.07)";
     cctx.fill();
   }});
-  cctx.strokeStyle="#94a3b8";cctx.lineWidth=1;
+  cctx.strokeStyle="#64748b";cctx.lineWidth=1.5;
   EDGES.forEach(function(e){{
     var a=layPx(LAY[e[0]]),b=layPx(LAY[e[1]]);
     cctx.beginPath();cctx.moveTo(a[0],a[1]);cctx.lineTo(b[0],b[1]);cctx.stroke();
   }});
   LAY.forEach(function(l,i){{
     var p=layPx(l);
-    cctx.fillStyle="#334155";cctx.beginPath();cctx.arc(p[0],p[1],3.5,0,2*Math.PI);cctx.fill();
+    cctx.fillStyle="#334155";cctx.beginPath();cctx.arc(p[0],p[1],4,0,2*Math.PI);cctx.fill();
     cctx.font="600 21px Arial";cctx.textAlign="left";
     cctx.fillText("V"+(i+1),p[0]+6,p[1]-6);
   }});
