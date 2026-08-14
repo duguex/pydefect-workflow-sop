@@ -451,34 +451,6 @@ def _defect_segments(name: str) -> list[list[str]]:
 # JS helpers — CPD geometry: 2D seed projection
 # ═════════════════════════════════════════════════════════════════════
 
-def _convex_hull(points: list[list[float]]) -> list[int]:
-    """Convex-hull vertex indices (CCW) via monotone chain.
-
-    The 3D chemical-potential polytope's vertices, projected onto the 2D
-    display axes, are not necessarily in boundary order — the raw
-    target_vertices order can self-intersect in 2D (observed with 5
-    vertices on Fe-doped CaAl4O7).  The hull order is the correct 2D
-    boundary, and its triangulation is the valid interpolation domain.
-    """
-    pts = sorted((tuple(p), i) for i, p in enumerate(points))
-    if len(pts) <= 1:
-        return [i for _, i in pts]
-
-    def cross(o, a, b):
-        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
-
-    lower: list[tuple[tuple[float, float], int]] = []
-    for p in pts:
-        while len(lower) >= 2 and cross(lower[-2][0], lower[-1][0], p[0]) <= 0:
-            lower.pop()
-        lower.append(p)
-    upper: list[tuple[tuple[float, float], int]] = []
-    for p in reversed(pts):
-        while len(upper) >= 2 and cross(upper[-2][0], upper[-1][0], p[0]) <= 0:
-            upper.pop()
-        upper.append(p)
-    return [i for _, i in lower[:-1] + upper[:-1]]
-
 
 def _cpd_canvas_js(
     n_vertices: int,
@@ -1996,22 +1968,15 @@ def generate_interactive_html(system_dir: Path) -> Path | None:
     poly_2d: list[list[float]] = [
         [v.get(ax0, 0.0), v.get(ax1, 0.0)] for v in vertex_mu
     ]
-
-    # 2D projection of a 3D polytope: order the vertices along the hull
-    # so the display polygon is simple (raw order can self-intersect).
-    hull_idx = _convex_hull(poly_2d)
-    if len(hull_idx) < len(poly_2d):
-        logger.warning(
-            "CPD 2D projection: %d vertices collapse to %d hull vertices",
-            len(poly_2d), len(hull_idx),
-        )
-    poly_2d = [poly_2d[i] for i in hull_idx]
-    vertex_mu = [vertex_mu[i] for i in hull_idx]
-    vertex_names = [vertex_names[i] for i in hull_idx]
-    vertex_phases = [vertex_phases[i] for i in hull_idx]
-    n_vertices = len(hull_idx)
+    # NOTE: all vertices are kept — the 2D-projection convex hull used to
+    # filter/order them, but that drops true vertices of a 3D region whose
+    # projection lands inside the hull (e.g. BaAl2B2O7 A/F), and the JS
+    # hull then fabricates pseudo-edges with empty phase intersections
+    # (edges with no compound label). Vertex ordering is handled in JS
+    # (hull2D / springLayout); poly_2d is only a layout seed.
 
     exo_elements = _dopant_elements(system_dir)
+    n_vertices = len(vertex_mu)
 
     html = _html_template(
         host_name=host_name,
