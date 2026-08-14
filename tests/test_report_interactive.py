@@ -15,7 +15,12 @@ from vasp_sop.report.interactive import (
     _formula_html,
     _formula_subscripts,
     _html_template,
+    _defect_kind,
+    _infer_host_valences,
+    _ion_valence_template,
+    _kind_colors,
     _load_inputs,
+    _load_magnetizations,
     _sort_defect_names,
     generate_interactive_html,
 )
@@ -287,6 +292,20 @@ class TestExtractPolygon:
 # ═════════════════════════════════════════════════════════════════════
 
 
+class TestKindColors:
+    def test_kind_strips_site_digits(self):
+        assert _defect_kind("Va_O13") == "Va_O"
+        assert _defect_kind("Bi_Ti1") == "Bi_Ti"
+        assert _defect_kind("O_i1") == "O_i"
+
+    def test_shared_color_per_kind(self):
+        names = ["Va_O1", "Va_O2", "Bi_Ti1", "Bi_Ti2", "Bi_Ti3"]
+        colors = _kind_colors(names)
+        assert colors[0] == colors[1]
+        assert colors[2] == colors[3] == colors[4]
+        assert colors[0] != colors[2]
+
+
 class TestSortDefectNames:
     def test_doped_first(self):
         defects = {"Va_Br1": {}, "Bi_Pb1": {}, "Cs_Pb1": {}, "Bi_Cs1": {}}
@@ -305,6 +324,74 @@ class TestSortDefectNames:
         assert sorted_[1] == "Bi_Pb1"
         assert sorted_[2] == "Va_Br1"
         assert sorted_[3] == "Va_Cs1"
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Readout chemistry: compound-inferred ion valence + magnetization
+# ═════════════════════════════════════════════════════════════════════
+
+
+class TestInferHostValences:
+    def test_solves_charge_neutrality(self):
+        # Gd2GaSbO7: 2·3 + 3 + 5 = 14 = 7·2
+        assert _infer_host_valences("Gd2GaSbO7") == {
+            "Gd": 3, "Ga": 3, "Sb": 5,
+        }
+
+    def test_tungstate(self):
+        assert _infer_host_valences("Ba3W2O9") == {"Ba": 2, "W": 6}
+
+    def test_bracketed_formula_expands(self):
+        # Sr[FeO2]2 = SrFe2O4: Sr²⁺ + 2 Fe³⁺ balances 4 O²⁻
+        assert _infer_host_valences("Sr[FeO2]2") == {"Sr": 2, "Fe": 3}
+
+    def test_unparseable_returns_empty(self):
+        assert _infer_host_valences("") == {}
+        assert _infer_host_valences("???") == {}
+
+
+class TestIonValenceTemplate:
+    def test_substitution_uses_host_valence(self):
+        hv = _infer_host_valences("Gd2GaSbO7")
+        assert _ion_valence_template("Bi_Ga1", hv) == {"p": "Bi", "h": 3}
+        assert _ion_valence_template("Bi_Sb1", hv) == {"p": "Bi", "h": 5}
+
+    def test_interstitial_is_charge_conserved(self):
+        assert _ion_valence_template("O_i1", {}) == {"p": "O", "h": None}
+
+    def test_vacancy_is_bare_q(self):
+        assert _ion_valence_template("Va_O1", {}) == {"v": True}
+
+    def test_unknown_site_or_form(self):
+        assert _ion_valence_template("Xx_Y1", {}) == {"p": "?", "h": None}
+        assert _ion_valence_template("Bi_Ga1", {}) == {"p": "?", "h": None}
+
+
+class TestLoadMagnetizations:
+    def _write_cr(self, root: Path, dirname: str, mag: float) -> None:
+        d = root / "defect" / dirname
+        d.mkdir(parents=True)
+        (d / "calc_results.json").write_text(
+            json.dumps({"magnetization": mag, "energy": -1.0}),
+        )
+
+    def test_reads_per_charge_state(self, tmp_path):
+        self._write_cr(tmp_path, "Va_O1_0", 0.573)
+        self._write_cr(tmp_path, "Va_O1_1", -0.571)
+        mags = _load_magnetizations(tmp_path, ["Va_O1"])
+        assert mags == {"Va_O1": {0: 0.573, 1: -0.571}}
+
+    def test_skips_missing_and_foreign_dirs(self, tmp_path):
+        self._write_cr(tmp_path, "Va_O1_0", 0.573)
+        (tmp_path / "defect" / "perfect").mkdir(parents=True)
+        mags = _load_magnetizations(tmp_path, ["Va_O1"])
+        assert mags == {"Va_O1": {0: 0.573}}
+
+    def test_skips_unreadable_calc_results(self, tmp_path):
+        d = tmp_path / "defect" / "Va_O1_0"
+        d.mkdir(parents=True)
+        (d / "calc_results.json").write_text("{not json")
+        assert _load_magnetizations(tmp_path, ["Va_O1"]) == {}
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -421,6 +508,8 @@ class TestHtmlTemplate:
         assert "function fillTip" in html
         assert "function dockTip" in html
         assert "function undockTip" in html
+        # Formation-energy axis never exceeds +10 eV.
+        assert "if(maxY>10)maxY=10" in html
 
     def test_constraint_phases_and_charge_neutrality_embedded(self):
         html = _html_template(
@@ -605,6 +694,22 @@ class TestGenerateInteractiveHtml:
         assert "fillTip" in content
         assert "dockTip" in content
         assert "getElementById(\"cpdCard\")" in content
+        # Content-adaptive sizing contract: clamped width, viewport-capped
+        # height, re-measure on every content update.
+        assert "READOUT_W_MIN" in content
+        assert "READOUT_W_MAX" in content
+        assert "function sizeTip" in content
+        assert "window.innerHeight" in content
+        # Readout chemistry contract: per-row ion valence (compound-inferred
+        # host-site valence + q — the dynamic 价态) + that charge state's
+        # magnetization.
+        assert "var MAG" in content
+        assert "var VOX" in content
+        assert "function calcRow" in content
+        assert "function ionLabel" in content
+        assert "function qLabel" in content
+        assert "function muLabel" in content
+        assert "tspin" in content
         # Docked-over-CPD semantics: no follow/flip/freeze machinery remains,
         # no pinned state, and the retired fixed panel is fully gone.
         assert "showTip" not in content

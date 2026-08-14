@@ -198,6 +198,177 @@ def _build_defects(summary: Any) -> dict[str, dict[str, Any]]:
     return defects
 
 
+# ═════════════════════════════════════════════════════════════════════
+# Readout chemistry: ion valence (compound-inferred) + magnetization
+# ═════════════════════════════════════════════════════════════════════
+
+# Candidate formal oxidation states per element, used only to SOLVE the
+# host compound's charge neutrality — the host formula is the source of
+# truth, not this list. A substitution's ion valence is ox(host site) + q
+# (the displayed 价态, which flips across charge transitions).
+_COMMON_VALENCES: dict[str, list[int]] = {
+    "O": [-2], "Y": [3], "Ti": [4], "Ba": [2], "Al": [3], "Ca": [2],
+    "Sr": [2], "Ga": [3], "La": [3], "Zr": [4], "Sn": [4], "Gd": [3],
+    "Sb": [5], "W": [6], "Sc": [3], "B": [3], "Fe": [2, 3], "Bi": [3],
+    "H": [1], "N": [-3], "F": [-1], "Cl": [-1], "S": [-2], "Se": [-2],
+    "Te": [-2], "P": [5], "Si": [4], "Ge": [4], "Mn": [2, 3, 4],
+    "Cr": [2, 3, 6], "V": [3, 5], "Co": [2, 3], "Ni": [2, 3], "Cu": [1, 2],
+    "Zn": [2], "Nb": [5], "Mo": [6], "Hf": [4], "Ta": [5], "Li": [1],
+    "Na": [1], "K": [1], "Mg": [2], "In": [3], "Cd": [2], "Ce": [3, 4],
+    "Pr": [3], "Nd": [3], "Sm": [3], "Eu": [2, 3], "Er": [3], "Tm": [3],
+    "Yb": [2, 3], "Lu": [3], "Be": [2], "As": [5], "Ag": [1], "Au": [1, 3],
+    "Pt": [2, 4], "Pd": [2, 4], "Ru": [3, 4], "Rh": [3], "Ir": [3, 4],
+    "Os": [4], "Re": [4, 7], "Tc": [4, 7], "Hg": [1, 2], "Pb": [2, 4],
+    "Th": [4], "U": [4, 6],
+}
+
+_SITE_ELEMENT_RE = re.compile(r"^([A-Z][a-z]?)(\d+)$")
+_FORMULA_TOKEN_RE = re.compile(r"([A-Z][a-z]?)(\d*)")
+
+
+def _formula_elements(formula: str) -> dict[str, int]:
+    """Element counts of a host formula, with bracket groups expanded.
+
+    ``Gd2GaSbO7`` -> ``{Gd: 2, Ga: 1, Sb: 1, O: 7}``;
+    ``Sr[FeO2]2`` -> ``{Sr: 1, Fe: 2, O: 4}``. Returns ``{}`` when the
+    formula is empty or unparseable.
+    """
+    text = formula.strip()
+    if not text:
+        return {}
+    counts: dict[str, int] = {}
+    # Expand bracket groups first: [..]N repeats the group N times.
+    while "[" in text:
+        m = re.search(r"\[([^\[\]]*)\](\d*)", text)
+        if not m:
+            return {}
+        mult = int(m.group(2)) if m.group(2) else 1
+        text = text[:m.start()] + (m.group(1) * mult) + text[m.end():]
+    for m in _FORMULA_TOKEN_RE.finditer(text):
+        sym = m.group(1)
+        n = int(m.group(2)) if m.group(2) else 1
+        counts[sym] = counts.get(sym, 0) + n
+    return counts
+
+
+def _infer_host_valences(formula: str) -> dict[str, int]:
+    """Infer each host element's formal oxidation state from the formula.
+
+    Solves charge neutrality (Σ count·valence = 0) with O fixed at −2,
+    trying each element's candidate valences in order; the first neutral
+    combination wins. Returns ``{}`` when no combination balances (mixed
+    or unknown chemistry) — callers then fall back to ``?`` labels.
+    """
+    counts = _formula_elements(formula)
+    if not counts:
+        return {}
+    elements = [e for e in counts if e != "O"]
+    if not elements:
+        return {}
+    candidates = [
+        _COMMON_VALENCES.get(e, [0]) for e in elements
+    ]
+    o_count = counts.get("O", 0)
+    target = 2 * o_count  # O fixed at −2
+
+    import itertools
+    for combo in itertools.product(*candidates):
+        total = sum(n * v for n, v in zip((counts[e] for e in elements), combo))
+        if total == target:
+            return {e: v for e, v in zip(elements, combo)}
+    return {}
+
+
+def _ion_valence_template(
+    name: str, host_valences: dict[str, int],
+) -> dict[str, Any]:
+    """How to render a defect's ion valence from its charge state q.
+
+    Returns ``{"p": species, "h": host-site valence}`` for a substitution
+    X_Yn (label = X^(h+q)), ``{"p": species, "h": None}`` for an
+    interstitial X_iN (label = X^q — charge conservation), ``{"v": True}``
+    for a vacancy Va_Xn (label = q itself), or ``{"p": "?", "h": None}``
+    when the site element has no inferred valence.
+    """
+    parts = name.split("_")
+    if len(parts) < 2:
+        return {"p": "?", "h": None}
+    head = parts[0]
+    if head == "Va":
+        return {"v": True}
+    site = parts[1]
+    if re.match(r"^i\d+$", site):
+        return {"p": head, "h": None}
+    m = _SITE_ELEMENT_RE.match(site)
+    if m:
+        host_ox = host_valences.get(m.group(1))
+        if host_ox is not None:
+            return {"p": head, "h": host_ox}
+    return {"p": "?", "h": None}
+
+
+def _load_magnetizations(
+    system_dir: Path, names: list[str],
+) -> dict[str, dict[int, float]]:
+    """Read total magnetization (signed μB) per charge state from disk.
+
+    Returns ``{defect name: {charge q: magnetization}}`` by walking
+    ``defect/<name>_<q>/calc_results.json``. Directories without a
+    readable ``calc_results.json`` (never analyzed / unconverged) and
+    non-defect dirs (``perfect``) contribute nothing — the readout then
+    renders ``—`` for those charge states.
+    """
+    import json as _json
+
+    defect_dir = system_dir / "defect"
+    if not defect_dir.is_dir():
+        return {}
+    mags: dict[str, dict[int, float]] = {}
+    for d in defect_dir.iterdir():
+        if not d.is_dir():
+            continue
+        m = re.match(r"^(.*)_(-?\d+)$", d.name)
+        if not m:
+            continue
+        name, q = m.group(1), int(m.group(2))
+        if name not in names:
+            continue
+        cr = d / "calc_results.json"
+        if not cr.is_file():
+            continue
+        try:
+            data = _json.loads(cr.read_text())
+            mag = data.get("magnetization")
+        except Exception:
+            continue
+        if isinstance(mag, (int, float)):
+            mags.setdefault(name, {})[q] = round(float(mag), 3)
+    return mags
+
+
+def _defect_kind(name: str) -> str:
+    """Site-independent defect kind: ``Va_O1``/``Va_O13`` -> ``Va_O``.
+
+    Mirrors the legend grouping (``defectBase`` in the generated JS):
+    trailing site digits are stripped.
+    """
+    return re.sub(r"\d+$", "", name)
+
+
+def _kind_colors(names: list[str]) -> list[str]:
+    """One color per defect KIND, shared by every site of that kind.
+
+    ``Va_O1`` and ``Va_O13`` draw with the same color; ``Bi_Ti1`` differs
+    from ``Va_O1``. Colors are assigned in order of first appearance.
+    """
+    by_kind: dict[str, str] = {}
+    for n in names:
+        k = _defect_kind(n)
+        if k not in by_kind:
+            by_kind[k] = _COLORS[len(by_kind) % len(_COLORS)]
+    return [by_kind[_defect_kind(n)] for n in names]
+
+
 def _sort_defect_names(defects: dict[str, Any]) -> list[str]:
     def _key(name: str) -> tuple[int, str]:
         for elem in _DOPANT_ELEMENTS:
@@ -597,10 +768,12 @@ canvas{{display:block;background:var(--canvas);border:1px solid var(--line);bord
 .fe-tip{{position:absolute;z-index:40;display:none;overflow-y:auto;background:#fff;border:1px solid var(--line);border-radius:8px;box-shadow:0 6px 18px rgba(15,23,42,.16);padding:8px 10px;font-size:14px}}
 .fe-tip__head{{font-size:11px;font-weight:700;color:var(--accent);margin-bottom:4px}}
 .fe-tip__foot{{font-size:10px;color:var(--muted);margin-top:4px}}
-.fe-tip .row{{display:grid;grid-template-columns:10px minmax(0,1fr) auto;gap:8px;align-items:center;padding:4px 2px;border-bottom:1px solid #eef2f6;font-size:14px}}
+.fe-tip .row{{display:grid;grid-template-columns:10px minmax(0,1fr) auto auto;gap:8px;align-items:center;padding:4px 2px;border-bottom:1px solid #eef2f6;font-size:14px}}
 .fe-tip .row:last-child{{border-bottom:0}}
 .fe-tip .swatch{{width:8px;height:8px;border-radius:50%}}
+.fe-tip .tnamebox{{display:flex;align-items:center;gap:6px;min-width:0}}
 .fe-tip .tname{{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.fe-tip .tspin{{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;color:#7b8797;text-align:right;white-space:nowrap}}
 .fe-tip .tenergy{{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:#4c596d}}
 .fe-note{{font-size:10px;color:var(--muted);margin-top:8px;line-height:1.4}}
 .leg{{display:flex;flex-wrap:wrap;gap:5px;margin-top:10px}}.leg-group{{display:flex;flex-wrap:wrap;gap:4px;min-width:0;margin:2px 0;padding:2px 4px;border-left:2px solid #dfe6ee}}.leg>div{{display:flex;align-items:center;gap:3px;font-size:12px;cursor:pointer;padding:2px 5px;border-radius:3px}}.leg>div:hover{{background:#eef3f6}}.leg-cat{{font-size:10px!important;font-weight:700;color:var(--accent);flex-basis:100%}}.leg-cat:hover{{background:var(--accent-soft)!important}}
@@ -614,7 +787,7 @@ canvas{{display:block;background:var(--canvas);border:1px solid var(--line);bord
 <canvas id="cpd" width="420" height="420"></canvas>
 <section class="selection-card" aria-live="polite"><div class="selection-card__head"><span class="selection-card__title">当前化学条件</span><span id="selection-state" class="selection-card__state">区域内插值</span></div><div id="selection-constraints" class="selection-card__constraints"></div><div id="selection-mu" class="selection-card__mu"></div><div class="mupanel"><div class="mupanel-title">化学势范围 μ (eV)</div><div id="murows"></div></div></section>
 </div></section>
-<section class="report-card" id="feCard"><header class="report-card__head"><h3>缺陷形成能</h3><span class="report-card__hint">移动查询 E<sub>F</sub></span></header><div class="report-card__body"><div class="fe-workspace"><div class="fe-plot"><canvas id="cv" width="800" height="520"></canvas><div class="leg" id="leg"></div><div class="fe-note">查询层按 E<sub>f</sub> 降序列出当前可见缺陷 · 本征缺陷 · 300 K · 未含自由载流子</div></div></div></div></section>
+<section class="report-card" id="feCard"><header class="report-card__head"><h3>缺陷形成能</h3><span class="report-card__hint">移动查询 E<sub>F</sub></span></header><div class="report-card__body"><div class="fe-workspace"><div class="fe-plot"><canvas id="cv" width="800" height="520"></canvas><div class="leg" id="leg"></div><div class="fe-note">查询层按 E<sub>f</sub> 降序列出当前可见缺陷 · 本征缺陷 · 1000 K · 未含自由载流子</div></div></div></div></section>
 <div id="tip" class="fe-tip"></div>
 </main>
 <script>"""
@@ -625,6 +798,8 @@ var CL = {colors_json};
 var BG = {bg};
 var names = {names_json};
 var DISP = {disp_json};
+var MAG = {mag_json};
+var VOX = {vox_json};
 var nEF = 200;
 var hidden = {{}}; names.forEach(function(n){{hidden[n]=false;}});
 """
@@ -653,6 +828,11 @@ function calcGlobalYRange(){
   if(allE.length===0){minY=-2;maxY=6;return;}
   var lo=Math.min.apply(null,allE),hi=Math.max.apply(null,allE),pad=Math.max(.5,(hi-lo)*.1);
   minY=Math.floor(lo-pad);maxY=Math.ceil(hi+pad);
+  // The formation-energy axis never extends beyond +10 eV; higher lines
+  // are clipped at the canvas top. The docked readout is unaffected — it
+  // lists energies as computed, regardless of the visible axis range.
+  if(maxY>10)maxY=10;
+  if(minY>=maxY)minY=maxY-5;
 }
 calcGlobalYRange();
 
@@ -703,7 +883,7 @@ _FERMI_JS = """
 // Intrinsic-defect charge-neutrality: only defects whose name does NOT
 // start with an exogenous (dopant) element prefix enter the balance.
 var EXO = {exo_json};
-var KT = 0.0259;
+var KT = 0.0862;
 function isIntrinsic(n){{
   for(var i=0;i<EXO.length;i++) if(n.indexOf(EXO[i]+"_")===0) return false;
   return true;
@@ -757,32 +937,75 @@ function segHtml(segs){
 }
 
 var tip=document.getElementById("tip");
+// Stable charge state at the cursor Fermi level: the argmin over charges
+// (calcE's minimum). The docked readout shows its magnetization.
+function calcRow(name,mu,eF){
+  var d=DEF[name],me=Infinity,mq=null,ms=0;
+  for(var e in d.delta) if(mu[e]!==undefined) ms-=d.delta[e]*mu[e];
+  d.charges.forEach(function(c){var v=c.e0+c.q*eF+ms;if(v<me){me=v;mq=c.q;}});
+  return {e:me,q:mq};
+}
+function muLabel(name,q){
+  var mq=MAG[name];
+  if(mq===undefined||mq[q]===undefined)return "—";
+  return Math.abs(mq[q]).toFixed(2);
+}
+// The defect ion's oxidation state at the cursor's Fermi level (价态):
+// substitution X_Yn → X^(h+q) with h the host-site valence inferred from
+// the host formula; interstitial X_iN → X^q (charge conservation); vacancy
+// Va_Xn → q itself. Chemical notation: sign AFTER the magnitude (5+, 2-).
+// It flips when the cursor crosses a charge transition.
+function qLabel(q){return q===0?"0":(q>0?q+"+":(-q)+"-");}
+function ionLabel(name,q){
+  var t=VOX[name];
+  if(!t)return "?";
+  if(t.v)return qLabel(q);
+  var ox=t.h===undefined?q:t.h+q;
+  return t.p+"<span class='csup'>"+qLabel(ox)+"</span>";
+}
 function rowHtml(r){
   return "<div class='row'><span class='swatch' style='background:"+CL[r.idx]+"'></span>"+
-    "<span class='tname'>"+segHtml(DISP[r.name])+"</span>"+
+    "<span class='tnamebox'><span class='tname'>"+segHtml(DISP[r.name])+"</span></span>"+
+    "<span class='tspin'>("+ionLabel(r.name,r.q)+", "+muLabel(r.name,r.q)+")</span>"+
     "<span class='tenergy'>"+(r.e>=0?"+":"")+r.e.toFixed(3)+" eV</span></div>";
 }
 function fillTip(ef){
   var rows=[];
-  names.forEach(function(n,i){if(!hidden[n])rows.push({name:n,idx:i,e:calcE(n,curMu,ef)});});
+  names.forEach(function(n,i){if(!hidden[n]){var cr=calcRow(n,curMu,ef);rows.push({name:n,idx:i,e:cr.e,q:cr.q});}});
   rows.sort(function(a,b){return b.e-a.e;});
   var h="<div class='fe-tip__head'>E_F = "+ef.toFixed(3)+" eV · 最高在前</div>";
   rows.forEach(function(r){h+=rowHtml(r);});
-  h+="<div class='fe-tip__foot'>共 "+rows.length+" 条 · 本征缺陷 · 300 K · 未含自由载流子 · 滚轮翻页</div>";
+  h+="<div class='fe-tip__foot'>共 "+rows.length+" 条 · 本征缺陷 · 1000 K · 未含自由载流子 · 滚轮翻页</div>";
   tip.innerHTML=h;
+  sizeTip();
 }
-// The readout docks OVER the CPD card — entirely outside the formation-energy
-// chart — so inspecting the chart never covers the data itself. It fills the
-// CPD card's extent (full width + height), sits on a fixed spot, and its
-// content tracks the cursor's Fermi level while the pointer is in the FE plot.
+// The readout docks over the CPD card — entirely outside the formation-energy
+// chart — so inspecting the chart never covers the data itself. It is a
+// content-adaptive panel right-aligned inside the CPD card: the CPD canvas's
+// left, larger part stays visible and draggable, while the panel carries the
+// list. Width follows the longest visible row (incl. head/foot lines), clamped
+// to [READOUT_W_MIN, READOUT_W_MAX]; height follows the rows but never exceeds
+// the viewport — beyond the cap the panel scrolls (wheel is forwarded from the
+// FE chart). Sizing is display state only: calcFermi/hidden are untouched.
+var READOUT_W_MIN = 240, READOUT_W_MAX = 320, READOUT_INSET = 10, READOUT_GAP = 10, READOUT_MIN_H = 120;
+function sizeTip(){
+  if(tip.style.display!=="block")return;
+  var c=document.getElementById("cpdCard");
+  // Measure the rendered content in the same synchronous block the caller
+  // runs in: the browser cannot paint between measurement and positioning.
+  var w=Math.min(READOUT_W_MAX,Math.max(READOUT_W_MIN,tip.offsetWidth));
+  tip.style.width=w+"px";
+  tip.style.left=(c.offsetLeft + c.clientWidth - w - READOUT_INSET)+"px";
+  var maxH=window.innerHeight - tip.getBoundingClientRect().top - READOUT_GAP;
+  if(maxH<READOUT_MIN_H)maxH=READOUT_MIN_H;
+  tip.style.maxHeight=maxH+"px";
+}
 function dockTip(ef){
   var c=document.getElementById("cpdCard");
-  tip.style.left=c.offsetLeft+"px";
-  tip.style.top=c.offsetTop+"px";
-  tip.style.width=c.clientWidth+"px";
-  tip.style.height=c.clientHeight+"px";
   fillTip(ef);
   tip.style.display="block";
+  tip.style.top=(c.offsetTop+READOUT_GAP)+"px";
+  sizeTip();
 }
 function undockTip(){tip.style.display="none";}
 var hoverCapable=window.matchMedia("(hover:hover)").matches;
@@ -940,9 +1163,13 @@ def _html_template(
     a0_range: tuple[float, float],
     a1_range: tuple[float, float],
     exo_elements: list[str],
+    mags: dict[str, dict[int, float]] | None = None,
+    vox: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     """Render the self-contained interactive HTML page."""
     js = json.dumps
+    mags = mags or {}
+    vox = vox or {}
 
     # Compute impurity elements (in vertex_mu but not host vertex_elements)
     host_set = set(vertex_elements)
@@ -979,6 +1206,10 @@ def _html_template(
             bg=cbm,
             names_json=js(sorted_names),
             disp_json=js({n: _defect_segments(n) for n in sorted_names}),
+            mag_json=js({n: {str(q): mu for q, mu in qm.items()}
+                         for n, qm in mags.items()}),
+            vox_json=js({n: vox.get(n, {"p": "?", "h": None})
+                         for n in sorted_names}),
         )
         + "\n" + cpd_js + "\n" + fe_canvas + fermi_js + "\n" + _COMMON_JS_FOOTER
     )
@@ -1031,7 +1262,16 @@ def generate_interactive_html(system_dir: Path) -> Path | None:
 
     defects = _build_defects(de)
     sorted_names = _sort_defect_names(defects)
-    colors = _COLORS[:len(sorted_names)]
+    colors = _kind_colors(sorted_names)
+
+    mags = _load_magnetizations(system_dir, sorted_names)
+    host_valences = _infer_host_valences(host_name)
+    vox = {n: _ion_valence_template(n, host_valences) for n in sorted_names}
+    if not host_valences:
+        logger.warning(
+            "%s: host formula %r has no charge-neutral valence solution; "
+            "ion-valence labels render as ?", host_name, host_name,
+        )
 
     ref_mu: dict[str, float] = vertex_mu[0] if vertex_mu else {}
 
@@ -1083,6 +1323,8 @@ def generate_interactive_html(system_dir: Path) -> Path | None:
         a0_range=(min(all_ax0) - pad, max(all_ax0) + pad),
         a1_range=(min(all_ax1) - pad, max(all_ax1) + pad),
         exo_elements=exo_elements,
+        mags=mags,
+        vox=vox,
     )
 
     out_path = system_dir / "formation_energy_interactive.html"
