@@ -14,6 +14,12 @@ from pathlib import Path
 from vasp_sop.core.config import PipelineConfig
 from vasp_sop.core.jobs import _vasp_input_ready, run_local
 from vasp_sop.vasp.convergence import convergence_verdict
+from vasp_sop.vasp.protocol import (
+    U_TABLE,
+    effective_encut,
+    magmom_values,
+    protocol_tags,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +116,10 @@ def prepare_inputs(
         f"--potcar {' '.join(config.potcar_overrides)}"
         if config.potcar_overrides else ""
     )
-    encut_opt = f"ENCUT {config.encut}" if config.encut else ""
+    # ENCUT 永不落入 vise 模板默认(漂移来源):plan/config 显式值优先,
+    # 否则按本目录 POTCAR 的 1.3×max ENMAX 检测(协议模块单一规则)。
+    encut_val = effective_encut(config, work_dir)
+    encut_opt = f"ENCUT {encut_val}" if encut_val else ""
     # Map generic task names to vise's expected task type values
     _VISE_TASK_MAP = {
         "dielectric": "dielectric_dfpt",
@@ -129,27 +138,23 @@ def prepare_inputs(
     # DFT+U always on (ADR 0012): vise auto-adapts per element — U-table
     # elements (3d Mn-Ni, Cu, Zn, lanthanides) get U, others none.
     cmd += " --options set_hubbard_u True"
-    uis_flags = f"NSW 50 NELM 50 EDIFF 1e-4 EDIFFG -0.01 {extra_uis} {encut_opt}".strip()
+    # 协议表单一来源(ADR 0024):NSW/NELM/EDIFF/EDIFFG/SIGMA/LORBIT 按腿
+    # 取数;extra_uis 先拼、协议表在后(同 key 以协议表为准)。
+    tags = protocol_tags(task_type)
+    flags = " ".join(f"{k} {v}" for k, v in tags.items())
+    uis_flags = f"{extra_uis} {flags} {encut_opt}".strip()
     cmd += f" -uis {uis_flags}"
 
     run_local(cmd, cwd=work_dir, timeout=300)
     # vise never sets SOC tags — patch AFTER run_local so freshly
     # generated INCAR inherits LSORBIT/ISYM without clobbering other tags.
     _apply_soc_tags(work_dir, config, task_type)
-    # vise 0.9.5 drops `NELM`/`EDIFF` from -uis (vise_log records NSW
-    # only): the CLI-path protocol (cpd/band/dos/dielectric/
-    # structure_opt) is NELM=50 + EDIFF=1e-4 (operator decisions
-    # 2026-08-11 — the vise template's 1e-7 burned ~2x electronic steps
-    # for no force-level gain; EDIFFG governs ionic accuracy).  (defect
-    # goes through the API path, which already enforces NELM=30 /
-    # EDIFF=1e-4.)
-    patch_incar(work_dir, NELM=50, EDIFF="1e-4")
-    # Global EDIFFG=-0.01 for relaxations (operator decision 2026-08-11;
-    # vise template default is -0.005, Sr[FeO2]2 was the pilot).  Only
-    # structure_opt relaxes — band/dos/dielectric are single-point and
-    # keep whatever the template gives.
-    if task_type == "structure_opt":
-        patch_incar(work_dir, EDIFFG=-0.01)
+    # vise 0.9.5 会丢 NELM/EDIFF(belt-and-braces):按协议表补回,保证落盘
+    # INCAR 与声明一致(cpd/band/dos/dielectric/structure_opt 同源)。
+    fallback = {k: v for k, v in tags.items() if k in ("NELM", "EDIFF")}
+    if tags.get("EDIFFG") is not None:
+        fallback["EDIFFG"] = tags["EDIFFG"]
+    patch_incar(work_dir, **fallback)
     # DFT+U: vise CLI applies set_hubbard_u to defect tasks only; patch
     # U-table species (incl. Ti, missing from the libs/vise fork's table)
     # for cpd/band/dos/dielectric too — idempotent.
@@ -200,12 +205,11 @@ def _prepare_inputs_vise_api(
     }
     vise_task = _VISE_TASK_MAP.get(task_type, task_type)
 
-    # Parse the CLI-style "KEY VALUE KEY VALUE" flags into overrides.
-    # NELM=30 / EDIFF=1e-4 is the defect protocol cap (operator decision
-    # 2026-08-11): typical defect cells converge electronically in 16-30
-    # steps, so vise's 100 just burns compute on genuinely slow SCF (and
-    # the ADR 0016 gate flags NELM exhaustion as unconverged anyway).
-    overrides: dict[str, str] = {"NSW": "100", "NELM": "30", "EDIFF": "1e-4"}
+    # 协议表单一来源(ADR 0024):NSW/NELM/EDIFF/EDIFFG/SIGMA/LORBIT 按腿
+    # 取(defect cap:NELM=30 典型胞 16-30 步收敛,ADR 0016 门检 NELM 耗
+    # 尽);extra_uis 显式覆盖在后(调用点可抬高占据展宽)。
+    tags = protocol_tags(task_type)
+    overrides: dict[str, str] = {k: str(v) for k, v in tags.items()}
     tokens = extra_uis.split()
     for i in range(0, len(tokens) - 1, 2):
         overrides[tokens[i]] = tokens[i + 1]
@@ -219,14 +223,14 @@ def _prepare_inputs_vise_api(
         charge=charge,
         # DFT+U always on (ADR 0012): vise auto-adapts by element.
         set_hubbard_u=True,
-        cutoff_energy=config.encut,
+        # ENCUT 永不落入 vise 模板默认(漂移来源):plan/config 优先,
+        # 否则按本目录 POTCAR 检测(协议模块单一规则)。
+        cutoff_energy=effective_encut(config, work_dir),
     )
     vif = VaspInputFiles(options, overridden_incar_settings=overrides)
     vif.create_input_files(work_dir)
     # Belt and braces: overrides can drift with vise releases.
-    patch_incar(work_dir, NSW=100, NELM=30, EDIFF="1e-4",
-                **{k: v for k, v in overrides.items()
-                   if k not in ("NSW", "NELM", "EDIFF")})
+    patch_incar(work_dir, **overrides)
     if config.soc and not config.stage2_soc:
         patch_incar(work_dir, LSORBIT=".TRUE.", ISYM=-1)
     # libs/vise fork's U table lacks Ti (official vise has U=4): rely on
@@ -423,24 +427,6 @@ def patch_incar(path: Path, **kwargs: str | int | float) -> None:
 # ── DFT+U patch (ADR 0012) ──────────────────────────────────────────────
 # vise's CLI path applies set_hubbard_u only to defect tasks; cpd and
 # structure_opt templates come out without LDAU tags.  We patch those
-# INCARs directly.  U values follow vise's u_parameter_set.yaml
-# (vise/input_set/datasets/u_parameter_set.yaml).  Ti (U=4) is included:
-# the official vise table has it, and the 2026 batch unified on U=4 for
-# Y2Ti2O7 (operator decision 2026-08-11) — the libs/vise fork's table
-# lacks Ti, so set_hubbard_u alone silently drops the tag; patching here
-# keeps cpd/defect/band/dos consistent.
-_U_TABLE: dict[str, tuple[float, int]] = {
-    # element -> (U [eV], L quantum number)
-    "Ti": (4.0, 2),
-    "Mn": (3.0, 2), "Fe": (3.0, 2), "Co": (3.0, 2), "Ni": (3.0, 2),
-    "Cu": (5.0, 2), "Zn": (5.0, 2),
-    "Ce": (5.0, 3), "Pr": (5.0, 3), "Nd": (5.0, 3), "Sm": (5.0, 3),
-    "Eu": (5.0, 3), "Gd": (5.0, 3), "Tb": (5.0, 3), "Dy": (5.0, 3),
-    "Ho": (5.0, 3), "Er": (5.0, 3), "Tm": (5.0, 3), "Yb": (5.0, 3),
-    "Lu": (5.0, 3),
-}
-
-
 def patch_incar_u(work_dir: Path) -> None:
     """Add DFT+U tags to an INCAR that lacks them (vise CLI gap for
     non-defect tasks, e.g. cpd structure_opt templates).
@@ -462,34 +448,28 @@ def patch_incar_u(work_dir: Path) -> None:
     species = list(dict.fromkeys(species))
     # ISPIN=2 for any U-table species: vise's cpd template leaves spin
     # polarization out even for magnetic FeO.
-    if any(s in _U_TABLE for s in species):
+    if any(s in U_TABLE for s in species):
         patch_incar(work_dir, ISPIN=2)
     if "LDAU" in incar.read_text(errors="ignore"):
         return
-    uu = [str(_U_TABLE[s][0]) if s in _U_TABLE else "0" for s in species]
-    ul = [str(_U_TABLE[s][1]) if s in _U_TABLE else "-1" for s in species]
+    uu = [str(U_TABLE[s][0]) if s in U_TABLE else "0" for s in species]
+    ul = [str(U_TABLE[s][1]) if s in U_TABLE else "-1" for s in species]
     if all(u == "0" for u in uu):
         return
-    lmaxmix = max(_U_TABLE[s][1] for s in species if s in _U_TABLE)
+    lmaxmix = max(U_TABLE[s][1] for s in species if s in U_TABLE)
     lmaxmix = 6 if lmaxmix == 3 else 4
     patch_incar(work_dir, LDAU=True, LDAUTYPE=2, LDAUPRINT=1,
                 LMAXMIX=lmaxmix, LDAUU=" ".join(uu), LDAUL=" ".join(ul),
                 ISPIN=2)
 
 
-# Initial SCF moments (μB) per species, high-spin d-shell values (VASP
-# recommendation).  Only species with a settled decision get entries;
-# non-magnetic atoms default to 0.0.
-_MAGMOM_TABLE: dict[str, float] = {
-    "Fe": 5.0,
-}
-
-
 def patch_incar_magmom(work_dir: Path) -> None:
     """Set MAGMOM in POSCAR atom order (0 for non-magnetic species).
 
-    Without explicit moments every restart re-runs SCF from VASP's
-    default 1.0/site, which can land in a metastable magnetic basin —
+    Initial moments come from :mod:`vasp_sop.vasp.protocol.INITIAL_MAGMOM`
+    (high-spin; Gd=7 fixes the 4f SOC collapse, issue #151).  Without
+    explicit moments every restart re-runs SCF from VASP's default
+    1.0/site, which can land in a metastable magnetic basin —
     Sr[FeO2]2 drifted 80→72→56 μB across TIME-LIMIT restarts (~5 eV
     above the ferromagnetic ground state) while NSW was burned on the
     wrong spin state.  Idempotent (MAGMOM overwritten only when the
@@ -499,12 +479,10 @@ def patch_incar_magmom(work_dir: Path) -> None:
     if not incar.is_file():
         return
     species = _poscar_species(work_dir / "POSCAR") or []
-    if not species:
+    moments = magmom_values(species)
+    if moments is None:
         return
-    if not any(s in _MAGMOM_TABLE for s in species):
-        return
-    moments = " ".join(str(_MAGMOM_TABLE.get(s, 0.0)) for s in species)
-    patch_incar(work_dir, MAGMOM=moments)
+    patch_incar(work_dir, MAGMOM=" ".join(str(m) for m in moments))
 
 
 # ── POTCAR restore (ADR 0007: input restore) ─────────────────────────────

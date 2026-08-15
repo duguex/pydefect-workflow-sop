@@ -464,11 +464,14 @@ def main() -> int:
             if expect and r.get("isif") not in (None, expect):
                 isif_violations.append(f"{Path(r['dir']).name}(ISIF={r['isif']}≠{expect})")
 
-        # 2b3. ISPIN 与相组成匹配(记录级; 预期 = U 表元素 ∪ defect 任务 ∪ SOC)
+        # 2b3. ISPIN 与相组成匹配(记录级; 预期 = U 表元素 ∪ defect 任务 ∪ SOC;
+        #      单一事实源 = vasp_sop.vasp.protocol.U_TABLE, ADR 0024)
         try:
-            from vasp_sop.vasp.io import _U_TABLE
-            mag_elems = set(_U_TABLE)
+            from vasp_sop.vasp.protocol import (INITIAL_MAGMOM, LEG_PROTOCOL,
+                                                U_TABLE)
+            mag_elems = set(U_TABLE)
         except ImportError:
+            U_TABLE = LEG_PROTOCOL = INITIAL_MAGMOM = None
             mag_elems = {"Ti", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Gd",
                          "Ce", "Pr", "Nd", "Sm", "Eu", "Tb", "Dy", "Ho",
                          "Er", "Tm", "Yb", "Lu"}
@@ -499,6 +502,22 @@ def main() -> int:
                 if (els & collapse_elems) and ispin == "2" and abs(mag) < 1.0:
                     mag_collapse.append(f"{pname}(mag={mag:.1f})")
 
+        # 2b3b. MAGMOM 缺失(输入侧根因, 记录级):真磁性元素(INITIAL_MAGMOM
+        #       键)相 ISPIN=2 却无 MAGMOM 初始化 → SCF 从 VASP 默认 1.0/site
+        #       起跑,可落非磁鞍点(issue #151 Gd 4f 塌缩根因)。
+        mag_missing = []
+        for r in active:
+            inc = r.get("incar", {})
+            if not inc:
+                continue
+            els = {t.split("_")[0] for t, _ in r.get("titel", [])}
+            if not els or not (els & set(INITIAL_MAGMOM or ())):
+                continue
+            if inc.get("ISPIN") != "2":
+                continue
+            if "MAGMOM" not in inc:
+                mag_missing.append(Path(r["dir"]).name)
+
         # 2b4. 磁矩漂移(同目录 *.log 序列, 记录级; |Δ|>--drift-mag μB)
         drift_warns = []
         for r in active:
@@ -519,7 +538,51 @@ def main() -> int:
                     drift_warns.append(f"{Path(r['dir']).name}({a:.1f}→{b:.1f})")
                     break
 
-        # 2b5. 残余压力(记录级, 不告警)
+        # 2b5. 协议基线(记录级; 对照协议单一事实源 LEG_PROTOCOL, ADR 0024)。
+        #      存量目录多为 2026-08-11 前产物——本维度暴露「与声明的差距」,
+        #      生成器规范化后新目录应清零。
+        protocol_violations = []
+        if LEG_PROTOCOL:
+            leg_map = {
+                "cpd": "cpd",
+                "defect": "defect",
+                "unitcell/structure_opt": "structure_opt",
+                "unitcell/band": "band",
+                "unitcell/dos": "dos",
+                "unitcell/dielectric": "dielectric",
+            }
+            numkeys = {"NSW", "NELM", "EDIFFG", "SIGMA", "LORBIT", "EDIFF"}
+            def _norm(k: str, v) -> str:
+                if k in numkeys:
+                    try:
+                        return f"{float(v):g}"
+                    except (TypeError, ValueError):
+                        return str(v).strip().lower()
+                return str(v).strip().lower()
+
+            for r in active:
+                inc = r.get("incar", {})
+                if not inc:
+                    continue
+                kind = _dir_kind(str(r["dir"]))
+                if kind == "cpd" and Path(r["dir"]).name.startswith("mol_"):
+                    continue  # 分子相固定 cell 协议独立
+                leg = leg_map.get(kind)
+                want_tags = LEG_PROTOCOL.get(leg) if leg else None
+                if not want_tags:
+                    continue
+                bad = []
+                for k, want in want_tags.items():
+                    v = inc.get(k)
+                    if v is None:
+                        bad.append(f"{k}=缺失(应{want})")
+                    elif _norm(k, v) != _norm(k, want):
+                        bad.append(f"{k}={v}(应{want})")
+                if bad:
+                    protocol_violations.append(
+                        f"{Path(r['dir']).name}: " + "; ".join(bad[:5]))
+
+        # 2b6. 残余压力(记录级, 不告警)
         pressures = sorted(r["pressure_kb"] for r in active
                            if r.get("pressure_kb") is not None)
 
@@ -538,6 +601,13 @@ def main() -> int:
             record_warnings.append("磁矩塌缩: " + "; ".join(mag_collapse[:8]))
         if drift_warns:
             record_warnings.append("磁矩漂移: " + "; ".join(drift_warns[:8]))
+        if mag_missing:
+            record_warnings.append(
+                f"无MAGMOM初始化({len(mag_missing)}): " + "; ".join(mag_missing[:8]))
+        if protocol_violations:
+            record_warnings.append(
+                f"协议不符({len(protocol_violations)}): "
+                + "; ".join(protocol_violations[:6]))
         if pressures:
             record_warnings.append(
                 f"残余压力范围: {pressures[0]:.1f}~{pressures[-1]:.1f} kB")

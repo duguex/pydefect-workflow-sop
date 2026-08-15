@@ -42,7 +42,7 @@ def _prepare_all_inputs(uc_root: Path, target_dir: Path, config: PipelineConfig)
     if poscar_src.exists() and not (structure_opt_dir / "POSCAR").exists():
         shutil.copy2(str(poscar_src), str(structure_opt_dir / "POSCAR"))
 
-    prepare_inputs(structure_opt_dir, config)
+    prepare_inputs(structure_opt_dir, config, task_type="structure_opt")
     pp_opt = (
         f"--potcar {' '.join(config.potcar_overrides)}"
         if config.potcar_overrides else ""

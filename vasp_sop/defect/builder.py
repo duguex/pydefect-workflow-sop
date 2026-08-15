@@ -268,9 +268,10 @@ def _generate_vasp_inputs(defect_root: Path, config: PipelineConfig) -> None:
             if m:
                 q = float(m.group(1))
         try:
+            # SIGMA/LORBIT/SOC/U/MAGMOM 全由协议表(ADR 0024)决定,
+            # 不再在调用点散落——charge 由 API 路径算 NELECT。
             prepare_inputs(d, config,
                            kspacing=0.1, task_type="defect",
-                           extra_uis="SIGMA 0.02 LORBIT 11",
                            charge=q)
         except Exception as exc:
             logger.warning("%s: input generation failed: %s", d.name, exc)
