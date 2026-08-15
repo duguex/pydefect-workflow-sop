@@ -1,5 +1,5 @@
 [Unit]
-Description=vasp-sop batch result acceptance check (convergence truth + comparability)
+Description=vasp-sop batch result acceptance check (manual trigger: systemctl --user start vasp-sop-check.service)
 After=network.target
 
 [Service]
