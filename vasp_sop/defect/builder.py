@@ -38,13 +38,11 @@ def build_all(
     # Prefer CONTCAR (relaxed) when available; otherwise fall back to POSCAR.
     # The supercell sizing from the unrelaxed lattice is fine, but the defect
     # VASP input generation uses the relaxed cell parameters for better accuracy.
+    # NOTE: defect *structure* building must use the pre-perfect lattice
+    # (symmetric) — ISIF=3 relaxation breaks equivalent sites, so the build
+    # always happens before perfect relaxes (2026-08-16 design). The perfect
+    # lattice is applied afterwards via sync_lattice_from_perfect.
     uc_contcar = contcar if contcar.is_file() else poscar
-    # 2026-08-16 协议修正:perfect(无缺陷超胞, ISIF=3)收敛后,其晶格是
-    # 缺陷链的正确参考——已收敛时优先用作全部 defect 的晶格源(其他
-    # defect 以 ISIF=2 固定该晶格,只弛豫原子)。
-    perfect_contcar = defect_root / "perfect" / "CONTCAR"
-    if perfect_contcar.is_file() and perfect_contcar.stat().st_size > 0:
-        uc_contcar = perfect_contcar
     logger.info("Building supercell from %s", uc_contcar.name)
     # ── Config-fingerprint guard ───────────────────────────────────
     # Detect plan.yaml changes that affect the build.  If the current
@@ -74,6 +72,44 @@ def build_all(
 
     # Write fingerprint *after* successful build.
     _write_fingerprint(defect_root, config)
+
+
+def sync_lattice_from_perfect(defect_root: Path) -> int:
+    """Perfect(ISIF=3)收敛后,将其 CONTCAR 晶格同步到全部 defect POSCAR。
+
+    只替换晶格向量——原子坐标/缺陷结构不变。设计(2026-08-16):缺陷
+    结构构建必须早于 perfect 的 ISIF=3 弛豫(未弛豫对称晶格保证等价
+    位正确),perfect 收敛后再把弛豫晶格同步给 defect(以 ISIF=2 固定,
+    只弛豫原子)。返回被更新的目录数(0 = perfect 未收敛/无变化)。
+    """
+    from pymatgen.core import Structure
+
+    perfect = defect_root / "perfect"
+    pc = perfect / "CONTCAR"
+    if not pc.is_file() or pc.stat().st_size == 0:
+        return 0
+    try:
+        lattice = Structure.from_file(str(pc)).lattice
+    except Exception:  # noqa: BLE001 —— CONTCAR 不可解析视为未收敛
+        return 0
+
+    n = 0
+    for d in sorted(defect_root.iterdir()):
+        if not d.is_dir() or d.name == "perfect":
+            continue
+        poscar = d / "POSCAR"
+        if not poscar.is_file():
+            continue
+        try:
+            s = Structure.from_file(str(poscar))
+        except Exception:  # noqa: BLE001 —— 跳过坏目录
+            continue
+        if s.lattice == lattice:
+            continue  # 晶格已一致,避免无谓 mtime 漂移
+        s.lattice = lattice
+        s.to(fmt="poscar", filename=str(poscar))
+        n += 1
+    return n
 
 
 # ══════════════════════════════════════════════════════════════════════════
