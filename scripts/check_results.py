@@ -180,6 +180,28 @@ def scan_dir(d: Path, non_scf: set[str]) -> dict:
     rec["titel"] = titel
     rec["nions"] = nions
     rec["incar"] = outcar_incar_echo(head)
+    rec["lsorbit"] = rec["incar"].get("LSORBIT", "F").upper().startswith(("T", ".T"))
+
+    # 应力/自旋信号
+    rec["isif"] = rec["incar"].get("ISIF")
+    rec["ispin"] = rec["incar"].get("ISPIN")
+    # ENMAX: OUTCAR POTCAR 信息块(每元素一行, 与 TITEL 序一致)
+    enmax_vals = [float(m.group(1)) for ln in head
+                  for m in [re.search(r"ENMAX\s*=\s*([\d.]+)", ln)] if m]
+    rec["max_enmax"] = max(enmax_vals) if enmax_vals else None
+    # 残余压力(弛豫目录最后离子步)
+    tail = read_tail(outcar, TAIL_WINDOW_KB)
+    press = [float(m.group(1)) for ln in tail
+             for m in [re.search(r"external pressure\s*=\s*(-?[\d.]+)", ln)] if m]
+    rec["pressure_kb"] = press[-1] if press else None
+    # 最终磁矩: 非SOC单值 / SOC三值取模(文件顺序 head→tail, 取最后一个)
+    mags = []
+    for ln in head + tail:
+        m = re.search(r"number of electron\s+[\d.]+\s+magnetization\s+([-\d.]+(?:\s+[-\d.]+){0,2})", ln)
+        if m:
+            vals = [float(x) for x in m.group(1).split()]
+            mags.append(vals[0] if len(vals) == 1 else (sum(v * v for v in vals)) ** 0.5)
+    rec["mag"] = mags[-1] if mags else None
 
     # 可比性证据 B1: POTCAR: 解析行 vs TITEL 声明行矛盾(段格式污染)
     tset, pset = set(titel), set(potcar_lines)
@@ -294,6 +316,8 @@ def main() -> int:
                     help="非自洽目录名逗号分隔(豁免收敛标记)")
     ap.add_argument("--flat-ev", type=float, default=ENERGY_FLAT_EV)
     ap.add_argument("--outlier-ev", type=float, default=ENERGY_OFFSET_THRESHOLD)
+    ap.add_argument("--drift-mag", type=float, default=2.0,
+                    help="磁矩漂移告警阈值 μB(同目录 log 序列末值差)")
     ap.add_argument("--quick", action="store_true", help="跳过能量离群维度")
     args = ap.parse_args()
 
@@ -347,18 +371,26 @@ def main() -> int:
             if len(el_tokens[el]) > 1:
                 mix_issues.append(f"{el}: tokens={sorted(el_tokens[el])}")
 
-        # 2b. 物理 key 一致(体系内全部互比; LDAUU/LDAUL 按元素映射)
+        # 2b. 物理 key 一致(体系内全部互比; LDAUU/LDAUL 按元素映射;
+        #     ENCUT 分区: cpd 相按各自 ENMAX 合法, 只 unitcell+defect 组内强制统一)
         key_diffs: dict[str, set] = collections.defaultdict(set)
         incar_sets: dict[str, set] = collections.defaultdict(set)
-        for r in active:
+        non_cpd = [r for r in active if not str(r["dir"]).replace("\\", "/").split("/")[-3:-2] == ["cpd"]]
+        for r in non_cpd:
             inc = r.get("incar", {})
             for k in PHYSICAL_KEYS:
-                if k in ("LDAUU", "LDAUL"):
+                if k == "ENCUT":
+                    raw = inc.get("ENCUT")
+                    try:
+                        vals = {str(float(raw))} if raw is not None else set()
+                    except ValueError:
+                        vals = {raw} if raw is not None else set()
+                elif k in ("LDAUU", "LDAUL"):
                     mapped = lda_el_mapped(inc, r.get("titel", []))
-                    vals = mapped.get(k) or mapped.get(k + "_raw") or {None}
-                elif k in ("ENCUT", "EDIFF", "EDIFFG", "SIGMA"):
+                    vals = mapped.get(k) or mapped.get(k + "_raw") or set()
+                elif k in ("EDIFF", "EDIFFG", "SIGMA"):
                     raw = inc.get(k)
-                    try:  # 数值归一化(1e-05 == 1e-5 == 0.00001)
+                    try:
                         vals = {str(float(raw))} if raw is not None else set()
                     except ValueError:
                         vals = {raw} if raw is not None else set()
@@ -368,6 +400,17 @@ def main() -> int:
         for k in PHYSICAL_KEYS:
             if len(incar_sets[k]) > 1:
                 key_diffs[k] = incar_sets[k]
+        # ENCUT ≥ ENMAX 物理下限(全目录, 记录级; Ga_mp-142 ZPOTRF 事故场景)
+        encut_below = []
+        for r in active:
+            raw = r.get("incar", {}).get("ENCUT")
+            if raw and r.get("max_enmax"):
+                try:
+                    if float(raw) < r["max_enmax"]:
+                        encut_below.append(
+                            f"{Path(r['dir']).name}({raw}<{r['max_enmax']})")
+                except ValueError:
+                    pass
         rec_only_diffs: dict[str, set] = {}
         for k in RECORD_ONLY_KEYS:
             s: set = set()
@@ -378,10 +421,109 @@ def main() -> int:
             if len(s) > 1:
                 rec_only_diffs[k] = s
 
+        # 2b2. ISIF 协议分区(记录级): cpd=3 / defect=2 / unitcell-structure_opt=3
+        #      / unitcell-{band,dos,dielectric}=豁免(NSW=0) / 其他=不查
+        def _dir_kind(p: str) -> str:
+            parts = Path(p).parts
+            if "unitcell" in parts:
+                idx = parts.index("unitcell")
+                sub = parts[idx + 1] if idx + 1 < len(parts) else ""
+                return f"unitcell/{sub}"
+            for k in ("cpd", "defect"):
+                if k in parts:
+                    return k
+            return "other"
+
+        isif_protocol = {"cpd": "3", "defect": "2", "unitcell/structure_opt": "3"}
+        isif_exempt = {"unitcell/band", "unitcell/dos", "unitcell/dielectric"}
+        isif_violations = []
+        for r in active:
+            kind = _dir_kind(str(r["dir"]))
+            if kind in isif_exempt or kind == "other":
+                continue
+            if kind == "cpd" and Path(r["dir"]).name.startswith("mol_"):
+                continue  # 分子相固定 cell 合法
+            expect = isif_protocol.get(kind)
+            if expect and r.get("isif") not in (None, expect):
+                isif_violations.append(f"{Path(r['dir']).name}(ISIF={r['isif']}≠{expect})")
+
+        # 2b3. ISPIN 与相组成匹配(记录级; 预期 = U 表元素 ∪ defect 任务 ∪ SOC)
+        try:
+            from vasp_sop.vasp.io import _U_TABLE
+            mag_elems = set(_U_TABLE)
+        except ImportError:
+            mag_elems = {"Ti", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Gd",
+                         "Ce", "Pr", "Nd", "Sm", "Eu", "Tb", "Dy", "Ho",
+                         "Er", "Tm", "Yb", "Lu"}
+        # 塌缩敏感元素: 3d/4f 磁序元素(Ti4+/Cu+/Zn2+ 无磁, 排除)
+        collapse_elems = {"Mn", "Fe", "Co", "Ni", "Gd",
+                          "Ce", "Pr", "Nd", "Sm", "Eu", "Tb", "Dy",
+                          "Ho", "Er", "Tm", "Yb", "Lu"}
+        ispin_mismatch = []
+        mag_collapse = []
+        mag_by_dir = {}
+        for r in active:
+            inc = r.get("incar", {})
+            if not inc:
+                continue
+            ispin = inc.get("ISPIN")
+            pname = Path(r["dir"]).name
+            kind = _dir_kind(str(r["dir"]))
+            els = {t.split("_")[0] for t, _ in r.get("titel", [])}
+            has_u_elem = bool(els & mag_elems)
+            expect_spin = ("2" if (has_u_elem or kind == "defect"
+                                   or r.get("lsorbit")) else "1")
+            if ispin and ispin != expect_spin and not pname.startswith("mol_"):
+                ispin_mismatch.append(f"{pname}(ISPIN={ispin}≠{expect_spin})")
+            mag = r.get("mag")
+            if mag is not None:
+                mag_by_dir[pname] = mag
+                # 塌缩: 真磁性元素相 ISPIN=2 但磁矩 ≈ 0
+                if (els & collapse_elems) and ispin == "2" and abs(mag) < 1.0:
+                    mag_collapse.append(f"{pname}(mag={mag:.1f})")
+
+        # 2b4. 磁矩漂移(同目录 *.log 序列, 记录级; |Δ|>--drift-mag μB)
+        drift_warns = []
+        for r in active:
+            logs = sorted((Path(r["dir"])).glob("*.log"))
+            if len(logs) < 2:
+                continue
+            seq = []
+            for lg in logs:
+                last_mag = None
+                for ln in read_tail(lg, 256):  # log 尾部含最后离子步 mag=
+                    m = re.search(r"mag=\s*([-\d.]+)", ln)
+                    if m:
+                        last_mag = float(m.group(1))
+                if last_mag is not None:
+                    seq.append(last_mag)
+            for a, b in zip(seq, seq[1:]):
+                if abs(b - a) > args.drift_mag:
+                    drift_warns.append(f"{Path(r['dir']).name}({a:.1f}→{b:.1f})")
+                    break
+
+        # 2b5. 残余压力(记录级, 不告警)
+        pressures = sorted(r["pressure_kb"] for r in active
+                           if r.get("pressure_kb") is not None)
+
         # 2c. 零点一致性(体系级: cpd composition 来源 vs defect 链变体)
         zero_issues = zero_point_check(group)
 
         comparable = not mix_issues and not key_diffs and not zero_issues
+        record_warnings = []
+        if encut_below:
+            record_warnings.append("ENCUT<ENMAX: " + "; ".join(encut_below[:8]))
+        if isif_violations:
+            record_warnings.append("ISIF协议外: " + "; ".join(isif_violations[:8]))
+        if ispin_mismatch:
+            record_warnings.append("ISPIN不匹配: " + "; ".join(ispin_mismatch[:8]))
+        if mag_collapse:
+            record_warnings.append("磁矩塌缩: " + "; ".join(mag_collapse[:8]))
+        if drift_warns:
+            record_warnings.append("磁矩漂移: " + "; ".join(drift_warns[:8]))
+        if pressures:
+            record_warnings.append(
+                f"残余压力范围: {pressures[0]:.1f}~{pressures[-1]:.1f} kB")
         sys_rec = {
             "name": group.name,
             "n_dirs": len(active),
@@ -401,6 +543,10 @@ def main() -> int:
                 "record_only_diffs": {k: sorted(v, key=str) for k, v in rec_only_diffs.items()},
                 "zero_point": zero_issues,
             },
+            "record_warnings": record_warnings,
+            "mag_distribution": {
+                k: round(v, 2) for k, v in sorted(mag_by_dir.items())
+            } if mag_by_dir else {},
         }
         systems.append(sys_rec)
 
@@ -420,8 +566,9 @@ def main() -> int:
         if rec_only_diffs:
             evidence.append("记录:" + ";".join(f"{k}{sorted(v)}" for k, v in rec_only_diffs.items()))
         backlog = f"{n_backlog}未收敛/{n_noout}无Out/{n_failres}失败残留"
+        rec_sum = f" 记录[{len(record_warnings)}]" if record_warnings else ""
         print(f"{group.name:26s} 收敛[{conv_tag}] {n_conv}/{len(active)} 可比[{cmp_tag}] "
-              f"{'; '.join(evidence) if evidence else '-'} 欠账[{backlog}]")
+              f"{'; '.join(evidence) if evidence else '-'} 欠账[{backlog}]{rec_sum}")
 
     # 批次汇总
     n_trusted = sum(1 for s in systems if s["comparability"]["ok"])
@@ -463,6 +610,15 @@ def main() -> int:
                 ev.append(f"零点 {html.escape(z)}")
             for k, vs in s["comparability"]["record_only_diffs"].items():
                 ev.append(f"记录级 {html.escape(k)} {html.escape(str(sorted(vs)))}")
+            ev_html = "；".join(ev) if ev else "−"
+            details = ""
+            if len(ev) > 2:
+                details = (f"<details class='evd'><summary>明细 ({len(ev)} 项)</summary>"
+                           f"<ul>{''.join(f'<li>{e}</li>' for e in ev)}</ul></details>")
+                ev_html = "；".join(ev[:2]) + " …"
+            warns = s.get("record_warnings", [])
+            warn_html = ("<ul class='warnlist'>"
+                         + "".join(f"<li>{html.escape(w)}</li>" for w in warns) + "</ul>") if warns else "−"
             backlog = (f"{cv['backlog_unconverged']}未收敛 / {cv['no_outcar']}无Out / "
                        f"{cv['failed_residual']}失败残留")
             conv_disp = (f"{conv_txt} {cv['converged']}/{s['n_dirs']}"
@@ -472,8 +628,9 @@ def main() -> int:
                 f"<tr><td class='sys'>{html.escape(s['name'])}</td>"
                 f"<td class='{conv_cls} mon'>{conv_disp}</td>"
                 f"<td class='{cmp_cls}'>{cmp_txt}</td>"
-                f"<td class='ev'>{'; '.join(ev) if ev else '−'}</td>"
-                f"<td class='mon'>{backlog}</td></tr>"
+                f"<td class='ev'>{ev_html}{details}</td>"
+                f"<td class='mon'>{backlog}</td>"
+                f"<td class='warncell'>{warn_html}</td></tr>"
             )
         page = f"""<!DOCTYPE html>
 <html lang="zh"><head><meta charset="utf-8">
@@ -492,6 +649,10 @@ def main() -> int:
   td.sys {{ font-weight: 600; white-space: nowrap; }}
   td.mon {{ font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: .78rem; }}
   td.ev {{ font-size: .8rem; }}
+  .evd summary {{ cursor: pointer; color: #555; font-size: .75rem; }}
+  .evd ul {{ margin: .3rem 0 .1rem 1.2rem; padding: 0; }}
+  td.warncell {{ font-size: .75rem; color: #7a5b00; }}
+  .warnlist {{ margin: 0; padding-left: 1rem; }}
   .ok {{ color: #1a7f37; font-weight: 600; }}
   .warn {{ color: #b76e00; font-weight: 600; }}
   .bad {{ color: #c62828; font-weight: 600; }}
@@ -502,7 +663,7 @@ def main() -> int:
 <div class="summary">体系 {len(systems)} · 可比可信 <b class="ok">{n_trusted}</b> ·
   不可信 <b class="bad">{n_untrusted}</b> · 有欠账 {n_sys_backlog} · 排除跳过 {n_skipped}</div>
 <table>
-<thead><tr><th>体系</th><th>收敛</th><th>可比</th><th>证据</th><th>欠账</th></tr></thead>
+<thead><tr><th>体系</th><th>收敛</th><th>可比</th><th>证据</th><th>欠账</th><th>记录级(应力/自旋)</th></tr></thead>
 <tbody>
 {''.join(rows)}
 </tbody></table>
