@@ -39,6 +39,12 @@ def build_all(
     # The supercell sizing from the unrelaxed lattice is fine, but the defect
     # VASP input generation uses the relaxed cell parameters for better accuracy.
     uc_contcar = contcar if contcar.is_file() else poscar
+    # 2026-08-16 协议修正:perfect(无缺陷超胞, ISIF=3)收敛后,其晶格是
+    # 缺陷链的正确参考——已收敛时优先用作全部 defect 的晶格源(其他
+    # defect 以 ISIF=2 固定该晶格,只弛豫原子)。
+    perfect_contcar = defect_root / "perfect" / "CONTCAR"
+    if perfect_contcar.is_file() and perfect_contcar.stat().st_size > 0:
+        uc_contcar = perfect_contcar
     logger.info("Building supercell from %s", uc_contcar.name)
     # ── Config-fingerprint guard ───────────────────────────────────
     # Detect plan.yaml changes that affect the build.  If the current
@@ -248,7 +254,7 @@ def _generate_vasp_inputs(defect_root: Path, config: PipelineConfig) -> None:
     per directory so species and charge are respected (no cross-dir copy
     of the host INCAR — that is what broke NELECT before).
     """
-    from vasp_sop.vasp.io import prepare_inputs, input_ready
+    from vasp_sop.vasp.io import prepare_inputs, input_ready, patch_incar
     from tqdm import tqdm
     from vasp_sop.defect import is_valid_defect_dir
     import re
@@ -273,6 +279,10 @@ def _generate_vasp_inputs(defect_root: Path, config: PipelineConfig) -> None:
             prepare_inputs(d, config,
                            kspacing=0.1, task_type="defect",
                            charge=q)
+            if d.name == "perfect":
+                # 2026-08-16 协议修正:无缺陷超胞晶格自由弛豫(ISIF=3),
+                # 其 CONTCAR 晶格随后作为全部 defect 的固定参考。
+                patch_incar(d, ISIF=3)
         except Exception as exc:
             logger.warning("%s: input generation failed: %s", d.name, exc)
 

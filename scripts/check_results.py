@@ -439,6 +439,7 @@ def main() -> int:
                 rec_only_diffs[k] = s
 
         # 2b2. ISIF 协议分区(记录级): cpd=3 / defect=2 / unitcell-structure_opt=3
+        #      / perfect=3(2026-08-16:无缺陷超胞晶格弛豫, 供 defect 继承)
         #      / unitcell-{band,dos,dielectric}=豁免(NSW=0) / 其他=不查
         def _dir_kind(p: str) -> str:
             parts = Path(p).parts
@@ -461,6 +462,10 @@ def main() -> int:
             if kind == "cpd" and Path(r["dir"]).name.startswith("mol_"):
                 continue  # 分子相固定 cell 合法
             expect = isif_protocol.get(kind)
+            if kind == "defect" and Path(r["dir"]).name == "perfect":
+                # 2026-08-16 协议修正:无缺陷超胞晶格自由弛豫(ISIF=3),
+                # 其晶格作为全部 defect 的固定参考(ISIF=2)。
+                expect = "3"
             if expect and r.get("isif") not in (None, expect):
                 isif_violations.append(f"{Path(r['dir']).name}(ISIF={r['isif']}≠{expect})")
 

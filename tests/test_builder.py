@@ -43,6 +43,68 @@ class TestBuildAll:
         with pytest.raises(FileNotFoundError, match="POSCAR"):
             build_all(defect_root, target_dir, config)
 
+    def test_build_prefers_perfect_contcar_as_lattice_source(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """2026-08-16 协议修正:perfect(ISIF=3)收敛后,其 CONTCAR 晶格
+        优先于 unitcell structure_opt 作为全部 defect 的晶格源。"""
+        from vasp_sop.defect import builder as b
+
+        target = tmp_path / "target"
+        target.mkdir()
+        (target / "POSCAR").write_text("dummy\n")
+        (target / "CONTCAR").write_text("unitcell-relaxed\n")
+        defect_root = tmp_path / "defect"
+        perfect = defect_root / "perfect"
+        perfect.mkdir(parents=True)
+        (perfect / "CONTCAR").write_text("perfect-relaxed\n")
+
+        captured: dict[str, str] = {}
+        monkeypatch.setattr(b, "_check_rebuild", lambda *a, **k: None)
+        monkeypatch.setattr(
+            b, "_build_supercell",
+            lambda root, cont, cfg: captured.update(cont=str(cont)),
+        )
+        for fn in ("_handle_interstitials", "_generate_defect_list",
+                   "_generate_structures", "_generate_vasp_inputs",
+                   "_write_fingerprint"):
+            monkeypatch.setattr(b, fn, lambda *a, **k: None)
+        monkeypatch.setattr(b, "verify_nelect", lambda *a, **k: [])
+
+        config = PipelineConfig(formula="X", supercell_tool="pydefect",
+                                supercell_min_atoms=10, supercell_max_atoms=50)
+        build_all(defect_root, target, config)
+        assert captured["cont"].endswith("perfect/CONTCAR"), captured
+
+    def test_perfect_incar_gets_isif3(self, tmp_path: Path, monkeypatch):
+        """2026-08-16 协议修正:perfect 无缺陷超胞 ISIF=3(晶格弛豫);
+        普通 defect 保持 ISIF=2(固定 perfect 晶格)。"""
+        from vasp_sop.defect import builder as b
+
+        defect_root = tmp_path / "defect"
+        perfect = defect_root / "perfect"
+        a_def = defect_root / "Bi_Gd1_0"
+        perfect.mkdir(parents=True)
+        a_def.mkdir(parents=True)
+        # prepare_inputs 被 mock 成"生成过 INCAR"(实际不写), 触发
+        # perfect 的 ISIF=3 patch;input_ready 恒 False 走生成分支。
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "vasp_sop.vasp.io.prepare_inputs",
+            lambda *a, **k: calls.append(k.get("charge", "?")) or None,
+        )
+        monkeypatch.setattr(
+            "vasp_sop.vasp.io.input_ready", lambda d: False,
+        )
+        from vasp_sop.core.config import PipelineConfig
+        cfg = PipelineConfig(formula="Gd2GaSbO7", supercell_tool="doped",
+                             supercell_min_atoms=100, supercell_max_atoms=600)
+        b._generate_vasp_inputs(defect_root, cfg)
+
+        perfect_incar = (perfect / "INCAR").read_text()
+        assert "ISIF = 3" in perfect_incar, perfect_incar
+        assert "ISIF" not in (a_def / "INCAR").read_text()
+
 
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 def test_build_supercell_doped(tmp_path: Path):
