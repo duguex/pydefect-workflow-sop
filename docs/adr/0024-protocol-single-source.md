@@ -39,3 +39,15 @@
 
 - `python3 -m pytest tests/`（新增 test_protocol.py + test_io 回归）。
 - 全批 check 复跑：协议不符/无 MAGMOM 维度输出与存量差距一致；组内一致性维度不受影响。
+
+## 后续发现：vise 无条件重写 POTCAR（2026-08-16 补记）
+
+协议化 sandbox 验证（Gd2GaSbO7:Bi 全树真实生成）暴露第二个生成器缺陷：
+`vise vs` 与 API `create_input_files` **都会用 vise 内置 potcar_set 无条件重写目录 POTCAR**
+（如 `Ga: Ga_d` 在 CLI 路径被换成裸 Ga 08Apr2002，ENMAX 282.691→134.678），而 INCAR 的
+ENCUT 是 vise 基于**重写前** POTCAR 计算的——重写后 INCAR 与 POTCAR 脱节，且 PSP 库的
+变体选择协议（Ga_d）被静默破坏。这也解释了历史批次「旧裸 Ga」漂移的来源。
+
+**修复**：`prepare_inputs` 两条路径统一在生成前备份目录 POTCAR、生成后原样恢复——
+变体由 PSP 库决定（非 vise 内置表），ENCUT 与落盘 POTCAR 自洽。sandbox 全树
+verify 硬门从 8 违例 → 0 违例。

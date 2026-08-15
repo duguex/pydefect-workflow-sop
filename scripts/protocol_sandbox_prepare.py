@@ -55,7 +55,7 @@ def _prepare_leg(d: Path, config, task_type: str, charge: float | None = None,
                  *, log) -> str:
     from vasp_sop.vasp.io import input_ready, prepare_inputs
     if input_ready(d):
-        log(f"  SKIP {d.name}: inputs ready (INCAR 已存在)")
+        log.info("  SKIP %s: inputs ready (INCAR 已存在)", d.name)
         return "skip"
     prepare_inputs(d, config, kspacing=0.1 if charge is not None else 2.0,
                    task_type=task_type, charge=charge)

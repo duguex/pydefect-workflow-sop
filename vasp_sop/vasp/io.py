@@ -145,7 +145,15 @@ def prepare_inputs(
     uis_flags = f"{extra_uis} {flags} {encut_opt}".strip()
     cmd += f" -uis {uis_flags}"
 
+    # vise vs 无条件重写 POTCAR(用 vise 内置 potcar_set,如 Ga→裸 Ga
+    # 08Apr2002)——破坏 PSP 库变体协议(Ga_d)。备份并在生成后恢复,
+    # 保持变体 = 预置版本;ENCUT 由 vise 基于原 POTCAR 计算,恢复后自洽。
+    potcar_path = work_dir / "POTCAR"
+    potcar_backup = potcar_path.read_bytes() if potcar_path.is_file() else None
+
     run_local(cmd, cwd=work_dir, timeout=300)
+    if potcar_backup is not None:
+        potcar_path.write_bytes(potcar_backup)
     # vise never sets SOC tags — patch AFTER run_local so freshly
     # generated INCAR inherits LSORBIT/ISYM without clobbering other tags.
     _apply_soc_tags(work_dir, config, task_type)
@@ -227,8 +235,15 @@ def _prepare_inputs_vise_api(
         # 否则按本目录 POTCAR 检测(协议模块单一规则)。
         cutoff_energy=effective_encut(config, work_dir),
     )
+    # 同 CLI 路径:vise 无条件重写 POTCAR——备份并恢复预置版本
+    # (API 的 potcar_set 通常一致,但不得依赖;变体由 PSP 库决定)。
+    potcar_path = work_dir / "POTCAR"
+    potcar_backup = potcar_path.read_bytes() if potcar_path.is_file() else None
+
     vif = VaspInputFiles(options, overridden_incar_settings=overrides)
     vif.create_input_files(work_dir)
+    if potcar_backup is not None:
+        potcar_path.write_bytes(potcar_backup)
     # Belt and braces: overrides can drift with vise releases.
     patch_incar(work_dir, **overrides)
     if config.soc and not config.stage2_soc:

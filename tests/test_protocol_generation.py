@@ -145,6 +145,16 @@ class TestDefectApiProtocol:
         txt = (tmp_path / "INCAR").read_text()
         assert "ENCUT = 520.0" in txt, txt
 
+    def test_api_preserves_preset_potcar(self, tmp_path):
+        # vise 无条件重写 POTCAR——预置的 PSP 库版本(如 Ga_d)必须在
+        # 生成后原样保留(变体协议;CLI 路径同策略)。
+        _magnetic_structure(tmp_path)
+        marker = "PRESET-PSP-LIBRARY-POTCAR\n"
+        (tmp_path / "POTCAR").write_text(marker)
+        io_mod.prepare_inputs(tmp_path, _cfg(), kspacing=0.1,
+                              task_type="defect", charge=0.0)
+        assert (tmp_path / "POTCAR").read_text() == marker
+
     def test_charged_defect_gets_nelect(self, tmp_path):
         _magnetic_structure(tmp_path)
         io_mod.prepare_inputs(tmp_path, _cfg(), kspacing=0.1,
