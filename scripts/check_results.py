@@ -287,6 +287,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     ap.add_argument("--json", type=Path, help="输出 JSON 报告路径")
+    ap.add_argument("--report", type=Path, help="输出 markdown 验收报告路径")
     ap.add_argument("--compare", type=Path, help="与上次 JSON 对比, 列出新增问题")
     ap.add_argument("--non-scf", default=",".join(NON_SCF_DIRS_DEFAULT),
                     help="非自洽目录名逗号分隔(豁免收敛标记)")
@@ -439,6 +440,53 @@ def main() -> int:
     if args.json:
         args.json.write_text(json.dumps(report, indent=1))
         print(f"JSON 报告: {args.json}")
+
+    if args.report:
+        lines = [
+            f"# VASP 批次结果验收报告",
+            f"",
+            f"- root: `{root}`",
+            f"- 时间: {report['ts']}",
+            f"- 体系数: {len(systems)} · 可比可信 {n_trusted} · 不可信 {n_untrusted} · 有欠账 {n_sys_backlog} · 排除跳过 {n_skipped}",
+            f"",
+            f"## 体系验收表",
+            f"",
+            f"| 体系 | 收敛 | 可比 | 证据 | 欠账 |",
+            f"|---|---|---|---|---|",
+        ]
+        for s in systems:
+            cv = s["convergence"]
+            conv = "✗" if (cv["backlog_unconverged"] or cv["no_outcar"]
+                           or cv["failed_residual"]) else ("~" if cv["energy_flat"] else "✓")
+            cmp_ = "✓" if s["comparability"]["ok"] else "✗"
+            ev = []
+            for m in s["comparability"]["variant_mixes"]:
+                ev.append(f"变体 {m}")
+            for k, vs in s["comparability"]["key_diffs"].items():
+                ev.append(f"{k} 不一致 {sorted(str(v if v is not None else '(absent)') for v in vs)}")
+            for z in s["comparability"]["zero_point"]:
+                ev.append(f"零点 {z}")
+            rec = s["comparability"]["record_only_diffs"]
+            for k, vs in rec.items():
+                ev.append(f"记录级 {k} {sorted(vs)}")
+            backlog = (f"{cv['backlog_unconverged']}未收敛/{cv['no_outcar']}无Out/"
+                       f"{cv['failed_residual']}失败残留")
+            conv_disp = (f"{conv} ({cv['converged']}/{s['n_dirs']}"
+                         + (f", {cv['energy_flat']} flat" if cv["energy_flat"] else "")
+                         + (f", {cv['exempt']} 豁免" if cv["exempt"] else "") + ")")
+            lines.append(
+                f"| {s['name']} | {conv_disp} | {cmp_} | "
+                f"{'; '.join(ev) if ev else '-'} | {backlog} |"
+            )
+        lines += [
+            "",
+            "## 图例",
+            "- 收敛: ✓ 全部收敛(含豁免) · ~ 无硬欠账但 NELM 边缘批量(energy-flat) · ✗ 有未收敛/无OUTCAR/失败残留",
+            "- 可比: ✓ 物理 key 一致 + POTCAR 变体统一 + 零点一致 · ✗ 任一不满足(门禁)",
+            "- 判据源: OUTCAR 回显; 白名单记录级: ISMEAR, NSW/IBRION/KPAR/NCORE/ISYM",
+        ]
+        args.report.write_text("\n".join(lines) + "\n")
+        print(f"Markdown 报告: {args.report}")
 
     # 体系级回归对比
     new_untrusted = 0

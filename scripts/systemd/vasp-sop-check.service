@@ -1,13 +1,13 @@
 [Unit]
-Description=vasp-sop batch result health check (POTCAR/conv/energy)
+Description=vasp-sop batch result acceptance check (convergence truth + comparability)
 After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 /home/duguex/vasp_sop/scripts/check_results.py --root /mnt/shared/home/2sidesniddle/vasp/2026_undergo_spin_defect --json /tmp/check_results_latest.json --compare /tmp/check_results_prev.json
-# 上次报告轮转: service 跑完后由 timer 的下一次触发前手动轮转, 这里用 ExecStartPost 保留对比基线
-ExecStartPost=/bin/sh -c 'if [ -f /tmp/check_results_latest.json ]; then cp -f /tmp/check_results_latest.json /tmp/check_results_prev.json; fi'
-# 非零退出(有新问题)不视为失败
+ExecStart=/usr/bin/python3 /home/duguex/vasp_sop/scripts/check_results.py --root /mnt/shared/home/2sidesniddle/vasp/2026_undergo_spin_defect --json /home/duguex/.vasp_sop/check_results.json --report /home/duguex/.vasp_sop/check_results_report.md --compare /home/duguex/.vasp_sop/check_results_prev.json
+# 上次报告轮转: 作为下次对比基线
+ExecStartPost=/bin/sh -c 'cp -f /home/duguex/.vasp_sop/check_results.json /home/duguex/.vasp_sop/check_results_prev.json'
+# 非零退出(有不可信体系/新问题)不视为失败
 SuccessExitStatus=0 1 2
 
 [Install]
