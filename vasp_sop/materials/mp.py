@@ -417,11 +417,31 @@ def list_phases(
     return info
 
 
+def _vise_normal_default(el: str) -> Optional[str]:
+    """vise potcar_set normal 集的元素默认变体(如 Ga→Ga_d)。
+
+    pp 默认必须对齐它——字母序第一(Ga→裸 Ga)会偏离生成器实际
+    (vise vs 默认 potcar_set=normal, 2026-08-16 库间不一致发现)。
+    """
+    try:
+        from vise.input_set.datasets.potcar_set import PotcarSet
+
+        return PotcarSet.normal.potcar_dict().get(el)
+    except Exception:  # noqa: BLE001 —— 查询失败退字母序
+        return None
+
+
 def list_potcar_variants(
     formula: str,
     dopants: list[str],
 ) -> dict[str, list[str]]:
-    """Enumerate available PAW_PBE POTCAR variants per element."""
+    """Enumerate available PAW_PBE POTCAR variants per element.
+
+    The first entry of each list is the default pick: vise's potcar_set
+    ``normal`` variant when present in the library, else alphabetical
+    first (pre-2026-08-16 behavior — alphabetical-first picked bare Ga,
+    diverging from vise's Ga_d default).
+    """
     from pymatgen.core import SETTINGS
 
     potcar_dir = Path(SETTINGS.get("PMG_VASP_PSP_DIR", "")) / "POT_GGA_PAW_PBE_54"
@@ -437,6 +457,10 @@ def list_potcar_variants(
             if d.is_dir() and re.match(rf"^{re.escape(el)}(_|$)", d.name, re.IGNORECASE)
         )
         if matches:
+            default = _vise_normal_default(el)
+            if default in matches:
+                matches.remove(default)
+                matches.insert(0, default)
             variants[el] = matches
     return variants
 

@@ -354,6 +354,31 @@ class TestStage2SocParsing:
         assert c.stage2_soc is True
 
 
+class TestPpDefaultsAlignVise:
+    """pp 默认 = vise potcar_set normal 变体(2026-08-16 库间不一致修复):
+    Ga→Ga_d(非字母序裸 Ga), 其余元素与既有默认一致。"""
+
+    def test_ga_first_variant_is_ga_d(self):
+        from vasp_sop.materials import list_potcar_variants
+
+        v = list_potcar_variants("GaN", [])
+        assert v["Ga"][0] == "Ga_d", v["Ga"]
+
+    def test_gd_first_variant_is_gd_3(self):
+        # 2026-08-08 手动决定(Gd_3 4f_in_core)恰与 vise normal 默认一致。
+        from vasp_sop.materials import list_potcar_variants
+
+        v = list_potcar_variants("GdO", [])
+        assert v["Gd"][0] == "Gd_3", v["Gd"]
+
+    def test_uncovered_element_keeps_alphabetical_fallback(self):
+        # vise 表未覆盖的元素保持字母序第一(旧行为)。
+        from vasp_sop.materials import list_potcar_variants
+
+        v = list_potcar_variants("XeO", [])  # Xe 无 potcar_set 条目
+        assert v["Xe"][0] == "Xe", v.get("Xe")
+
+
 class TestReferencePhaseSelection:
     """ADR 0023: formula-search fallback must pick the lowest e_above_hull
     polymorph, never MP's first (material_id-sorted) doc."""
