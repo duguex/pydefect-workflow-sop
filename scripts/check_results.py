@@ -398,8 +398,25 @@ def main() -> int:
                     vals = {inc.get(k)} if inc.get(k) is not None else set()
                 incar_sets[k].update(vals)
         for k in PHYSICAL_KEYS:
+            if k in ("LDAUU", "LDAUL"):
+                continue  # LDAU 走共享元素交集比较(下方)
             if len(incar_sets[k]) > 1:
                 key_diffs[k] = incar_sets[k]
+        # LDAUU/LDAUL: 共享元素的 U 值一致即可(元素集不同是相组成差异, 非不一致)
+        lda_sets: dict[str, dict[str, set]] = collections.defaultdict(
+            lambda: collections.defaultdict(set))
+        for r in non_cpd:
+            inc = r.get("incar", {})
+            for k in ("LDAUU", "LDAUL"):
+                mapped = lda_el_mapped(inc, r.get("titel", []))
+                vals = mapped.get(k) or mapped.get(k + "_raw") or set()
+                for v in vals:
+                    if isinstance(v, tuple):  # (el, value)
+                        lda_sets[k][v[0]].add(v[1])
+        for k in ("LDAUU", "LDAUL"):
+            shared_diffs = {el: sorted(v) for el, v in lda_sets[k].items() if len(v) > 1}
+            if shared_diffs:
+                key_diffs[k] = {f"{el}:{v}" for el, v in shared_diffs.items()}
         # ENCUT ≥ ENMAX 物理下限(全目录, 记录级; Ga_mp-142 ZPOTRF 事故场景)
         encut_below = []
         for r in active:
