@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/home/duguex/vasp_sop/.venv/bin/python3 /home/duguex/vasp_sop/scripts/check_results.py --root /mnt/shared/home/2sidesniddle/vasp/2026_undergo_spin_defect --json /home/duguex/.vasp_sop/check_results.json --report /home/duguex/.vasp_sop/check_results_report.md --compare /home/duguex/.vasp_sop/check_results_prev.json
+ExecStart=/home/duguex/vasp_sop/.venv/bin/python3 /home/duguex/vasp_sop/scripts/check_results.py --root /mnt/shared/home/2sidesniddle/vasp/2026_undergo_spin_defect --json /home/duguex/.vasp_sop/check_results.json --report /home/duguex/.vasp_sop/check_results_report.html --compare /home/duguex/.vasp_sop/check_results_prev.json
 # 上次报告轮转: 作为下次对比基线
 ExecStartPost=/bin/sh -c 'cp -f /home/duguex/.vasp_sop/check_results.json /home/duguex/.vasp_sop/check_results_prev.json'
 # 非零退出(有不可信体系/新问题)不视为失败

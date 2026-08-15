@@ -22,6 +22,7 @@
 """
 import argparse
 import collections
+import html
 import json
 import re
 import sys
@@ -287,7 +288,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     ap.add_argument("--json", type=Path, help="输出 JSON 报告路径")
-    ap.add_argument("--report", type=Path, help="输出 markdown 验收报告路径")
+    ap.add_argument("--report", type=Path, help="输出 HTML 验收报告路径(自包含单文件)")
     ap.add_argument("--compare", type=Path, help="与上次 JSON 对比, 列出新增问题")
     ap.add_argument("--non-scf", default=",".join(NON_SCF_DIRS_DEFAULT),
                     help="非自洽目录名逗号分隔(豁免收敛标记)")
@@ -442,51 +443,78 @@ def main() -> int:
         print(f"JSON 报告: {args.json}")
 
     if args.report:
-        lines = [
-            f"# VASP 批次结果验收报告",
-            f"",
-            f"- root: `{root}`",
-            f"- 时间: {report['ts']}",
-            f"- 体系数: {len(systems)} · 可比可信 {n_trusted} · 不可信 {n_untrusted} · 有欠账 {n_sys_backlog} · 排除跳过 {n_skipped}",
-            f"",
-            f"## 体系验收表",
-            f"",
-            f"| 体系 | 收敛 | 可比 | 证据 | 欠账 |",
-            f"|---|---|---|---|---|",
-        ]
+        rows = []
         for s in systems:
             cv = s["convergence"]
-            conv = "✗" if (cv["backlog_unconverged"] or cv["no_outcar"]
-                           or cv["failed_residual"]) else ("~" if cv["energy_flat"] else "✓")
-            cmp_ = "✓" if s["comparability"]["ok"] else "✗"
+            if cv["backlog_unconverged"] or cv["no_outcar"] or cv["failed_residual"]:
+                conv_cls, conv_txt = "bad", "✗"
+            elif cv["energy_flat"]:
+                conv_cls, conv_txt = "warn", "~"
+            else:
+                conv_cls, conv_txt = "ok", "✓"
+            cmp_cls, cmp_txt = ("ok", "✓") if s["comparability"]["ok"] else ("bad", "✗")
             ev = []
             for m in s["comparability"]["variant_mixes"]:
-                ev.append(f"变体 {m}")
+                ev.append(f"变体 {html.escape(m)}")
             for k, vs in s["comparability"]["key_diffs"].items():
-                ev.append(f"{k} 不一致 {sorted(str(v if v is not None else '(absent)') for v in vs)}")
+                ev.append(f"{html.escape(k)} 不一致 "
+                          f"{html.escape(str(sorted(str(v if v is not None else '(absent)') for v in vs)))}")
             for z in s["comparability"]["zero_point"]:
-                ev.append(f"零点 {z}")
-            rec = s["comparability"]["record_only_diffs"]
-            for k, vs in rec.items():
-                ev.append(f"记录级 {k} {sorted(vs)}")
-            backlog = (f"{cv['backlog_unconverged']}未收敛/{cv['no_outcar']}无Out/"
+                ev.append(f"零点 {html.escape(z)}")
+            for k, vs in s["comparability"]["record_only_diffs"].items():
+                ev.append(f"记录级 {html.escape(k)} {html.escape(str(sorted(vs)))}")
+            backlog = (f"{cv['backlog_unconverged']}未收敛 / {cv['no_outcar']}无Out / "
                        f"{cv['failed_residual']}失败残留")
-            conv_disp = (f"{conv} ({cv['converged']}/{s['n_dirs']}"
-                         + (f", {cv['energy_flat']} flat" if cv["energy_flat"] else "")
-                         + (f", {cv['exempt']} 豁免" if cv["exempt"] else "") + ")")
-            lines.append(
-                f"| {s['name']} | {conv_disp} | {cmp_} | "
-                f"{'; '.join(ev) if ev else '-'} | {backlog} |"
+            conv_disp = (f"{conv_txt} {cv['converged']}/{s['n_dirs']}"
+                         + (f" · {cv['energy_flat']} flat" if cv["energy_flat"] else "")
+                         + (f" · {cv['exempt']} 豁免" if cv["exempt"] else ""))
+            rows.append(
+                f"<tr><td class='sys'>{html.escape(s['name'])}</td>"
+                f"<td class='{conv_cls} mon'>{conv_disp}</td>"
+                f"<td class='{cmp_cls}'>{cmp_txt}</td>"
+                f"<td class='ev'>{'; '.join(ev) if ev else '−'}</td>"
+                f"<td class='mon'>{backlog}</td></tr>"
             )
-        lines += [
-            "",
-            "## 图例",
-            "- 收敛: ✓ 全部收敛(含豁免) · ~ 无硬欠账但 NELM 边缘批量(energy-flat) · ✗ 有未收敛/无OUTCAR/失败残留",
-            "- 可比: ✓ 物理 key 一致 + POTCAR 变体统一 + 零点一致 · ✗ 任一不满足(门禁)",
-            "- 判据源: OUTCAR 回显; 白名单记录级: ISMEAR, NSW/IBRION/KPAR/NCORE/ISYM",
-        ]
-        args.report.write_text("\n".join(lines) + "\n")
-        print(f"Markdown 报告: {args.report}")
+        page = f"""<!DOCTYPE html>
+<html lang="zh"><head><meta charset="utf-8">
+<title>VASP 批次结果验收报告</title>
+<style>
+  body {{ font-family: -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+         margin: 2rem auto; max-width: 1100px; padding: 0 1rem; color: #222; }}
+  h1 {{ font-size: 1.3rem; }}
+  .meta {{ color: #666; font-size: .85rem; margin: .5rem 0 1.2rem; }}
+  .summary {{ background: #f5f6f8; border-radius: 6px; padding: .6rem 1rem;
+              font-size: .9rem; margin-bottom: 1.2rem; }}
+  table {{ border-collapse: collapse; width: 100%; font-size: .85rem; }}
+  th, td {{ border: 1px solid #ddd; padding: .45rem .6rem; text-align: left;
+            vertical-align: top; }}
+  th {{ background: #eef0f3; white-space: nowrap; }}
+  td.sys {{ font-weight: 600; white-space: nowrap; }}
+  td.mon {{ font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: .78rem; }}
+  td.ev {{ font-size: .8rem; }}
+  .ok {{ color: #1a7f37; font-weight: 600; }}
+  .warn {{ color: #b76e00; font-weight: 600; }}
+  .bad {{ color: #c62828; font-weight: 600; }}
+  .legend {{ margin-top: 1.2rem; font-size: .8rem; color: #555; line-height: 1.6; }}
+</style></head><body>
+<h1>VASP 批次结果验收报告</h1>
+<div class="meta">root: <code>{html.escape(str(root))}</code> · {html.escape(report['ts'])}</div>
+<div class="summary">体系 {len(systems)} · 可比可信 <b class="ok">{n_trusted}</b> ·
+  不可信 <b class="bad">{n_untrusted}</b> · 有欠账 {n_sys_backlog} · 排除跳过 {n_skipped}</div>
+<table>
+<thead><tr><th>体系</th><th>收敛</th><th>可比</th><th>证据</th><th>欠账</th></tr></thead>
+<tbody>
+{''.join(rows)}
+</tbody></table>
+<div class="legend">
+<b>图例</b><br>
+收敛: ✓ 全部收敛(含豁免) · ~ 无硬欠账但 NELM 边缘批量(energy-flat) · ✗ 有未收敛/无OUTCAR/失败残留<br>
+可比: ✓ 物理 key 一致 + POTCAR 变体统一 + 零点一致 · ✗ 任一不满足(门禁)<br>
+判据源: OUTCAR 回显; 白名单记录级: ISMEAR, NSW/IBRION/KPAR/NCORE/ISYM
+</div></body></html>
+"""
+        args.report.write_text(page)
+        print(f"HTML 报告: {args.report}")
 
     # 体系级回归对比
     new_untrusted = 0
