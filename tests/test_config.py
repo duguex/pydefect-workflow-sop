@@ -315,6 +315,27 @@ class TestGenerateConfigPolymorphComment:
 
 
 class TestStage2SocParsing:
+    def test_derived_from_soc_when_absent(self):
+        # 设计澄清 2026-08-16:stage2_soc 由 soc 派生——plan 不写即跟随。
+        c = PipelineConfig.from_plan({
+            "project": {"formula": "GaN"},
+            "parameters": {"soc": True},
+        })
+        assert c.stage2_soc is True
+        c2 = PipelineConfig.from_plan({
+            "project": {"formula": "GaN"},
+            "parameters": {"soc": False},
+        })
+        assert c2.stage2_soc is False
+
+    def test_explicit_false_overrides_derivation(self):
+        # 显式 stage2_soc: false 保留单阶段口子(过渡兼容)。
+        c = PipelineConfig.from_plan({
+            "project": {"formula": "GaN"},
+            "parameters": {"soc": True, "stage2_soc": False},
+        })
+        assert c.stage2_soc is False
+
     def test_stage2_soc_under_parameters(self):
         c = PipelineConfig.from_plan({
             "project": {"formula": "GaN"},
@@ -331,13 +352,6 @@ class TestStage2SocParsing:
             "stage2_soc": True,
         })
         assert c.stage2_soc is True
-
-    def test_stage2_soc_absent_defaults_false(self):
-        c = PipelineConfig.from_plan({
-            "project": {"formula": "GaN"},
-            "parameters": {"soc": True},
-        })
-        assert c.stage2_soc is False
 
 
 class TestReferencePhaseSelection:

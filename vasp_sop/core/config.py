@@ -53,8 +53,7 @@ DEFAULT_PLAN: dict = {
         "functional": "pbesol",
         "encut": None,
         "hubbard_u": False,
-        "soc": False,
-        "stage2_soc": False,   # ADR 0014: two-phase SOC (non-SOC first, SOC supplement)
+        "soc": False,   # 两阶段 SOC 策略由 soc 派生(ADR 0014)——plan 不再写 stage2_soc
         "pp": [],
     },
     "supercell": {"tool": "doped", "min_distance": 10.0},
@@ -190,7 +189,11 @@ class PipelineConfig:
         # Tolerate a toplevel stage2_soc (written that way by the ADR 0014
         # rollout, 2026-08-10) — silently ignoring it silently disabled the
         # two-phase SOC supplement for the whole 2026 batch.
-        stage2_soc = params.get("stage2_soc", False)
+        soc = params.get("soc", False)
+        # ADR 0014:两阶段是 SOC 的唯一策略(设计澄清 2026-08-16)——stage2_soc
+        # 由 soc 派生,plan 不必(也不应)单独写;显式 true 幂等,显式 false
+        # 保留单阶段口子(兼容过渡)。
+        stage2_soc = params.get("stage2_soc", soc)
         if not stage2_soc and plan.get("stage2_soc", False):
             import logging
 
@@ -208,7 +211,7 @@ class PipelineConfig:
             scope=p.get("scope", "defects"),
             functional=params.get("functional", "pbesol"),
             encut=params.get("encut"),
-            soc=params.get("soc", False),
+            soc=soc,
             stage2_soc=stage2_soc,
             hubbard_u=params.get("hubbard_u", False),
             potcar_overrides=params.get("pp", []),
