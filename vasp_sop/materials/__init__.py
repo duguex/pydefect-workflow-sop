@@ -15,6 +15,7 @@ from vasp_sop.materials.mp import (
     mp_poscar_put,
     # Public API
     fetch_candidate_phases,
+    fetch_formula_polymorphs,
     get_intrinsic_elements,
     list_phases,
     list_potcar_variants,
@@ -31,6 +32,7 @@ __all__ = [
     "mp_poscar_get",
     "mp_poscar_put",
     "fetch_candidate_phases",
+    "fetch_formula_polymorphs",
     "get_intrinsic_elements",
     "list_phases",
     "list_potcar_variants",

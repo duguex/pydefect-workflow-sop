@@ -266,6 +266,67 @@ def _write_mp_state(
     os.replace(tmp_path, state_path)
 
 
+def fetch_formula_polymorphs(formula: str) -> list[dict] | None:
+    """宿主公式的全部多形体(MP formula search)——plan.yaml 注释用。
+
+    与 :func:`fetch_candidate_phases`(元素空间 CPD 竞争相)不同:本查询只
+    返回与 *formula* 组成相同的多形体(polymorphs),按 e_above_hull 升序
+    (凸包稳定优先)——即 poscar_src 的可见候选(ADR 0023 语境:宿主选择
+    必须可见可改,注释里区分同分异构体)。
+
+    Returns:
+        ``[{mpid, formula, spg, a, b, c, e_above_hull}, ...]`` 按 E_hull
+        升序;``None`` 表示不可用(无 API key / 离线 / 无结果)。
+    """
+    key = os.environ.get("MP_API_KEY") or os.environ.get("PMG_MAPI_KEY")
+    if not key:
+        return None
+    try:
+        from mp_api.client import MPRester
+
+        with MPRester(key) as _mpr:
+            docs = _mpr.materials.summary.search(
+                formula=formula,
+                fields=[
+                    "material_id",
+                    "formula_pretty",
+                    "symmetry",
+                    "structure",
+                    "energy_above_hull",
+                ],
+            )
+    except Exception as exc:  # noqa: BLE001 —— 注释是附加信息,失败降级
+        logger.warning("Polymorph query for %s failed: %s", formula, exc)
+        return None
+    if not docs:
+        return None
+    out = []
+    for d in sorted(
+        docs,
+        key=lambda x: (
+            x.energy_above_hull is None,
+            x.energy_above_hull if x.energy_above_hull is not None else float("inf"),
+        ),
+    ):
+        spg = d.symmetry.symbol if d.symmetry else "?"
+        lattice = d.structure.lattice if d.structure else None
+        a = lattice.a if lattice else 0.0
+        b = lattice.b if lattice else 0.0
+        c = lattice.c if lattice else 0.0
+        out.append(
+            {
+                "mpid": str(d.material_id),  # 完整 "mp-5373"
+                "formula": d.formula_pretty,
+                "spg": spg,
+                "a": a,
+                "b": b,
+                "c": c,
+                "e_above_hull": d.energy_above_hull,
+            }
+        )
+    return out
+
+
 def fetch_candidate_phases(
     elements: list[str],
     target_dir: Path,

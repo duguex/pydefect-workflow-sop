@@ -340,6 +340,7 @@ def generate_config(
 
     from vasp_sop.materials import (
         fetch_candidate_phases,
+        fetch_formula_polymorphs,
         get_intrinsic_elements,
         list_potcar_variants,
         detect_encut,
@@ -354,7 +355,7 @@ def generate_config(
     fetch_candidate_phases(elements, cpd_root, use_cache=True)
 
     # ② Parse phase info for YAML annotations and POSCAR for inference
-    phases: list[dict] = []
+    phases: list[dict] | None = None  # 多形体注释(②c);None = 查询不可用
     unitcell_poscar = root / "unitcell" / "structure_opt" / "POSCAR"
     target_found = False
     target_dir: Path | None = None
@@ -382,18 +383,6 @@ def generate_config(
             comp = s.composition.reduced_formula
             is_target = PmgComp(comp) == target_comp
 
-            phases.append(
-                {
-                    "mpid": mpid or "?",
-                    "spg": spg,
-                    "formula": comp,
-                    "a": round(s.lattice.a, 3),
-                    "b": round(s.lattice.b, 3),
-                    "c": round(s.lattice.c, 3),
-                    "is_target": is_target,
-                }
-            )
-
             if is_target and not target_found:
                 target_found = True
                 target_dir = child.resolve()
@@ -406,7 +395,13 @@ def generate_config(
         except Exception:
             continue
 
-    phases.sort(key=lambda p: (0 if p["is_target"] else 1, p.get("mpid", "")))
+    # ②c 宿主多形体注释来源(ADR 0023):plan 的 Available phases 只列
+    #   宿主公式的同分异构体(poscar_src 候选),与 CPD 竞争相(cpd/ +
+    #   cpd_excluded_phases.yaml)解耦——竞争相全集放 plan 无意义。
+    try:
+        phases = fetch_formula_polymorphs(formula)
+    except Exception:  # noqa: BLE001 —— 注释是附加信息,失败降级不写
+        phases = None
 
     # ②b Fallback: if MP didn't return the exact target formula, download it directly
     if not target_found:
@@ -534,13 +529,19 @@ def _write_plan_yaml(root: Path, plan: dict, phases: list[dict]) -> Path:
         if line.strip().startswith("pp:"):
             pp_line = i
     if phases and poscar_line is not None:
+        poscar_src = str(plan.get("project", {}).get("poscar_src", ""))
+        src_mpid = poscar_src.split()[-1] if "MP " in poscar_src else None
         phase_comment = [f"{indent}# Available phases from MP:\n"]
-        for i, p in enumerate(phases):
-            default = " (default)" if i == 0 else ""
+        for p in phases:
+            default = " (default)" if src_mpid and p.get("mpid") == src_mpid else ""
+            e_str = (
+                f", E_hull={p['e_above_hull']:.3f}"
+                if p.get("e_above_hull") is not None
+                else ""
+            )
             phase_comment.append(
-                f"{indent}# - {p['formula']} (mp-{p['mpid']}): "
-                f"{p['spg']}, "
-                f"a={p['a']:.3f} b={p['b']:.3f} c={p['c']:.3f}{default}\n"
+                f"{indent}# - {p['formula']} ({p['mpid']}): {p['spg']}, "
+                f"a={p['a']:.3f} b={p['b']:.3f} c={p['c']:.3f}{e_str}{default}\n"
             )
         phase_comment.append(
             f"{indent}# To use a different phase, change poscar_src:\n"

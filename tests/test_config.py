@@ -245,6 +245,75 @@ class TestScope:
             PipelineConfig(formula="GaN", scope="just-cpd")
 
 
+class TestGenerateConfigPolymorphComment:
+    """plan.yaml 的 Available phases 注释 = 宿主公式多形体(poscar_src
+    候选),不含 CPD 竞争相(ADR 0023 语境;设计意图 2026-08-16)。"""
+
+    def _y2ti2o7_poscar(self, root: Path) -> None:
+        from pymatgen.core import Lattice, Structure
+        cpd = root / "cpd" / "Y2Ti2O7_mp-5373"
+        cpd.mkdir(parents=True, exist_ok=True)
+        struct = Structure(
+            Lattice.cubic(10.08),
+            ["Y", "Y", "Ti", "Ti"] + ["O"] * 7,
+            [[0.0, 0.0, 0.0], [0.5, 0.5, 0.5],
+             [0.25, 0.25, 0.25], [0.75, 0.75, 0.75],
+             [0.1, 0.1, 0.1], [0.3, 0.3, 0.3], [0.5, 0.1, 0.3],
+             [0.7, 0.7, 0.1], [0.9, 0.3, 0.5], [0.2, 0.6, 0.8],
+             [0.4, 0.4, 0.4]],
+        )
+        struct.to(fmt="poscar", filename=str(cpd / "POSCAR"))
+
+    def test_comment_lists_polymorphs_with_ehull_and_default(
+        self, tmp_path, monkeypatch
+    ):
+        from vasp_sop.core.config import generate_config
+        from vasp_sop import materials as mat
+
+        self._y2ti2o7_poscar(tmp_path)
+        monkeypatch.setattr(mat, "fetch_candidate_phases",
+                            lambda *a, **kw: tmp_path / "cpd")
+        fake = [
+            {"mpid": "mp-5373", "formula": "Y2Ti2O7", "spg": "Fd-3m",
+             "a": 10.082, "b": 10.082, "c": 10.082, "e_above_hull": 0.011},
+            {"mpid": "mp-1173093", "formula": "Y2Ti2O7", "spg": "P2",
+             "a": 10.08, "b": 10.08, "c": 10.63, "e_above_hull": 0.162},
+        ]
+        monkeypatch.setattr(mat, "fetch_formula_polymorphs",
+                            lambda formula: fake)
+
+        path = generate_config(tmp_path, formula="Y2Ti2O7",
+                               dopant_elements=["Bi"])
+        txt = path.read_text()
+        # 两个多形体都列出,含稳定性(E_hull)与当前选择标记。
+        assert "mp-5373" in txt and "mp-1173093" in txt
+        assert "Fd-3m" in txt and "E_hull=0.011" in txt and "E_hull=0.162" in txt
+        assert "Y2Ti2O7 (mp-5373)" in txt
+        # (default) 标在当前 poscar_src 对应的多形体上,不标另一个。
+        def line_of(mpid):
+            return next(l for l in txt.splitlines()
+                        if f"({mpid})" in l and l.strip().startswith("# -"))
+        assert "(default)" in line_of("mp-5373"), line_of("mp-5373")
+        assert "(default)" not in line_of("mp-1173093")
+        # CPD 竞争相(分解产物)不得混入 plan 注释。
+        assert "TiO" not in txt and "Y2O3" not in txt
+
+    def test_comment_absent_when_query_unavailable(self, tmp_path, monkeypatch):
+        from vasp_sop.core.config import generate_config
+        from vasp_sop import materials as mat
+
+        self._y2ti2o7_poscar(tmp_path)
+        monkeypatch.setattr(mat, "fetch_candidate_phases",
+                            lambda *a, **kw: tmp_path / "cpd")
+        monkeypatch.setattr(mat, "fetch_formula_polymorphs",
+                            lambda formula: None)
+        path = generate_config(tmp_path, formula="Y2Ti2O7",
+                               dopant_elements=["Bi"])
+        txt = path.read_text()
+        assert "# Available phases from MP:" not in txt
+        assert path.exists()  # plan 本身不受影响
+
+
 class TestStage2SocParsing:
     def test_stage2_soc_under_parameters(self):
         c = PipelineConfig.from_plan({
