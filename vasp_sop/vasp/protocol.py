@@ -139,3 +139,30 @@ def magmom_values(species: list[str]) -> list[float]:
     if not species or not any(s in INITIAL_MAGMOM for s in species):
         return None
     return [INITIAL_MAGMOM.get(s, 0.0) for s in species]
+
+
+# ── 两阶段 DFT+U(ADR 0025)────────────────────────────────────────────
+# 与 SOC 两阶段同构:弛豫腿 stage1 不加 LDAU(自旋保留, 见
+# io.patch_incar_u apply_u=False), 收敛后 stage2 一次补充最终协议
+# (LSORBIT? + LDAU)——合并策略(grill 2026-08-16 Q6)。
+# 单点腿(band/dos/dielectric)带 U 不带 SOC(Q7)——不参与两阶段。
+SINGLEPOINT_LEGS = frozenset({"band", "dos", "dielectric"})
+
+
+def needs_u(species: list[str]) -> bool:
+    """目录是否需 DFT+U(含 U 表元素)——stage2 U 补充的触发。"""
+    return any(s in U_TABLE for s in species)
+
+
+def is_singlepoint(task_type: str) -> bool:
+    """任务类型是否为单点腿(band/dos/dielectric)——带 U 无 SOC、不两阶段。"""
+    return task_type in SINGLEPOINT_LEGS
+
+
+def needs_final_soc(config) -> bool:
+    """体系最终协议是否需要 LSORBIT(soc=true 恒需要——stage2 补充)。
+
+    stage2_soc=false 的显式单阶段口子:生成时已带 LSORBIT,最终协议
+    判定仍返回 True(已满足, pending 检查读 INCAR 见已含)。
+    """
+    return bool(getattr(config, "soc", False))

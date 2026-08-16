@@ -378,7 +378,13 @@ def main() -> int:
         non_cpd = [r for r in active if not str(r["dir"]).replace("\\", "/").split("/")[-3:-2] == ["cpd"]]
         for r in non_cpd:
             inc = r.get("incar", {})
+            _sp = any(
+                seg in str(r["dir"]).replace("\\", "/")
+                for seg in ("unitcell/band", "unitcell/dos", "unitcell/dielectric")
+            )
             for k in PHYSICAL_KEYS:
+                if k == "LSORBIT" and _sp:
+                    continue  # 单点腿无 SOC 是协议(2026-08-16, grill Q7)
                 if k == "ENCUT":
                     raw = inc.get("ENCUT")
                     try:
@@ -613,6 +619,37 @@ def main() -> int:
             record_warnings.append(
                 f"协议不符({len(protocol_violations)}): "
                 + "; ".join(protocol_violations[:6]))
+        # 2b7. 待 stage2 补充(记录级; ADR 0025, grill Q8/Q13):已收敛的
+        #      弛豫腿 INCAR 缺最终协议标志(LSORBIT 体系需 / LDAU 目录
+        #      含 U 元素)——尚未达最终协议,wave3 硬门会挡 analyze。
+        try:
+            from vasp_sop.core.config import PipelineConfig as _PC
+            from vasp_sop.vasp.protocol import needs_final_soc as _nfs
+            from vasp_sop.vasp.protocol import needs_u as _nu
+            _cfg = _PC.from_yaml(group / "plan.yaml", root=group)
+            _need_soc = _nfs(_cfg)
+        except Exception:  # noqa: BLE001 —— plan 缺失/不可读:只查 SOC 关闭
+            _need_soc = False
+            _nu = lambda sp: False
+        stage2_pending = []
+        for r in active:
+            if not r.get("converged"):
+                continue  # 未收敛:还没到 stage2
+            kind = _dir_kind(str(r["dir"]))
+            if kind in ("unitcell/band", "unitcell/dos", "unitcell/dielectric",
+                        "other"):
+                continue  # 单点腿生成即最终协议(带 U 无 SOC)
+            inc = r.get("incar", {})
+            if _need_soc and str(inc.get("LSORBIT", "")).lower() != ".true.":
+                stage2_pending.append(Path(r["dir"]).name)
+                continue
+            els = [t.split("_")[0] for t, _ in r.get("titel", [])]
+            if _nu(els) and "LDAU" not in inc:
+                stage2_pending.append(Path(r["dir"]).name)
+        if stage2_pending:
+            record_warnings.append(
+                f"待stage2({len(stage2_pending)}): "
+                + "; ".join(stage2_pending[:8]))
         if pressures:
             record_warnings.append(
                 f"残余压力范围: {pressures[0]:.1f}~{pressures[-1]:.1f} kB")

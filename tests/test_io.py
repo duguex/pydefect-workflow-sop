@@ -172,7 +172,7 @@ class TestPatchIncarU:
     def test_adds_ldau_for_fe(self, tmp_path: Path):
         from vasp_sop.vasp.io import patch_incar_u
         d = self._dir(tmp_path, "Fe O")
-        patch_incar_u(d)
+        patch_incar_u(d, apply_u=True)
         txt = (d / "INCAR").read_text()
         assert "LDAU = True" in txt
         assert "LDAUU = 3.0 0" in txt
@@ -193,7 +193,7 @@ class TestPatchIncarU:
             "Fe O\n4 4\nDirect\n"
             "0 0 0\n0.5 0.5 0.5\n0.25 0.25 0.25\n0.75 0.75 0.75\n"
             "0.1 0.1 0.1\n0.2 0.2 0.2\n0.3 0.3 0.3\n0.4 0.4 0.4\n")
-        patch_incar_u(d)
+        patch_incar_u(d, apply_u=True)
         txt = (d / "INCAR").read_text()
         assert "LDAUU = 3.0 0" in txt
         assert "LDAUL = 2 -1" in txt
@@ -201,14 +201,14 @@ class TestPatchIncarU:
     def test_noop_without_u_element(self, tmp_path: Path):
         from vasp_sop.vasp.io import patch_incar_u
         d = self._dir(tmp_path, "Ca O")
-        patch_incar_u(d)
+        patch_incar_u(d, apply_u=True)
         assert "LDAU" not in (d / "INCAR").read_text()
 
     def test_noop_when_ldau_present(self, tmp_path: Path):
         from vasp_sop.vasp.io import patch_incar_u
         d = self._dir(tmp_path, "Fe O")
         (d / "INCAR").write_text("LDAU = True\nLDAUU = 5 0\n")
-        patch_incar_u(d)
+        patch_incar_u(d, apply_u=True)
         assert "LDAUU = 5 0" in (d / "INCAR").read_text(), \
             "existing U must not be overwritten"
 
@@ -218,7 +218,7 @@ class TestPatchIncarU:
         from vasp_sop.vasp.io import patch_incar_u
         d = self._dir(tmp_path, "Fe O")
         (d / "INCAR").write_text("LDAU = True\nLDAUU = 3 0\nLDAUL = 2 -1\n")
-        patch_incar_u(d)
+        patch_incar_u(d, apply_u=True)
         txt = (d / "INCAR").read_text()
         assert "ISPIN = 2" in txt
         assert "LDAUU = 3 0" in txt, "existing U values untouched"
@@ -226,7 +226,7 @@ class TestPatchIncarU:
     def test_f_element_lmaxmix6(self, tmp_path: Path):
         from vasp_sop.vasp.io import patch_incar_u
         d = self._dir(tmp_path, "Gd O")
-        patch_incar_u(d)
+        patch_incar_u(d, apply_u=True)
         txt = (d / "INCAR").read_text()
         assert "LDAUU = 5.0 0" in txt
         assert "LDAUL = 3 -1" in txt
@@ -271,7 +271,8 @@ class TestDielectricProtocol:
         prepare_inputs(d, cfg, task_type="dielectric")
         assert "NSW = 1" in (d / "INCAR").read_text()
 
-    def test_band_still_gets_soc_tags(self, tmp_path: Path):
+    def test_band_gets_no_soc_tags(self, tmp_path: Path):
+        """2026-08-16 协议(grill Q7):单点腿 band/dos 带 U 不带 SOC。"""
         from vasp_sop.vasp.io import prepare_inputs
 
         d = tmp_path / "band"
@@ -283,7 +284,7 @@ class TestDielectricProtocol:
                               potcar_overrides=[], encut=None)
         prepare_inputs(d, cfg, task_type="band")
         txt = (d / "INCAR").read_text()
-        assert "LSORBIT = .TRUE." in txt
+        assert "LSORBIT" not in txt, txt
         assert "NSW = 1" in txt  # untouched
 
 
@@ -314,9 +315,10 @@ class TestNelmFallback:
 
 class TestTiHubbardUFallback:
     """libs/vise fork's U table lacks Ti — the API path must patch U=4
-    for Ti-containing defect cells (operator decision 2026-08-11)."""
+    (operator decision 2026-08-11). 两阶段(ADR 0025):stage1 只自旋段,
+    U 由 apply_final_protocol(stage2)补充。"""
 
-    def test_api_path_patches_ti_u(self, tmp_path: Path):
+    def test_api_path_stage1_spin_only_then_stage2_u(self, tmp_path: Path):
         from pymatgen.core import Lattice, Structure
         from vasp_sop.vasp import io as io_mod
 
@@ -326,13 +328,19 @@ class TestTiHubbardUFallback:
         cfg = SimpleNamespace(soc=False, stage2_soc=False,
                               functional="pbesol", encut=None)
         io_mod.prepare_inputs(tmp_path, cfg, kspacing=0.1, task_type="defect",
-                              extra_uis="SIGMA 0.02 LORBIT 11", charge=0.0)
+                              charge=0.0)
         txt = (tmp_path / "INCAR").read_text()
-        assert "LDAU" in txt
-        uu = next(l for l in txt.splitlines() if "LDAUU" in l)
+        assert "LDAU" not in txt, "stage1 无 U(两阶段, ADR 0025)"
+        assert "ISPIN = 2" in txt, "自旋段 stage1 保留"
+        # stage2:最终协议补 U。
+        io_mod.apply_final_protocol(tmp_path, cfg, task_type="defect")
+        txt2 = (tmp_path / "INCAR").read_text()
+        uu = next(l for l in txt2.splitlines() if "LDAUU" in l)
         assert "4" in uu, uu
 
-    def test_cli_path_patches_ti_u(self, tmp_path: Path, monkeypatch):
+    def test_cli_path_stage1_spin_only_then_stage2_u(
+        self, tmp_path: Path, monkeypatch
+    ):
         from pymatgen.core import Lattice, Structure
         from vasp_sop.vasp import io as io_mod
 
@@ -344,10 +352,11 @@ class TestTiHubbardUFallback:
                               encut=None, potcar_overrides=[])
         io_mod.prepare_inputs(tmp_path, cfg, task_type="structure_opt")
         txt = (tmp_path / "INCAR").read_text()
-        # CLI path with mocked run_local skips vise entirely; the
-        # fallback patches must still land Ti U=4.
-        assert "LDAU" in txt
-        uu = next(l for l in txt.splitlines() if "LDAUU" in l)
+        assert "LDAU" not in txt, "stage1 无 U(两阶段)"
+        assert "ISPIN = 2" in txt, "自旋段 stage1 保留(Ti 为 U 表元素)"
+        io_mod.apply_final_protocol(tmp_path, cfg, task_type="structure_opt")
+        txt2 = (tmp_path / "INCAR").read_text()
+        uu = next(l for l in txt2.splitlines() if "LDAUU" in l)
         assert "4" in uu, uu
 
 

@@ -17,7 +17,9 @@ from vasp_sop.vasp.convergence import convergence_verdict
 from vasp_sop.vasp.protocol import (
     U_TABLE,
     effective_encut,
+    is_singlepoint,
     magmom_values,
+    needs_final_soc,
     protocol_tags,
 )
 
@@ -69,6 +71,10 @@ def _apply_soc_tags(work_dir: Path, config: PipelineConfig, task_type: str) -> N
     if task_type == "dielectric":
         patch_incar(work_dir, NSW=1, LREAL=".FALSE.")
         _strip_incar_tags(work_dir, "LSORBIT", "ISYM")
+        return
+    if is_singlepoint(task_type):
+        # 单点腿(band/dos)无 SOC(协议 2026-08-16, grill Q7)——带 U 不带
+        # 自旋轨道;dielectric 分支已在上方返回。
         return
     if not getattr(config, "soc", False) or getattr(config, "stage2_soc", False):
         return
@@ -135,9 +141,11 @@ def prepare_inputs(
         cmd += f" -t {vise_task}"
     if pp_opt:
         cmd += f" {pp_opt}"
-    # DFT+U always on (ADR 0012): vise auto-adapts per element — U-table
-    # elements (3d Mn-Ni, Cu, Zn, lanthanides) get U, others none.
-    cmd += " --options set_hubbard_u True"
+    # DFT+U:单点腿(band/dos/dielectric)带 U(Q7);弛豫腿 stage1 无 U
+    # (两阶段, ADR 0025——U 由 stage2 apply_final_protocol 补充)。
+    singlepoint = is_singlepoint(task_type)
+    if singlepoint:
+        cmd += " --options set_hubbard_u True"
     # 协议表单一来源(ADR 0024):NSW/NELM/EDIFF/EDIFFG/SIGMA/LORBIT 按腿
     # 取数;extra_uis 先拼、协议表在后(同 key 以协议表为准)。
     tags = protocol_tags(task_type)
@@ -165,8 +173,9 @@ def prepare_inputs(
     patch_incar(work_dir, **fallback)
     # DFT+U: vise CLI applies set_hubbard_u to defect tasks only; patch
     # U-table species (incl. Ti, missing from the libs/vise fork's table)
-    # for cpd/band/dos/dielectric too — idempotent.
-    patch_incar_u(work_dir)
+    # for cpd/band/dos/dielectric too — idempotent. 单点腿全补;弛豫腿
+    # stage1 只自旋段(U 由 stage2 补, ADR 0025)。
+    patch_incar_u(work_dir, apply_u=singlepoint)
     patch_incar_magmom(work_dir)
 
 
@@ -229,8 +238,9 @@ def _prepare_inputs_vise_api(
         xc=Xc.from_string(config.functional),
         kpt_density=kspacing,
         charge=charge,
-        # DFT+U always on (ADR 0012): vise auto-adapts by element.
-        set_hubbard_u=True,
+        # 两阶段(ADR 0025):stage1 无 U——LDAU 由 stage2 补充;自旋段
+        # (ISPIN=2)由下方 patch_incar_u 兜底。
+        set_hubbard_u=False,
         # ENCUT 永不落入 vise 模板默认(漂移来源):plan/config 优先,
         # 否则按本目录 POTCAR 检测(协议模块单一规则)。
         cutoff_energy=effective_encut(config, work_dir),
@@ -251,7 +261,8 @@ def _prepare_inputs_vise_api(
     # libs/vise fork's U table lacks Ti (official vise has U=4): rely on
     # set_hubbard_u for the rest, then patch any U-table species that the
     # fork dropped (idempotent — no-op when LDAU already present).
-    patch_incar_u(work_dir)
+    # 两阶段:stage1 只自旋段(ADR 0025)。
+    patch_incar_u(work_dir, apply_u=False)
     patch_incar_magmom(work_dir)
 
 
@@ -442,14 +453,14 @@ def patch_incar(path: Path, **kwargs: str | int | float) -> None:
 # ── DFT+U patch (ADR 0012) ──────────────────────────────────────────────
 # vise's CLI path applies set_hubbard_u only to defect tasks; cpd and
 # structure_opt templates come out without LDAU tags.  We patch those
-def patch_incar_u(work_dir: Path) -> None:
-    """Add DFT+U tags to an INCAR that lacks them (vise CLI gap for
-    non-defect tasks, e.g. cpd structure_opt templates).
+def patch_incar_u(work_dir: Path, *, apply_u: bool = False) -> None:
+    """自旋段(恒执行)+ DFT+U 段(两阶段控制, ADR 0025)。
 
-    No-op when LDAU is already present, the INCAR is missing, or no
-    species maps to a U.  A patched INCAR also forces ISPIN=2, matching
-    the vise defect template, and initial magnetic moments via
-    patch_incar_magmom.
+    - 自旋段:目录含 U 表元素 → ISPIN=2(vise cpd 模板漏自旋极化;
+      自旋独立于 U——两阶段 stage1 也保留, grill 2026-08-16 Q4)。
+    - U 段(``apply_u=True``):LDAU/LDAUU/LDAUL/LMAXMIX——单点腿
+      (band/dos/dielectric)生成即带;弛豫腿 stage1 不补(stage2 由
+      :func:`apply_final_protocol` 一次补充)。
     """
     incar = work_dir / "INCAR"
     if not incar.is_file():
@@ -465,6 +476,8 @@ def patch_incar_u(work_dir: Path) -> None:
     # polarization out even for magnetic FeO.
     if any(s in U_TABLE for s in species):
         patch_incar(work_dir, ISPIN=2)
+    if not apply_u:
+        return
     if "LDAU" in incar.read_text(errors="ignore"):
         return
     uu = [str(U_TABLE[s][0]) if s in U_TABLE else "0" for s in species]
@@ -476,6 +489,17 @@ def patch_incar_u(work_dir: Path) -> None:
     patch_incar(work_dir, LDAU=True, LDAUTYPE=2, LDAUPRINT=1,
                 LMAXMIX=lmaxmix, LDAUU=" ".join(uu), LDAUL=" ".join(ul),
                 ISPIN=2)
+
+
+def apply_final_protocol(work_dir: Path, config, task_type: str = "") -> None:
+    """stage2 最终协议补充(合并一次, ADR 0025):LSORBIT(体系需 SOC)+
+    LDAU(目录含 U 元素)——一次 patch 后由调用方提交弛豫。
+
+    单点腿(带 U 无 SOC)不经过这里(生成即最终协议)。
+    """
+    if not is_singlepoint(task_type) and needs_final_soc(config):
+        patch_incar(work_dir, LSORBIT=".TRUE.", ISYM=-1)
+    patch_incar_u(work_dir, apply_u=True)
 
 
 def patch_incar_magmom(work_dir: Path) -> None:

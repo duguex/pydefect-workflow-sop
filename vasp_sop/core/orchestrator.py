@@ -339,36 +339,76 @@ def wave1_optimize(
 # ── Wave 2 ─────────────────────────────────────────────────────────────────
 
 
-def _stage2_soc_pending(child: Path, js: Any) -> bool:
-    """ADR 0014: dir converged in stage 1 (non-SOC) and never supplemented.
+def _stage2_pending(child: Path, js: Any, config) -> bool:
+    """目录是否待 stage2 最终协议补充(物理判定, ADR 0025, grill Q8)。
 
-    A ``soc_stage2`` record anywhere in the dir's history means stage 2
-    was already armed — do not resubmit (covers in-flight, done, failed).
+    converged 且 INCAR 缺最终协议标志:体系需 SOC 则缺 LSORBIT,目录含
+    U 表元素则缺 LDAU。不依赖 JobStore source 记录(重跑/重建安全);
+    既有 soc_stage2 历史记录兼容(INCAR 已含标志 → 不再补)。
     """
-    cp = str(child.resolve())
-    if js.latest(cp) != "converged":
+    from vasp_sop.vasp.io import _poscar_species, read_incar
+    from vasp_sop.vasp.protocol import needs_final_soc, needs_u
+
+    if js.latest(str(child.resolve())) != "converged":
         return False
-    return not any(r.get("source") == "soc_stage2" for r in js.history(cp))
+    inc = read_incar(child)
+    if needs_final_soc(config) and str(inc.get("LSORBIT", "")).lower() != ".true.":
+        return True
+    species = _poscar_species(child / "POSCAR") or []
+    if needs_u(species) and "LDAU" not in inc:
+        return True
+    return False
 
 
-def _submit_stage2_soc(child: Path, sys: Any, js: Any, dry_run: bool,
-                       info_fn: Any, *, priority: int = 0) -> None:
-    """Submit the ADR 0014 SOC supplement for one converged dir.
+def _submit_stage2(child: Path, sys: Any, js: Any, dry_run: bool,
+                   info_fn: Any, *, priority: int = 0,
+                   task_type: str = "") -> None:
+    """ADR 0025 stage2 最终协议补充(合并一次, grill Q6)。
 
-    Every dir continues from its CONTCAR (stage-1 relaxed structure) and
-    RELAXES under SOC: NSW stays at the stage-1 value (100), LSORBIT on
-    (ADR 0022 — stage 2 is a SOC structure relaxation for all systems;
-    the NSW=0 single-point regime was retired 2026-08-12 because stale
-    POSCAR geometries biased energies by up to ~2 eV).
+    LSORBIT(体系需 SOC)+ LDAU(目录含 U 元素)一次 patch,从 CONTCAR
+    (stage1 收敛结构)续算弛豫——最终协议状态。
     """
-    from vasp_sop.vasp.io import patch_incar
+    from vasp_sop.vasp.io import apply_final_protocol
 
-    patch_incar(child, LSORBIT=".TRUE.", ISYM=-1)
+    apply_final_protocol(child, sys.config, task_type)
     cont = child / "CONTCAR"
     if cont.is_file() and cont.stat().st_size > 0:
         (child / "POSCAR").write_text(cont.read_text(errors="ignore"))
-    _submit_or_skip(child, f"soc2:{child.name}", sys.name, dry_run, info_fn,
-                    js=js, source="soc_stage2", priority=priority)
+    _submit_or_skip(child, f"st2:{child.name}", sys.name, dry_run, info_fn,
+                    js=js, source="stage2", priority=priority)
+
+
+def _final_protocol_pending_dirs(sys: Any) -> list[str]:
+    """尚未达最终协议(LSORBIT?/LDAU 视体系)的弛豫腿目录相对路径。
+
+    wave3 硬门用(ADR 0025, grill Q13):cpd 相(除 mol_*)+ defect 链
+    (perfect + 各 defect)。单点腿(band/dos/dielectric)带 U 无 SOC,
+    生成即最终协议,不在此列。
+    """
+    from vasp_sop.vasp.io import _poscar_species, read_incar
+    from vasp_sop.vasp.protocol import needs_final_soc, needs_u
+
+    pending: list[str] = []
+
+    def _check(d: Path) -> bool:
+        inc = read_incar(d)
+        if needs_final_soc(sys.config) and str(inc.get("LSORBIT", "")).lower() != ".true.":
+            return True
+        species = _poscar_species(d / "POSCAR") or []
+        return bool(needs_u(species) and "LDAU" not in inc)
+
+    df_root = sys.defect_dir
+    if df_root.is_dir():
+        for d in sorted(df_root.iterdir()):
+            if d.is_dir() and (d / "INCAR").is_file() and _check(d):
+                pending.append(str(d.relative_to(sys.root)))
+    cpd_root = sys.cpd_dir
+    if cpd_root.is_dir():
+        for pd in sorted(cpd_root.iterdir()):
+            if (pd.is_dir() and not pd.name.startswith("mol_")
+                    and (pd / "INCAR").is_file() and _check(pd)):
+                pending.append(str(pd.relative_to(sys.root)))
+    return pending
 
 
 def wave2_submit(
@@ -566,16 +606,16 @@ def wave2_submit(
                 continue
             _submit_or_skip(cd, f"phase:{cd.name}", sys.name, dry_run, info,
                             js=js, priority=priority)
-        # ADR 0014: SOC supplement for converged competing phases.
-        if sys.config.stage2_soc:
-            cpd_dir = sys.cpd_dir
-            if cpd_dir.is_dir():
-                for pd in sorted(cpd_dir.iterdir()):
-                    if not pd.is_dir() or not input_ready(pd):
-                        continue
-                    if _stage2_soc_pending(pd, js):
-                        _submit_stage2_soc(pd, sys, js, dry_run, info,
-                                           priority=priority)
+        # ADR 0014/0025: stage2 最终协议补充(SOC?+U 一次到位)——全部
+        # 体系(非仅 stage2_soc):U 由元素集派生,物理判定(INCAR 缺标志)。
+        cpd_dir = sys.cpd_dir
+        if cpd_dir.is_dir():
+            for pd in sorted(cpd_dir.iterdir()):
+                if not pd.is_dir() or not input_ready(pd):
+                    continue
+                if _stage2_pending(pd, js, sys.config):
+                    _submit_stage2(pd, sys, js, dry_run, info,
+                                   priority=priority)
         # No return here: defect/UC calculations are independent of the
         # chemical-potential phases (formation energies need CPD only in
         # wave3), so they run in parallel with COMPETING — matching the
@@ -825,16 +865,15 @@ def wave2_submit(
             _submit_or_skip(child, f"df-{child.name}", sys.name, dry_run, info, js=js,
                             priority=priority)
 
-    # ADR 0014: two-phase SOC — supplement converged non-SOC dirs.
-    # Stage 1 converges without LSORBIT; stage 2 adds it (Bi_* dirs
-    # continue from CONTCAR, everything else gets an NSW=0 single point).
-    if sys.config.stage2_soc and df_root.is_dir():
+    # ADR 0014/0025: stage2 最终协议补充(SOC?+U 一次到位)——物理判定,
+    # 全部体系;mol_* 由 cpd 侧逻辑处理,defect 链全为弛豫腿。
+    if df_root.is_dir():
         for child in sorted(df_root.iterdir()):
             if not child.is_dir() or not input_ready(child):
                 continue
-            if _stage2_soc_pending(child, js):
-                _submit_stage2_soc(child, sys, js, dry_run, info,
-                                   priority=priority)
+            if _stage2_pending(child, js, sys.config):
+                _submit_stage2(child, sys, js, dry_run, info,
+                               task_type="defect", priority=priority)
 
 
 # ── Wave 3 ─────────────────────────────────────────────────────────────────
@@ -1003,6 +1042,19 @@ def wave3_postprocess(
         return result
 
     if uc_all_done and df_vasp_done and df_vasp_ondisk:
+        # ADR 0025 硬门(grill Q13):analyze 前全部弛豫腿(cpd 相 +
+        # defect 链)必须达最终协议(LSORBIT?/LDAU 视体系)——否则 stage1
+        # 无 U/SOC 能量混入凸包,口径不一致(Q3)。
+        pending_stage2 = _final_protocol_pending_dirs(sys)
+        if pending_stage2:
+            logger.info(
+                "%s: %d relax dirs not at final protocol — defer analyze "
+                "(stage2 pending: %s)",
+                sys.name, len(pending_stage2),
+                "; ".join(pending_stage2[:8]),
+            )
+            result["status"] = "stage2_pending"
+            return result
         logger.info("%s: post-processing ...", sys.name)
         try:
             _uc.build_unitcell_yaml(uc_root, sys.config)

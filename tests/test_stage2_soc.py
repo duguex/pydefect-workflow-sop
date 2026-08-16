@@ -43,69 +43,86 @@ def _mkdir(tmp_path: Path, name: str) -> Path:
 
 
 class TestStage2Pending:
-    def test_converged_without_stage2_is_pending(self, tmp_path):
+    def test_converged_without_final_protocol_is_pending(self, tmp_path):
         d = _mkdir(tmp_path, "Va_O1_0")
         js = FakeJobStore()
         js.record(str(d), "converged")
-        assert orchestrator._stage2_soc_pending(d, js)
+        cfg = type("C", (), {"soc": True})()
+        assert orchestrator._stage2_pending(d, js, cfg)
 
-    def test_converged_with_stage2_is_not_pending(self, tmp_path):
+    def test_converged_with_final_protocol_is_not_pending(self, tmp_path):
+        """物理判定:INCAR 已含 LSORBIT + LDAU → 不再补(source 无关)。"""
         d = _mkdir(tmp_path, "Va_O1_0")
+        (d / "INCAR").write_text("NSW = 100\nLSORBIT = .TRUE.\nLDAU = True\n")
         js = FakeJobStore()
         js.record(str(d), "converged")
-        js.record(str(d), "submitted", source="soc_stage2")
-        assert not orchestrator._stage2_soc_pending(d, js)
+        cfg = type("C", (), {"soc": True})()
+        assert not orchestrator._stage2_pending(d, js, cfg)
 
-    def test_failed_stage2_is_not_pending(self, tmp_path):
-        """One-shot arming: a failed supplement does not loop forever."""
+    def test_failed_stage2_not_repending(self, tmp_path):
+        """One-shot:stage2 提交已 patch INCAR——失败也不循环补。"""
         d = _mkdir(tmp_path, "Va_O1_0")
+        (d / "INCAR").write_text("NSW = 100\nLSORBIT = .TRUE.\nLDAU = True\n")
         js = FakeJobStore()
         js.record(str(d), "converged")
-        js.record(str(d), "failed", source="soc_stage2")
-        assert not orchestrator._stage2_soc_pending(d, js)
+        js.record(str(d), "failed", source="stage2")
+        cfg = type("C", (), {"soc": True})()
+        assert not orchestrator._stage2_pending(d, js, cfg)
 
     def test_not_converged_is_not_pending(self, tmp_path):
         d = _mkdir(tmp_path, "Va_O1_0")
         js = FakeJobStore()
         js.record(str(d), "submitted")
-        assert not orchestrator._stage2_soc_pending(d, js)
+        cfg = type("C", (), {"soc": True})()
+        assert not orchestrator._stage2_pending(d, js, cfg)
 
 
 class TestSubmitStage2:
-    def _call(self, d, monkeypatch):
+    def _call(self, d, monkeypatch, soc=True):
         calls = []
         js = FakeJobStore()
         monkeypatch.setattr(
             orchestrator, "_submit_or_skip",
             lambda path, label, sys_name, dry_run, info, *, js=None,
             source=None, priority=0: calls.append((label, source)))
-        orchestrator._submit_stage2_soc(d, type("S", (), {"name": "X"})(),
-                                        js, False, lambda *a: None)
+        cfg = type("C", (), {"soc": soc})()
+        sys = type("S", (), {"name": "X", "config": cfg})()
+        orchestrator._submit_stage2(d, sys, js, False, lambda *a: None,
+                                    task_type="defect")
         return calls, js
 
-    def test_non_bi_relaxes_under_soc(self, tmp_path, monkeypatch):
-        """ADR 0022: every dir continues from CONTCAR and RELAXES under SOC
-        (NSW stays 100); the NSW=0 single-point regime is retired."""
+    def test_relaxes_under_final_protocol(self, tmp_path, monkeypatch):
+        """ADR 0025: stage2 = SOC(体系需)+ U(含 Fe)一次 patch, CONTCAR
+        续算弛豫(合并策略, grill Q6)。"""
         d = _mkdir(tmp_path, "Va_O1_0")
         calls, js = self._call(d, monkeypatch)
         incar = (d / "INCAR").read_text()
         poscar = (d / "POSCAR").read_text()
         assert "LSORBIT" in incar and "ISYM = -1" in incar
-        assert "NSW = 100" in incar, "non-Bi dirs also relax under SOC"
+        assert "LDAU = True" in incar, "Fe 含 U 元素 → +U"
+        assert "NSW = 100" in incar, "续算弛豫,非单点"
         assert "0.1 0.1 0.1" in poscar, "POSCAR must come from CONTCAR"
-        assert calls == [("soc2:Va_O1_0", "soc_stage2")]
+        assert calls == [("st2:Va_O1_0", "stage2")]
 
-    def test_bi_dir_continues_from_contcar(self, tmp_path, monkeypatch):
-        d = _mkdir(tmp_path, "Bi_Y1_0")
-        self._call(d, monkeypatch)
+    def test_u_only_when_soc_disabled(self, tmp_path, monkeypatch):
+        """soc=False:仅补 U(Fe),无 LSORBIT。"""
+        d = _mkdir(tmp_path, "Va_O1_0")
+        calls, js = self._call(d, monkeypatch, soc=False)
         incar = (d / "INCAR").read_text()
-        poscar = (d / "POSCAR").read_text()
-        assert "LSORBIT" in incar
-        assert "NSW = 0" not in incar, "Bi dirs continue, not single-point"
-        assert "0.1 0.1 0.1" in poscar, "POSCAR must come from CONTCAR"
+        assert "LDAU = True" in incar
+        assert "LSORBIT" not in incar
 
 
 class TestWave2Stage2Trigger:
+    def _sys(self, df, cfg):
+        return type("S", (), {
+            "name": "T", "config": cfg,
+            "target_dir": None, "is_chemical_environment": False,
+            "cpd_dir": Path("/nonexistent/cpd"), "uc_dir": Path("/nonexistent/uc"),
+            "defect_dir": df, "derive_phase": lambda self, js: "UNITCELL_DEFECT",
+            "phase": lambda self: "UNITCELL_DEFECT",
+        })()
+
     def test_trigger_submits_converged_dirs(self, tmp_path, monkeypatch):
         df = tmp_path / "defect"
         conv = _mkdir(tmp_path, "Va_O1_0")
@@ -124,18 +141,14 @@ class TestWave2Stage2Trigger:
             orchestrator, "_submit_or_skip",
             lambda path, label, sys_name, dry_run, info, *, js=None,
             source=None, priority=0: submitted.append((path.name, source)))
-        sys = type("S", (), {
-            "name": "T", "config": type("C", (), {"stage2_soc": True})(),
-            "target_dir": None, "is_chemical_environment": False,
-            "cpd_dir": Path("/nonexistent/cpd"), "uc_dir": Path("/nonexistent/uc"),
-            "defect_dir": df, "derive_phase": lambda self, js: "UNITCELL_DEFECT",
-            "phase": lambda self: "UNITCELL_DEFECT",
-        })()
+        sys = self._sys(df, type("C", (), {"soc": True})())
         orchestrator.wave2_submit(sys, js, False)
-        assert submitted == [("Va_O1_0", "soc_stage2")], submitted
+        assert submitted == [("Va_O1_0", "stage2")], submitted
 
-    def test_disabled_config_no_trigger(self, tmp_path, monkeypatch):
+    def test_no_trigger_when_final_protocol_satisfied(self, tmp_path, monkeypatch):
+        """INCAR 已含最终协议(单阶段/已补)→ 不重补。"""
         conv = _mkdir(tmp_path, "Va_O1_0")
+        (conv / "INCAR").write_text("NSW = 100\nLSORBIT = .TRUE.\nLDAU = True\n")
         (conv / "OUTCAR").write_text(
             "NSW = 50\nIBRION = 2\nEDIFFG = -0.03\n"
             "TOTAL-FORCE (eV/Angst)\n ---\n"
@@ -149,13 +162,6 @@ class TestWave2Stage2Trigger:
             orchestrator, "_submit_or_skip",
             lambda path, label, sys_name, dry_run, info, *, js=None,
             source=None, priority=0: submitted.append((path.name, source)))
-        sys = type("S", (), {
-            "name": "T", "config": type("C", (), {"stage2_soc": False})(),
-            "target_dir": None, "is_chemical_environment": False,
-            "cpd_dir": Path("/nonexistent/cpd"), "uc_dir": Path("/nonexistent/uc"),
-            "defect_dir": tmp_path / "defect",
-            "derive_phase": lambda self, js: "UNITCELL_DEFECT",
-            "phase": lambda self: "UNITCELL_DEFECT",
-        })()
+        sys = self._sys(tmp_path / "defect", type("C", (), {"soc": True})())
         orchestrator.wave2_submit(sys, js, False)
-        assert submitted == [], "stage2 must be opt-in via plan"
+        assert submitted == [], submitted

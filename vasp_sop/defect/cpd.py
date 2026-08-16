@@ -360,7 +360,10 @@ def _submit_cpd_batch(
         # honoured on explicit tasks (bare `vise vs` skips it, leaving
         # cpd INCARs without LDAU tags).
         prepare_inputs(work_dir, config, task_type="structure_opt")
-        patch_incar_u(work_dir)  # ISPIN fallback; LDAU no-op when present
+        # 两阶段(ADR 0025):cpd 相 stage1 无 LDAU(自旋保留)——U 由
+        # orchestrator stage2 apply_final_protocol 补充(凸包与 defect
+        # 同用 stage2 +U 能量, Q3)。
+        patch_incar_u(work_dir, apply_u=False)  # ISPIN fallback
         patch_incar_magmom(work_dir)  # SCF moment lock (input_ready early-exit path)
         outcar = work_dir / "OUTCAR"
         if outcar.is_file():
