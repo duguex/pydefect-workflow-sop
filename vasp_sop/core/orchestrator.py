@@ -370,10 +370,11 @@ def _submit_stage2(child: Path, sys: Any, js: Any, dry_run: bool,
     """
     from vasp_sop.vasp.io import apply_final_protocol
 
-    apply_final_protocol(child, sys.config, task_type)
-    cont = child / "CONTCAR"
-    if cont.is_file() and cont.stat().st_size > 0:
-        (child / "POSCAR").write_text(cont.read_text(errors="ignore"))
+    if not dry_run:
+        apply_final_protocol(child, sys.config, task_type)
+        cont = child / "CONTCAR"
+        if cont.is_file() and cont.stat().st_size > 0:
+            (child / "POSCAR").write_text(cont.read_text(errors="ignore"))
     _submit_or_skip(child, f"st2:{child.name}", sys.name, dry_run, info_fn,
                     js=js, source="stage2", priority=priority)
 
