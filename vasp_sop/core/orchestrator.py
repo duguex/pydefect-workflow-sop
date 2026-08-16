@@ -1311,6 +1311,7 @@ class BatchOrchestrator:
         self.root = self.roots[0]
         self.dry_run = dry_run
         self.exclude = list(exclude or [])
+        self._excluded_roots: list[Path] = []
         self.poll_interval = poll_interval
         self.loop = loop
         self.retry_failed = retry_failed
@@ -1347,6 +1348,7 @@ class BatchOrchestrator:
         from vasp_sop.core.config import PipelineConfig
 
         sys_list: list[dict] = []
+        self._all_system_dirs: list[Path] = []
         for root_index, root in enumerate(self.roots):
             for d in sorted(root.iterdir()):
                 if not d.is_dir():
@@ -1354,6 +1356,7 @@ class BatchOrchestrator:
                 plan_path = d / "plan.yaml"
                 if not plan_path.is_file():
                     continue
+                self._all_system_dirs.append(d)
                 try:
                     config = PipelineConfig.from_yaml(plan_path, root=d)
                 except Exception:
@@ -1372,6 +1375,11 @@ class BatchOrchestrator:
         if self.exclude:
             sys_list = [s for s in sys_list if s["name"] not in self.exclude]
         self.systems = sys_list
+        # Roots of excluded systems — the hard boundary for every global
+        # sweep (_restore_crisp_active/_poll_tracked), not just advance.
+        self._excluded_roots = [
+            d for d in self._all_system_dirs if d.name in (self.exclude or [])
+        ]
 
     # ── logging helpers ─────────────────────────────────────────────
 
@@ -1490,12 +1498,21 @@ class BatchOrchestrator:
     # ── loop machinery ──────────────────────────────────────────────
 
     def _restore_crisp_active(self) -> None:
-        """Populate JobStore from crisp's currently-running tasks."""
+        """Populate JobStore from crisp's currently-running tasks.
+
+        Only tasks under this run's system roots are recorded — tasks of
+        excluded/other systems must stay untouched (exclude is a hard
+        boundary, not just an advance-time filter).
+        """
         from vasp_sop.core.jobs import crisp_active_dirs
 
         if self.dry_run:
             return
-        active = crisp_active_dirs(skip=False)
+        excluded = [r.resolve() for r in getattr(self, "_excluded_roots", [])]
+        active = [
+            p for p in crisp_active_dirs(skip=False)
+            if not any(p.resolve().is_relative_to(r) for r in excluded)
+        ]
         if active:
             logger.info(
                 "Found %d active crisp tasks, recording in JobStore.",
@@ -1711,8 +1728,13 @@ class BatchOrchestrator:
         completed = 0
         crispy = crisp_active_dirs(skip=True) if self.dry_run else crisp_active_dirs(skip=False)
         import time as _time
+        # Exclude is a hard boundary: never poll/restart dirs of excluded
+        # systems (their JobStore history must stay untouched).
+        excluded = [r.resolve() for r in getattr(self, "_excluded_roots", [])]
         for row in self.js.tracked_dirs():
             wd = Path(row["dir_path"])
+            if any(wd.resolve().is_relative_to(r) for r in excluded):
+                continue
             wd_str = str(wd.resolve())
             # ADR 0013: anion-cation antisites are excluded from the defect
             # set — never restart/resubmit them (wave2 already skips them;
