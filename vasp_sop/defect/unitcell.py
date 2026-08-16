@@ -69,6 +69,15 @@ def _prepare_all_inputs(uc_root: Path, target_dir: Path, config: PipelineConfig)
         cmd = base + pp_suffix
         if not input_ready(task_dir):
             run_local(cmd, cwd=task_dir, timeout=300)
+            # vise CLI 不经 prepare_inputs——按协议表补 NELM/EDIFF
+            # (ADR 0024 单一事实源;vise 模板 NELM=100 会漂移)。
+            from vasp_sop.vasp.io import patch_incar, protocol_tags
+
+            tags = protocol_tags(task_name)
+            fallback = {k: v for k, v in tags.items() if k in ("NELM", "EDIFF")}
+            if tags.get("EDIFFG") is not None:
+                fallback["EDIFFG"] = tags["EDIFFG"]
+            patch_incar(task_dir, **fallback)
 
 
 def _get_task_dirs(uc_root: Path, config: PipelineConfig) -> list[Path]:
