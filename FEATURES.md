@@ -63,21 +63,25 @@ material systems in a shared project root directory.
 
 ### State Machine Phases
 
-Each system cycles through a deterministic phase sequence:
+Phases are ANALYSIS GATES, not submission gates (ADR 0026): submission
+is unconditional every cycle — any dir whose inputs are ready gets
+submitted. A phase says which downstream analysis is blocked and why:
 
 ```
-STRUCTURE_OPT  →  COMPETING  →  CHEM_POT_DIAGRAM  →  UNITCELL_DEFECT  →  COMPLETE
+RUNNING  →  CPD_READY  →  ANALYZE_READY  →  COMPLETE
 ```
 
-Phase is determined by filesystem state — OUTCAR presence, convergence
-status, presence of `target_vertices.yaml`, etc. — not from a database.
+Phase is determined by filesystem state — OUTCAR convergence,
+presence of `target_vertices.yaml` / `standard_energies.yaml` /
+`chem_pot_diag.json` / `unitcell.yaml` / `defect_energy_summary.json`,
+etc. — not from a database.
 
 ### Three-Wave VASP Scheduling
 
 |---|---|---|
-| 1 | STRUCTURE_OPT | Submit structure_opt VASP; generate all other inputs locally while it runs |
-| 2 | COMPETING + UNITCELL + DEFECT | Submit competing phases, unitcell (band/dos/dielectric), perfect, and all defect jobs in parallel |
-| 3 | POST-PROCESSING | pydefect analysis, formation energy summary, unitcell YAML generation |
+| 1 | Host target | Submit host reference relaxation (cpd/`<formula>`, idempotent); generate all other inputs locally while it runs |
+| 2 | Competing + UC + Defect | Submit competing phases, unitcell (structure_opt/band/dos/dielectric — single-points once the relaxed structure is staged), perfect, and all defect jobs in parallel |
+| 3 | Analysis gates | CPD diagram (once all cpd phases converged) → pydefect defect analysis, formation energy summary, unitcell YAML (once CPD + all legs done) |
 
 ### Key Behaviors
 
@@ -529,7 +533,9 @@ Unlike the legacy `StateStore` (file-based `.pipeline_state.json`), JobStore rec
 | `converged` | OUTCAR converged (ionic relaxation met or single-point completed) |
 | `failed` | Given up after max retries or VASP crash; `reason` field explains why |
 
-System-level phase (`STRUCTURE_OPT` → `COMPLETE`) is derived in real-time from JobStore + marker files by `System.phase()`.
+System-level phase (`RUNNING` → `COMPLETE`, the analysis-gate model of
+ADR 0026) is derived in real-time from disk truth (OUTCAR verdicts +
+analysis artifacts) by `System.phase()`.
 
 ### Resume
 

@@ -41,13 +41,14 @@ python3 -m pytest tests/
 
 | Stage | Meaning |
 |-------|---------|
-| STRUCTURE_OPT | Structure optimization of host |
-| COMPETING | Competing phases |
-| CHEM_POT_DIAGRAM | Chemical potential diagram post |
-| UNITCELL_DEFECT | Unitcell props + defect supercells + VASP |
+| RUNNING | Any calculation unconverged — submission stays active (ADR 0026) |
+| CPD_READY | All cpd phases converged; chem-pot diagram to compute |
+| ANALYZE_READY | CPD + all legs done; defect analysis to run |
 | COMPLETE | Terminal |
 
-Three-wave VASP scheduling and JobStore details: [FEATURES.md](FEATURES.md), [docs/agent-conventions.md](docs/agent-conventions.md).
+Submission is unconditional per cycle (no phase gate); phases only gate
+analysis. Three-wave VASP scheduling and JobStore details:
+[FEATURES.md](FEATURES.md), [docs/agent-conventions.md](docs/agent-conventions.md).
 
 ---
 

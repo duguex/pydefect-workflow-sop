@@ -13,7 +13,7 @@
 ## Always-on
 
 - **What this is**: **vasp-sop** — VASP **point-defect high-throughput orchestrator** (not a DFT code, not Slurm, not a materials DB). It receives mature project directories and composes established scientific tools such as `pydefect`, `doped`, and `phonopy`. Individual prepared calculation directories are submitted via **`crisp`** / mpirun. Result reuse is a CRISP-integrated capability, separately documented as **`vasp-cache`**.
-- **State machine** (batch): `STRUCTURE_OPT → COMPETING → CHEM_POT_DIAGRAM → UNITCELL_DEFECT → COMPLETE` via `core/orchestrator.py::advance_one_system`, driven by `core/orchestrator.py::BatchOrchestrator`; the canonical phase machine is `core/system.py::System.phase()` (persisted `state.json` wins per `docs/adr/0001`).
+- **State machine** (analysis gates, ADR 0026): `RUNNING → CPD_READY → ANALYZE_READY → COMPLETE` — submission is unconditional per cycle (any dir with ready inputs gets submitted); the canonical phase machine is `core/system.py::System.phase()`, disk-derived (`state.json` legacy per `docs/adr/0001`).
 - **Three-wave VASP schedule**: Wave1 structure_opt → Wave2 competing+UC+defects parallel → Wave3 pydefect post.  
 - **CLI**: `vasp-sop batch run .` (`--dry-run`), `defect build`, `cache status|query|…`, `materials fetch`.  
 - **Config**: `plan.yaml` per mature project; JobStore (SQLite) for orchestration state; result-reuse operations are exposed as a CRISP-integrated capability.
