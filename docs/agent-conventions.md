@@ -21,7 +21,7 @@ vasp-sop 是一个**编排层**，把整条链路封装成一条命令。给定�
 | 维度 | 实现 |
 |---|---|
 | 一次配置 | `plan.yaml` 定义化学式、掺杂、泛函、超胞参数 |
-| 自动阶段推进 | `STRUCTURE_OPT → COMPETING → CHEM_POT_DIAGRAM → UNITCELL_DEFECT → COMPLETE` 状态机 |
+| 自动阶段推进 | 分析门状态机 `RUNNING → CPD_READY → ANALYZE_READY → COMPLETE`（提交无条件，相位只门分析——ADR 0026） |
 | 一键批量 | `vasp-sop batch run .` 串行推进所有体系 |
 | 三波 VASP 调度 | Wave 1: 结构优化 → Wave 2: 竞争相+能带+DOS+介电+缺陷全并行 → Wave 3: 后处理 |
 | 容错 | CONTCAR 重启（最多 20 次）、12 种错误诊断、单体系失败不阻塞其他 |
@@ -60,11 +60,10 @@ submitting and tracking hundreds of VASP jobs through the HPC cluster scheduler
 CLI (vasp-sop command)
   │
   ├── batch run .          ← multi-system pipeline orchestrator
-  │   └── advance_one_system()  ← per-system state machine (core/orchestrator.py)
-  │       ├── STRUCTURE_OPT → submit structure_opt VASP
-  │       ├── COMPETING      → submit/check competing phases
-  │       ├── CHEM_POT_DIAGRAM → run chemical potential diagram
-  │       └── UNITCELL_DEFECT → build defect structures + submit VASP
+  │   └── advance_one_system()  ← per-system: unconditional submit + analysis gates (core/orchestrator.py)
+  │       ├── wave1_optimize → host target submit (idempotent)
+  │       ├── wave2_submit   → competing phases + unitcell + perfect + defect chain + stage2
+  │       └── wave3_cpd / wave3_analyze → chem-pot diagram / defect analysis (phase-gated)
   │
   ├── defect build .       ← standalone defect structure generation
   ├── batch status .       ← disk-truth status table (verdict over dirs)
