@@ -1511,7 +1511,7 @@ class BatchOrchestrator:
         excluded = [r.resolve() for r in getattr(self, "_excluded_roots", [])]
         active = [
             p for p in crisp_active_dirs(skip=False)
-            if not any(p.resolve().is_relative_to(r) for r in excluded)
+            if not any(Path(p).resolve().is_relative_to(r) for r in excluded)
         ]
         if active:
             logger.info(
