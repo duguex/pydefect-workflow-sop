@@ -212,6 +212,23 @@ class TestPatchIncarU:
         assert "LDAUU = 5 0" in (d / "INCAR").read_text(), \
             "existing U must not be overwritten"
 
+    def test_disabled_ldau_reenabled_at_stage2(self, tmp_path: Path):
+        """stage1 emits LDAU = False (rows kept, ADR 0025); stage2 must
+        re-enable it instead of treating the row's presence as final.
+
+        Regression: a bare ``"LDAU" in INCAR`` presence check would skip
+        the re-enable forever — the two-phase DFT+U never completes.
+        """
+        from vasp_sop.vasp.io import patch_incar_u
+        d = self._dir(tmp_path, "Fe O")
+        (d / "INCAR").write_text(
+            "LDAU = False\nLDAUU = 3.0 0\nLDAUL = 2 -1\nLMAXMIX = 4\n")
+        patch_incar_u(d, apply_u=True)
+        txt = (d / "INCAR").read_text()
+        assert "LDAU = True" in txt, txt
+        assert "LDAUU = 3.0 0" in txt
+        assert "LDAUL = 2 -1" in txt
+
     def test_ispin_added_when_ldau_present_but_spin_missing(self, tmp_path: Path):
         """vise's cpd template emits LDAU (with -t structure_opt) but no
         ISPIN — spin polarization must still be forced for U species."""
@@ -354,9 +371,9 @@ class TestTiHubbardUFallback:
         io_mod.prepare_inputs(tmp_path, cfg, kspacing=0.1, task_type="defect",
                               charge=0.0)
         txt = (tmp_path / "INCAR").read_text()
-        assert "LDAU" not in txt, "stage1 无 U(两阶段, ADR 0025)"
+        assert "LDAU = False" in txt, "stage1 LDAU 禁用(行保留, ADR 0025)"
         assert "ISPIN = 2" in txt, "自旋段 stage1 保留"
-        # stage2:最终协议补 U。
+        # stage2:最终协议补 U(LDAU=False → True)。
         io_mod.apply_final_protocol(tmp_path, cfg, task_type="defect")
         txt2 = (tmp_path / "INCAR").read_text()
         uu = next(l for l in txt2.splitlines() if "LDAUU" in l)
@@ -376,7 +393,7 @@ class TestTiHubbardUFallback:
                               encut=None, potcar_overrides=[])
         io_mod.prepare_inputs(tmp_path, cfg, task_type="structure_opt")
         txt = (tmp_path / "INCAR").read_text()
-        assert "LDAU" not in txt, "stage1 无 U(两阶段)"
+        assert "LDAU = False" in txt, "stage1 LDAU 禁用(行保留, ADR 0025)"
         assert "ISPIN = 2" in txt, "自旋段 stage1 保留(Ti 为 U 表元素)"
         io_mod.apply_final_protocol(tmp_path, cfg, task_type="structure_opt")
         txt2 = (tmp_path / "INCAR").read_text()

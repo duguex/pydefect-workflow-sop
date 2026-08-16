@@ -349,7 +349,7 @@ def _stage2_pending(child: Path, js: Any, config) -> bool:
     既有 soc_stage2 历史记录兼容(INCAR 已含标志 → 不再补)。
     """
     from vasp_sop.vasp.io import _poscar_species, read_incar
-    from vasp_sop.vasp.protocol import needs_final_soc, needs_u
+    from vasp_sop.vasp.protocol import ldau_enabled, needs_final_soc, needs_u
 
     if js.latest(str(child.resolve())) != "converged":
         return False
@@ -357,7 +357,7 @@ def _stage2_pending(child: Path, js: Any, config) -> bool:
     if needs_final_soc(config) and str(inc.get("LSORBIT", "")).lower() != ".true.":
         return True
     species = _poscar_species(child / "POSCAR") or []
-    if needs_u(species) and "LDAU" not in inc:
+    if needs_u(species) and not ldau_enabled(inc):
         return True
     return False
 
@@ -388,7 +388,7 @@ def _final_protocol_pending_dirs(sys: Any) -> list[str]:
     生成即最终协议,不在此列。
     """
     from vasp_sop.vasp.io import _poscar_species, read_incar
-    from vasp_sop.vasp.protocol import needs_final_soc, needs_u
+    from vasp_sop.vasp.protocol import ldau_enabled, needs_final_soc, needs_u
 
     pending: list[str] = []
 
@@ -397,7 +397,7 @@ def _final_protocol_pending_dirs(sys: Any) -> list[str]:
         if needs_final_soc(sys.config) and str(inc.get("LSORBIT", "")).lower() != ".true.":
             return True
         species = _poscar_species(d / "POSCAR") or []
-        return bool(needs_u(species) and "LDAU" not in inc)
+        return bool(needs_u(species) and not ldau_enabled(inc))
 
     df_root = sys.defect_dir
     if df_root.is_dir():

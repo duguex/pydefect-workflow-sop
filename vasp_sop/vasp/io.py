@@ -176,6 +176,12 @@ def prepare_inputs(
     # for cpd/band/dos/dielectric too — idempotent. 单点腿全补;弛豫腿
     # stage1 只自旋段(U 由 stage2 补, ADR 0025)。
     patch_incar_u(work_dir, apply_u=singlepoint)
+    # 弛豫腿 stage1 统一禁用 DFT+U(两阶段, ADR 0025):vise 的 defect 任务
+    # 默认 set_hubbard_u True(部分元素),生成的 INCAR 可能带 LDAU=True。
+    # 只改 LDAU 值(True→False),保留 LDAUL/LDAUU/LMAXMIX 行——stage2
+    # apply_final_protocol 改回 True 即可(物理判定见 protocol.ldau_enabled)。
+    if not singlepoint:
+        patch_incar(work_dir, LDAU=False)
     patch_incar_magmom(work_dir)
 
 
@@ -261,8 +267,11 @@ def _prepare_inputs_vise_api(
     # libs/vise fork's U table lacks Ti (official vise has U=4): rely on
     # set_hubbard_u for the rest, then patch any U-table species that the
     # fork dropped (idempotent — no-op when LDAU already present).
-    # 两阶段:stage1 只自旋段(ADR 0025)。
+    # 两阶段:stage1 只自旋段(ADR 0025)——弛豫腿显式 LDAU=False
+    # (行保留,stage2 apply_final_protocol 改回 True;见 protocol.ldau_enabled)。
     patch_incar_u(work_dir, apply_u=False)
+    if not is_singlepoint(task_type):
+        patch_incar(work_dir, LDAU=False)
     patch_incar_magmom(work_dir)
 
 
@@ -484,7 +493,11 @@ def patch_incar_u(work_dir: Path, *, apply_u: bool = False) -> None:
         patch_incar(work_dir, ISPIN=2)
     if not apply_u:
         return
-    if "LDAU" in incar.read_text(errors="ignore"):
+    # Skip only when DFT+U is already *enabled* — stage1 emits
+    # LDAU=False (rows kept) so a bare "LDAU" presence check would
+    # never re-enable it at stage2 (see protocol.ldau_enabled).
+    from vasp_sop.vasp.protocol import ldau_enabled
+    if ldau_enabled(read_incar(incar)):
         return
     uu = [str(U_TABLE[s][0]) if s in U_TABLE else "0" for s in species]
     ul = [str(U_TABLE[s][1]) if s in U_TABLE else "-1" for s in species]

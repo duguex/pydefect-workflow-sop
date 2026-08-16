@@ -59,6 +59,19 @@ class TestStage2Pending:
         cfg = type("C", (), {"soc": True})()
         assert not orchestrator._stage2_pending(d, js, cfg)
 
+    def test_converged_with_disabled_ldau_is_pending(self, tmp_path):
+        """stage1 emits LDAU = False (rows kept, ADR 0025) — the row's
+        presence must NOT count as final protocol; only an enabled LDAU
+        does (regression 2026-08-17)."""
+        d = _mkdir(tmp_path, "Va_O1_0")
+        (d / "INCAR").write_text(
+            "NSW = 100\nLSORBIT = .TRUE.\nLDAU = False\n"
+            "LDAUU = 5.0 0\nLDAUL = 3 -1\n")
+        js = FakeJobStore()
+        js.record(str(d), "converged")
+        cfg = type("C", (), {"soc": True})()
+        assert orchestrator._stage2_pending(d, js, cfg)
+
     def test_failed_stage2_not_repending(self, tmp_path):
         """One-shot:stage2 提交已 patch INCAR——失败也不循环补。"""
         d = _mkdir(tmp_path, "Va_O1_0")

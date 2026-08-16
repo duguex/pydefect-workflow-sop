@@ -100,6 +100,17 @@ U_TABLE: dict[str, tuple[float, int]] = {
 }
 
 
+def ldau_enabled(inc: dict) -> bool:
+    """Whether an INCAR dict has DFT+U enabled (``LDAU`` truthy).
+
+    stage1 generates ``LDAU = False`` (two-phase DFT+U, ADR 0025) while
+    keeping the LDAUL/LDAUU rows; the enable/disable test must check the
+    *value*, not the row's presence — ``"LDAU" in inc`` is True for a
+    disabled row and would make stage2 never trigger (2026-08-17).
+    """
+    return str(inc.get("LDAU", "")).strip().lower() in ("true", "t", ".true.")
+
+
 def encut_for_potcar(potcar: Path) -> float | None:
     """协议 ENCUT = 1.3 × max(全块 ENMAX)(VASP 保守惯例)。
 
