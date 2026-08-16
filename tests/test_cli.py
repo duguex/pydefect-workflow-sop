@@ -92,7 +92,8 @@ def _write_converged_outcar(d: Path) -> None:
 
 
 def _write_truncated_outcar(d: Path) -> None:
-    (d / "OUTCAR").write_text("some header\n  reached required\n")
+    # Genuinely truncated: header only, no accuracy banner, no timing block.
+    (d / "OUTCAR").write_text("some header\n  TOTAL-FORCE (eV/Angst)\n ---\n")
 
 
 def _make_system_dict(root: Path) -> dict:
@@ -155,8 +156,10 @@ class TestAdvanceOneSystem:
         monkeypatch.setattr("vasp_sop.defect.builder.build_all", lambda *a, **kw: None)
         monkeypatch.setattr(
             "vasp_sop.vasp.convergence.convergence_verdict",
-            lambda p, priority=0: SimpleNamespace(
-                converged="NaCl_mp-12345" in str(p), max_f=None
+            lambda p, priority=0, task_type="": SimpleNamespace(
+                # target converges; the truncated competing phase does not —
+                # it must be resubmitted by the unconditional submission pass.
+                converged="mp-12345" in str(p), max_f=None
             ),
         )
         monkeypatch.setattr(
@@ -211,7 +214,7 @@ class TestCompetingFailureGate:
         store.record(str(target.resolve()), "converged")
         store.record(str(competing.resolve()), "failed", reason="crisp_failed")
 
-        assert _system_phase(_make_system_dict(root)) == "COMPETING"
+        assert _system_phase(_make_system_dict(root)) == "RUNNING"
 
     def test_missing_competing_inputs_blocks_cpd(self, competing_system, tmp_path):
         """A POSCAR-only competing phase must keep the system in COMPETING."""
@@ -233,7 +236,7 @@ class TestCompetingFailureGate:
         _write_converged_outcar(incomplete)
         JobStore().record(str(target.resolve()), "converged")
 
-        assert _system_phase(_make_system_dict(root)) == "COMPETING"
+        assert _system_phase(_make_system_dict(root)) == "RUNNING"
 
     def test_failed_marker_overrides_old_converged_output(
         self, competing_system, tmp_path
@@ -254,7 +257,7 @@ class TestCompetingFailureGate:
         (competing / ".failed").write_text("EXIT_CODE: 1\n")
         JobStore().record(str(target.resolve()), "converged")
 
-        assert _system_phase(_make_system_dict(root)) == "COMPETING"
+        assert _system_phase(_make_system_dict(root)) == "RUNNING"
 
     def test_cpd_persistence_does_not_regress_on_failed_competing(
         self, competing_system, tmp_path
@@ -271,7 +274,9 @@ class TestCompetingFailureGate:
         store = JobStore()
         store.record(str((cpd / "Other_mp-99999").resolve()), "failed")
 
-        assert _system_phase(_make_system_dict(root)) == "UNITCELL_DEFECT"
+        # Competing phase is genuinely unconverged (truncated) → RUNNING;
+        # the failed record must not be validated by any older output.
+        assert _system_phase(_make_system_dict(root)) == "RUNNING"
 
 
 class TestBatchCpdTargetHandoff:
@@ -537,8 +542,8 @@ class TestAdvanceDryRunPostprocess:
         monkeypatch.setattr("vasp_sop.defect.builder.build_all", lambda *a, **kw: None)
         monkeypatch.setattr(
             "vasp_sop.vasp.convergence.convergence_verdict",
-            lambda p, priority=0: SimpleNamespace(
-                converged="NaCl_mp-12345" in str(p), max_f=None
+            lambda p, priority=0, task_type="": SimpleNamespace(
+                converged=True, max_f=None
             ),
         )
         monkeypatch.setattr(
@@ -581,6 +586,8 @@ class TestAdvanceDryRunPostprocess:
         if with_artifacts:
             (cpd / "target_vertices.yaml").write_text("dummy: 1\n")
             (cpd / "standard_energies.yaml").write_text("dummy: 1\n")
+            (cpd / "composition_energies.yaml").write_text("dummy: 1\n")
+            (cpd / "chem_pot_diag.json").write_text("{}")
             (uc / "unitcell.yaml").write_text("dummy: 1\n")
             for t in ("band", "dos", "dielectric"):
                 tdir = uc / t
@@ -656,8 +663,10 @@ class TestBatchNoDuplicateSubmission:
         )
         monkeypatch.setattr(
             "vasp_sop.vasp.convergence.convergence_verdict",
-            lambda p, priority=0: SimpleNamespace(
-                converged="NaCl_mp-12345" in str(p), max_f=None
+            lambda p, priority=0, task_type="": SimpleNamespace(
+                # target converges; the truncated competing phase does not
+                # (must be submitted once by the unconditional pass).
+                converged="mp-12345" in str(p), max_f=None
             ),
         )
         monkeypatch.setattr("vasp_sop.vasp.io.prepare_inputs", lambda *a, **kw: None)
@@ -907,7 +916,7 @@ class TestFullPipelineWalkthrough:
 
         # ── Phase 1: STRUCTURE_OPT ────────────────────────────────────────
         assert (
-            _system_phase(s) == "STRUCTURE_OPT"
+            _system_phase(s) == "RUNNING"
         ), "bare system should start in STRUCTURE_OPT"
         advance_one_system(s, dry_run=False)
         # Target submitted; simulate backfill: mark converged for next cycle
@@ -948,7 +957,7 @@ class TestFullPipelineWalkthrough:
         self._write_converged_outcar(comp)
 
         assert (
-            _system_phase(s) == "CHEM_POT_DIAGRAM"
+            _system_phase(s) == "CPD_READY"
         ), "no pending competing dirs → CHEM_POT_DIAGRAM"
         advance_one_system(s, dry_run=False)
 
@@ -961,8 +970,8 @@ class TestFullPipelineWalkthrough:
 
         advance_one_system(s, dry_run=False)
         assert (
-            _system_phase(s) == "UNITCELL_DEFECT"
-        ), "CPD artifacts present → UNITCELL_DEFECT"
+            _system_phase(s) == "CPD_READY"
+        ), "CPD artifacts present → CPD_READY (analysis gates)"
 
         # Create UC and defect directories (structure_opt already exists from the
         # CPD handoff, so mkdir must be idempotent).
@@ -1045,7 +1054,7 @@ class TestFullPipelineWalkthrough:
         )
 
         s = _make_system_dict(root)
-        assert _system_phase(s) == "STRUCTURE_OPT"
+        assert _system_phase(s) == "RUNNING"
 
         # crisp materializes the converged result into the worktree
         td = root / "cpd" / f"{formula}_mp-{mpid}"
@@ -1117,7 +1126,7 @@ class TestFullPipelineWalkthrough:
                 break
             advance_one_system(s, dry_run=False)
 
-        assert "CHEM_POT_DIAGRAM" in phases_seen, "should reach CPD phase"
+        assert "CPD_READY" in phases_seen, "should reach CPD phase"
         assert submit_calls == [], f"VASP submitted: {submit_calls}"
         assert cpd_done, "CPD computation should have run"
         so = root / "unitcell" / "structure_opt"
@@ -1269,7 +1278,7 @@ class TestPhaseStrictComplete:
         (bad / "OUTCAR").write_text("some header\n  reached required\n")  # ran, failed
         JobStore().record(str(bad.resolve()), "failed", reason="unconverged")
 
-        assert _system_phase(s) == "UNITCELL_DEFECT"
+        assert _system_phase(s) == "RUNNING"
 
     def test_unfinished_defect_blocks_complete(self, tmp_path: Path):
         """Defect without intermediates and not failed stays UNITCELL_DEFECT."""
@@ -1282,7 +1291,7 @@ class TestPhaseStrictComplete:
         _write_potcar(pending)
         _write_kpoints(pending)
 
-        assert _system_phase(s) == "UNITCELL_DEFECT"
+        assert _system_phase(s) == "RUNNING"
 
     def test_junk_subdir_without_vasp_inputs_blocks_complete(self, tmp_path: Path):
         """Any directory on disk without a converged verdict — even one
@@ -1294,7 +1303,7 @@ class TestPhaseStrictComplete:
         junk.mkdir()
         (junk / "readme.txt").write_text("not a calc\n")
 
-        assert _system_phase(s) == "UNITCELL_DEFECT"
+        assert _system_phase(s) == "RUNNING"
 
     def test_unconverged_competing_phase_blocks_complete(self, tmp_path: Path):
         """A competing phase that ran but failed the force gate keeps the
@@ -1314,7 +1323,7 @@ class TestPhaseStrictComplete:
             " IBRION = 2  NSW = 40  EDIFFG = -0.03\n"
         )
 
-        assert _system_phase(s) == "UNITCELL_DEFECT"
+        assert _system_phase(s) == "RUNNING"
 
     def test_missing_full_summary_blocks_complete(self, tmp_path: Path):
         """Only a partial defect summary — no full summary — is not COMPLETE."""
@@ -1324,7 +1333,7 @@ class TestPhaseStrictComplete:
         (df / "defect_energy_summary.json").unlink()
         (df / "defect_energy_summary.partial.json").write_text("{}\n")
 
-        assert _system_phase(s) == "UNITCELL_DEFECT"
+        assert _system_phase(s) == "ANALYZE_READY"
 
 
 class TestUcFalseConvergedResubmit:
@@ -1474,6 +1483,11 @@ class TestAdvanceAnalyzeStatusPrint:
         target.mkdir()
         for f in ("POSCAR", "INCAR", "POTCAR", "KPOINTS"):
             (target / f).write_text("x\n")
+        (target / "OUTCAR").write_text(
+            " General timing and accounting\n"
+            " TOTAL-FORCE (eV/Angst)\n ---\n"
+            " 0.0 0.0 0.0 0.0 0.0 0.0\n"
+        )
         (cpd / "target_vertices.yaml").write_text("tv: 1\n")
         (cpd / "standard_energies.yaml").write_text("se: 1\n")
         (cpd / "composition_energies.yaml").write_text("ce: 1\n")
@@ -2454,7 +2468,7 @@ class TestChemicalEnvironmentAdvance:
         JobStore().record(
             str((root / "cpd" / "GaN_mp-804").resolve()), "converged", source="backfill"
         )
-        assert _system_phase(s) == "COMPETING", "unconverged competing phase"
+        assert _system_phase(s) == "RUNNING", "unconverged competing phase"
         advance_one_system(s, dry_run=False)
 
         comp = str((root / "cpd" / "Ga_mp-142").resolve())

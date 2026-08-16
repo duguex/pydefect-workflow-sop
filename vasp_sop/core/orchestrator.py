@@ -1,18 +1,20 @@
-"""Three-wave batch orchestrator (issue #95).
+"""Batch orchestrator (issue #95).
 
-Extracted from ``cli/main.py`` ``_advance_one_system``.  Each wave
-function is independently callable and uses :class:`~vasp_sop.core.system.System`
-properties for directory access.
+Each wave function is independently callable and uses
+:class:`~vasp_sop.core.system.System` properties for directory access.
 
-Wave schedule
--------------
-- **wave1_optimize**: STRUCTURE_OPT — target submission, convergence check,
-  cache restore.
-- **wave2_submit**: COMPETING + UNITCELL_DEFECT submission — competing dirs,
-  UC tasks, defect submission.  Also contains the "prepare" step that builds
-  defect structures eagerly once the target POSCAR exists.
-- **wave3_postprocess**: CHEM_POT_DIAGRAM + post-processing — CPD compute,
-  defect analysis.
+Submission vs analysis are decoupled (ADR 0026): submission is
+unconditional per cycle — any dir whose inputs are ready gets submitted.
+The phase model only gates downstream ANALYSIS:
+
+- **wave1_optimize**: host-target (cpd/``<formula>``) submission — the
+  reference-energy relaxation; idempotent, runs every cycle.
+- **wave2_submit**: competing phases + unitcell single-points + perfect +
+  defect chain + stage2 — the full unconditional submission pass.
+- **wave3_cpd**: CPD analysis gate — chem-pot diagram once all cpd
+  phases converged (also stages unitcell/structure_opt from the target).
+- **wave3_analyze**: defect analysis gate — unitcell.yaml + pydefect
+  formation energies once CPD + all legs are done.
 """
 
 from __future__ import annotations
@@ -25,12 +27,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from vasp_sop.core.system import (
-    CHEM_POT_DIAGRAM,
-    COMPETING,
+    ANALYZE_READY,
+    CPD_READY,
     COMPLETE,
     NO_TARGET,
-    STRUCTURE_OPT,
-    UNITCELL_DEFECT,
+    RUNNING,
     System,
 )
 
@@ -301,7 +302,7 @@ def wave1_optimize(
     sys: System, js: Any, dry_run: bool, *, log_to_logger: bool = False,
     priority: int = 0,
 ) -> None:
-    """Wave 1: STRUCTURE_OPT — target submission, convergence check, cache restore.
+    """Wave 1: host-target submission (idempotent, every cycle).
 
     Preconditions
     -------------
@@ -416,15 +417,16 @@ def wave2_submit(
     sys: System, js: Any, dry_run: bool, *, log_to_logger: bool = False,
     retry_failed: bool = False, priority: int = 0,
 ) -> None:
-    """Wave 2: COMPETING + UNITCELL_DEFECT submission.
+    """Wave 2: the full unconditional submission pass (ADR 0026).
 
     Handles
     -------
-    - **Prepare**: build defect structures if target POSCAR exists (moved from
-      the eager block that previously ran before phase dispatch).
-    - **COMPETING**: submit competing phase directories.
-    - **UNITCELL_DEFECT**: submit UC tasks (band/dos/dielectric), perfect
-      supercell, and defect directories.
+    - **Prepare**: build defect structures if target POSCAR exists.
+    - **Competing phases**: submit every cpd dir whose inputs are ready
+      (host target + competitors) + stage2 protocol supplements.
+    - **Unitcell + defects**: submit single-point legs (band/dos/
+      dielectric — gated on the relaxed structure, not a phase), the
+      perfect supercell, and the defect chain (ADR 0010 seeding).
 
     Preconditions
     -------------
@@ -442,11 +444,12 @@ def wave2_submit(
     df_root = sys.defect_dir
 
     # ── CPD phase ionic restarts (any phase) ─────────────────────────
-    # Phase inference gates COMPLETE on every cpd phase, but once a
-    # system left COMPETING nothing else ever resubmits them.  A phase
-    # that failed ionically (force gate / NSW exhausted) continues from
-    # its own CONTCAR every cycle until it converges.  Electronic NELM
-    # exhaustion is NOT auto-retried (see _IONIC_RETRY_REASONS).
+    # Phase inference gates COMPLETE on every cpd phase, but nothing
+    # else resubmits a failed competitor (submission is unconditional but
+    # re-submission of a failed phase is not).  A phase that failed
+    # ionically (force gate / NSW exhausted) continues from its own
+    # CONTCAR every cycle until it converges.  Electronic NELM exhaustion
+    # is NOT auto-retried (see _IONIC_RETRY_REASONS).
     from vasp_sop.vasp.io import patch_incar, restart_from_contcar
 
     cpd_root = sys.cpd_dir
@@ -570,62 +573,59 @@ def wave2_submit(
                 parts.append("uc-" + "+".join(uc_tasks))
             if n_df:
                 parts.append(f"df-{n_df} defects")
-            p = sys.phase()
-            if p == "STRUCTURE_OPT":
+            if (df_root / "perfect" / "INCAR").is_file():
                 parts.append("perfect")
             if parts:
                 info(
                     f"  [dry-run] {sys.name:<18} would submit: {' '.join(parts)}"
                 )
 
-    # ── COMPETING: submit competing dirs ─────────────────────────────
-    p = sys.derive_phase(js)
-    if p == "COMPETING":
-        for cd in sys.competing_dirs(js):
-            cp = str(cd.resolve())
-            latest = js.latest(cp)
-            if latest == "submitted":
+    # ── Competing phases + stage2 (every cycle — no phase gate, ADR 0026) ──
+    # Submission is unconditional: any dir whose inputs are ready gets
+    # submitted; the phase model only gates downstream ANALYSIS.
+    for cd in sys.competing_dirs(js):
+        cp = str(cd.resolve())
+        latest = js.latest(cp)
+        if latest == "submitted":
+            continue
+        if latest in ("failed", "unconverged"):
+            # One-shot auto-rerun (ADR 0007, same policy as defect
+            # dirs): a second failure is terminal forever, armed only
+            # by an explicit `batch run --retry-failed`.
+            if not retry_failed:
                 continue
-            if latest in ("failed", "unconverged"):
-                # One-shot auto-rerun (ADR 0007, same policy as defect
-                # dirs): a second failure is terminal forever, armed only
-                # by an explicit `batch run --retry-failed`.
-                if not retry_failed:
-                    continue
-                if any(r.get("source") == "auto_retry"
-                       for r in js.history(cp)):
-                    continue
-                # ADR 0017: a deterministic electronic failure (NELM
-                # exhaustion) reproduces with identical inputs — a rerun
-                # from the pristine POSCAR fails identically, so it is
-                # excluded from auto_retry (needs a parameter decision).
-                if getattr(convergence_verdict(cd), "reason", None) \
-                        == "electronic_not_conv":
-                    continue
-                _submit_or_skip(cd, f"phase:{cd.name}", sys.name, dry_run, info,
-                                js=js, source="auto_retry", priority=priority)
+            if any(r.get("source") == "auto_retry"
+                   for r in js.history(cp)):
+                continue
+            # ADR 0017: a deterministic electronic failure (NELM
+            # exhaustion) reproduces with identical inputs — a rerun
+            # from the pristine POSCAR fails identically, so it is
+            # excluded from auto_retry (needs a parameter decision).
+            if getattr(convergence_verdict(cd), "reason", None) \
+                    == "electronic_not_conv":
                 continue
             _submit_or_skip(cd, f"phase:{cd.name}", sys.name, dry_run, info,
-                            js=js, priority=priority)
-        # ADR 0014/0025: stage2 最终协议补充(SOC?+U 一次到位)——全部
-        # 体系(非仅 stage2_soc):U 由元素集派生,物理判定(INCAR 缺标志)。
-        cpd_dir = sys.cpd_dir
-        if cpd_dir.is_dir():
-            for pd in sorted(cpd_dir.iterdir()):
-                if not pd.is_dir() or not input_ready(pd):
-                    continue
-                if _stage2_pending(pd, js, sys.config):
-                    _submit_stage2(pd, sys, js, dry_run, info,
-                                   priority=priority)
-        # No return here: defect/UC calculations are independent of the
-        # chemical-potential phases (formation energies need CPD only in
-        # wave3), so they run in parallel with COMPETING — matching the
-        # documented "wave2 competing+UC+defects parallel" schedule.
-        # (Operator decision 2026-08-11.)
+                            js=js, source="auto_retry", priority=priority)
+            continue
+        _submit_or_skip(cd, f"phase:{cd.name}", sys.name, dry_run, info,
+                        js=js, priority=priority)
+    # ADR 0014/0025: stage2 最终协议补充(SOC?+U 一次到位)——全部
+    # 体系(非仅 stage2_soc):U 由元素集派生,物理判定(INCAR 缺标志)。
+    cpd_dir = sys.cpd_dir
+    if cpd_dir.is_dir():
+        for pd in sorted(cpd_dir.iterdir()):
+            if not pd.is_dir() or not input_ready(pd):
+                continue
+            if _stage2_pending(pd, js, sys.config):
+                _submit_stage2(pd, sys, js, dry_run, info,
+                               priority=priority)
 
-    # ── UNITCELL_DEFECT: submit UC tasks + defect dirs ───────────────
-    # Chemical-environment systems never run this leg (ADR 0005).
-    if p not in ("UNITCELL_DEFECT", "COMPETING") or sys.is_chemical_environment:
+    # ── Defect build/submit + perfect + unitcell single-points ─────────
+    # Runs every cycle in parallel with the competing phases: defect and
+    # unit-cell legs are independent of the chem-pot diagram (formation
+    # energies need CPD only in the analysis gate).  Chemical-environment
+    # systems (ADR 0005) never run this leg.
+    if sys.is_chemical_environment:
         return
 
     from vasp_sop.defect import unitcell as _uc
@@ -633,20 +633,30 @@ def wave2_submit(
 
     if td and not (df_root / "perfect" / "INCAR").is_file():
         if not (df_root / "defect_in.yaml").is_file():
-            _build_defects(df_root, td, sys.config)
+            try:
+                _build_defects(df_root, td, sys.config)
+            except Exception as exc:
+                logger.error("%s defect build failed: %s", sys.name, exc)
         else:
             from vasp_sop.defect.builder import _generate_vasp_inputs
 
-            _generate_vasp_inputs(df_root, sys.config)
+            try:
+                _generate_vasp_inputs(df_root, sys.config)
+            except Exception as exc:
+                logger.error(
+                    "%s VASP inputs completion failed: %s", sys.name, exc
+                )
 
-    # UC tasks (band/dos/dielectric) stay gated on UNITCELL_DEFECT — only
-    # defect/perfect run in parallel with COMPETING (operator decision
-    # 2026-08-11).
-    if p == "UNITCELL_DEFECT":
-        if td and not (uc_root / "band" / "INCAR").is_file():
+    # UC tasks (band/dos/dielectric) gate on the RELAXED structure, not on
+    # a phase: they need structure_opt (staged from the converged target by
+    # the CPD analysis gate) to carry a CONTCAR.  Until then only
+    # defect/perfect run — a physical input dependency, not an ordering
+    # gate (ADR 0026).
+    if td and not (uc_root / "band" / "INCAR").is_file():
+        if (uc_root / "structure_opt" / "CONTCAR").is_file():
             _uc._prepare_all_inputs(uc_root, td, sys.config)
-        # Submit UC tasks (band, dos, dielectric)
-        for task in ("band", "dos", "dielectric"):
+    # Submit UC tasks (band, dos, dielectric) — every cycle.
+    for task in ("band", "dos", "dielectric"):
             task_dir = uc_root / task
             if not task_dir.is_dir():
                 continue
@@ -880,26 +890,62 @@ def wave2_submit(
 # ── Wave 3 ─────────────────────────────────────────────────────────────────
 
 
-def wave3_postprocess(
+def wave3_cpd(
     sys: System, js: Any, dry_run: bool, *, log_to_logger: bool = False
 ) -> dict:
-    """Wave 3: CHEM_POT_DIAGRAM + post-processing.
+    """CPD analysis gate (ADR 0026).
 
-    Handles
-    -------
-    - **CHEM_POT_DIAGRAM**: CPD computation + structure_opt cache restore.
-    - **UNITCELL_DEFECT** (when all VASP done): build unitcell yaml + analyze
-      defects via pydefect.
+    Computes the chemical-potential diagram once every cpd phase
+    (target + competitors) has converged, and stages unitcell/
+    structure_opt from the converged target so the single-point legs can
+    be submitted from the relaxed structure next cycle.
+    """
+    from vasp_sop.vasp.convergence import convergence_verdict
+    from vasp_sop.core.jobs import move_crisp_outputs
+    from vasp_sop.defect import cpd as _cpd
 
-    Returns
-    -------
-    dict
-        Status information with at least ``"phase"`` and ``"status"`` keys.
+    info = _make_info_fn(log_to_logger)
+    cpd_root = sys.cpd_dir
+    uc_root = sys.uc_dir
+
+    if not dry_run:
+        for pd in cpd_root.iterdir():
+            if pd.is_dir() and convergence_verdict(pd).converged:
+                move_crisp_outputs(pd)
+        logger.info("%s: CPD post-processing ...", sys.name)
+        try:
+            target_composition = _cpd._get_target_composition(
+                sys.config.formula
+            )
+            _cpd.compute_chemical_potentials(
+                cpd_root, sys.config, target_composition
+            )
+            f = sys.config.formula
+            m = sys.mpid
+            if f and m:
+                td = sys.target_dir
+                so = uc_root / "structure_opt"
+                _cpd.handoff_target_results(td, so, target_composition)
+                logger.info("%s structure_opt staged from target", sys.name)
+        except Exception as exc:
+            logger.error("%s CPD failed: %s", sys.name, exc)
+            if not log_to_logger:
+                print(f"  ✗ {sys.name:<18} CPD post-processing FAILED")
+            raise
+    return {"phase": CPD_READY, "status": "cpd_done"}
+
+def wave3_analyze(
+    sys: System, js: Any, dry_run: bool, *, log_to_logger: bool = False
+) -> dict:
+    """Defect analysis gate (ADR 0026).
+
+    Runs once every leg (unitcell single-points, perfect, defect chain)
+    has converged and the CPD diagram exists: builds unitcell.yaml and
+    runs the pydefect formation-energy analysis.  Chemical-environment
+    systems (ADR 0005) never run this leg.
     """
     from vasp_sop.vasp.convergence import convergence_verdict
     from vasp_sop.vasp.io import input_ready
-    from vasp_sop.core.jobs import move_crisp_outputs
-    from vasp_sop.defect import cpd as _cpd
     from vasp_sop.defect import unitcell as _uc
     from vasp_sop.defect.analysis import analyze as _analyze_defects
 
@@ -908,41 +954,10 @@ def wave3_postprocess(
     uc_root = sys.uc_dir
     df_root = sys.defect_dir
 
-    p = sys.derive_phase(js)
-    result: dict[str, Any] = {"phase": p}
+    result: dict[str, Any] = {"phase": ANALYZE_READY}
 
-    # ── CHEM_POT_DIAGRAM: CPD computation ────────────────────────────
-    if p == "CHEM_POT_DIAGRAM":
-        if not dry_run:
-            for pd in cpd_root.iterdir():
-                if pd.is_dir() and convergence_verdict(pd).converged:
-                    move_crisp_outputs(pd)
-            logger.info("%s: CPD post-processing ...", sys.name)
-            try:
-                target_composition = _cpd._get_target_composition(
-                    sys.config.formula
-                )
-                _cpd.compute_chemical_potentials(
-                    cpd_root, sys.config, target_composition
-                )
-                f = sys.config.formula
-                m = sys.mpid
-                if f and m:
-                    td = sys.target_dir
-                    so = uc_root / "structure_opt"
-                    _cpd.handoff_target_results(td, so, target_composition)
-                    logger.info("%s structure_opt staged from target", sys.name)
-            except Exception as exc:
-                logger.error("%s CPD failed: %s", sys.name, exc)
-                if not log_to_logger:
-                    print(f"  ✗ {sys.name:<18} CPD post-processing FAILED")
-                raise
-        result["status"] = "cpd_done"
-        return result
-
-    # ── UNITCELL_DEFECT: post-processing ─────────────────────────────
     # Chemical-environment systems never run this leg (ADR 0005).
-    if p != "UNITCELL_DEFECT" or sys.is_chemical_environment:
+    if sys.is_chemical_environment:
         result["status"] = "skipped"
         return result
 
@@ -1119,8 +1134,8 @@ def cpd_only(
     """Run ONLY the CPD phase for a single system (issue #93).
 
     Creates a :class:`~vasp_sop.core.system.System`, submits competing
-    phases (wave2), then runs CPD post-processing (wave3).  Stops before
-    UNITCELL_DEFECT — no UC or defect work is performed.
+    phases, then runs CPD post-processing (wave3_cpd).  Stops before
+    defect analysis — no UC or defect work is performed.
 
     Parameters
     ----------
@@ -1149,28 +1164,29 @@ def cpd_only(
 
     info(f"CPD-only mode for {sys_obj.name} (formula={formula})")
 
-    # ── Wave 2: submit competing phases ──────────────────────────────
-    phase = sys_obj.phase()
-    if phase == "COMPETING":
+    # ── Submit competing phases (unconditional — ADR 0026) ───────────
+    if sys_obj.phase() == RUNNING:
         info(f"  Submitting competing phases ...")
         wave2_submit(sys_obj, js, dry_run, log_to_logger=log_to_logger)
         # Re-check phase after submission
         phase = sys_obj.phase()
+    else:
+        phase = sys_obj.phase()
 
-    # ── Wave 3: CPD post-processing ──────────────────────────────────
-    if phase == "CHEM_POT_DIAGRAM":
+    # ── CPD analysis gate ────────────────────────────────────────────
+    if phase == CPD_READY:
         info(f"  Running CPD post-processing ...")
-        result = wave3_postprocess(sys_obj, js, dry_run, log_to_logger=log_to_logger)
+        result = wave3_cpd(sys_obj, js, dry_run, log_to_logger=log_to_logger)
         info(f"  CPD complete: {result.get('status', 'unknown')}")
         return result
 
     # If already past CPD or not yet ready
-    if phase in ("UNITCELL_DEFECT", "COMPLETE"):
+    if phase in (ANALYZE_READY, COMPLETE):
         info(f"  CPD already complete (phase={phase}), nothing to do.")
         return {"phase": phase, "status": "already_complete"}
 
     info(f"  System not ready for CPD (phase={phase}). "
-         f"Run structure_opt and competing phases first.")
+         f"Submit competing phases first.")
     return {"phase": phase, "status": "not_ready"}
 
 
@@ -1217,19 +1233,20 @@ def advance_one_system(
     p = sys_obj.phase(js)
 
     # ── Failure gate ─────────────────────────────────────────────────
-    if p == UNITCELL_DEFECT:
-        failure = _unitcell_build_failure(s["root"])
-        if failure:
-            raise RuntimeError(
-                f"unitcell blocked for {s['name']}: {failure['reason']}; "
-                f"{failure['diagnostic']}"
-            )
+    # A terminal unitcell build failure blocks the system (a human fixes
+    # the unitcell inputs, then `batch retry` re-arms).
+    failure = _unitcell_build_failure(s["root"])
+    if failure:
+        raise RuntimeError(
+            f"unitcell blocked for {s['name']}: {failure['reason']}; "
+            f"{failure['diagnostic']}"
+        )
     if p == COMPLETE or p == NO_TARGET:
         # A COMPLETE phase can still carry a stale chem-pot diagram (plan
         # elements grew after CPD completed, e.g. a dopant): dopant defect
         # energies silently vanish from the summary.  Refresh and drop the
-        # summary — the next cycle re-derives UNITCELL_DEFECT and wave3
-        # re-analyzes against the fresh vertices.
+        # summary — the next cycle re-derives ANALYZE_READY and the
+        # analysis gate re-analyzes against the fresh vertices.
         if p == COMPLETE and not dry_run:
             try:
                 if _refresh_stale_cpd_diagram(s, js, log_to_logger):
@@ -1239,39 +1256,37 @@ def advance_one_system(
                                s["name"], exc)
         return
 
-    # ── Wave 1: STRUCTURE_OPT ────────────────────────────────────────
-    if p == STRUCTURE_OPT:
-        wave1_optimize(sys_obj, js, dry_run, log_to_logger=log_to_logger,
-                       priority=s.get("priority", 0))
-        # Re-derive from disk — the target may now be recorded as done
-        p = sys_obj.derive_phase(js)
+    # ── Submission (every cycle, no phase gate — ADR 0026) ──────────
+    # Target (host relaxation — idempotent), then competing phases +
+    # unitcell + perfect + defect chain + stage2 in one unconditional
+    # pass.  Anything whose inputs are ready gets submitted; the phase
+    # model only decides which ANALYSIS runs below.
+    wave1_optimize(sys_obj, js, dry_run, log_to_logger=log_to_logger,
+                   priority=s.get("priority", 0))
+    wave2_submit(sys_obj, js, dry_run, log_to_logger=log_to_logger,
+                 retry_failed=retry_failed,
+                 priority=s.get("priority", 0))
 
-    # ── Wave 2: COMPETING (early return) ─────────────────────────────
-    if p == COMPETING:
-        wave2_submit(sys_obj, js, dry_run, log_to_logger=log_to_logger,
-                     priority=s.get("priority", 0))
-        return
-
-    # ── Wave 3: CHEM_POT_DIAGRAM ─────────────────────────────────────
-    if p == CHEM_POT_DIAGRAM:
-        wave3_postprocess(sys_obj, js, dry_run, log_to_logger=log_to_logger)
-
-    # ── Wave 2 + 3: UNITCELL_DEFECT ─────────────────────────────────
-    if p == UNITCELL_DEFECT:
+    # ── Analysis gates (ADR 0026) ───────────────────────────────────
+    p = sys_obj.phase(js)
+    if p == CPD_READY:
         try:
-            if dry_run:
-                wave3_postprocess(sys_obj, js, dry_run, log_to_logger=log_to_logger)
-            wave2_submit(sys_obj, js, dry_run, log_to_logger=log_to_logger,
-                         retry_failed=retry_failed,
-                         priority=s.get("priority", 0))
-            if not dry_run:
-                wave3_postprocess(sys_obj, js, dry_run, log_to_logger=log_to_logger)
+            wave3_cpd(sys_obj, js, dry_run, log_to_logger=log_to_logger)
         except Exception as exc:
-            _logger.error("%s UNITCELL_DEFECT failed: %s", s["name"], exc)
+            _logger.error("%s CPD analysis failed: %s", s["name"], exc)
             if _unitcell_build_failure(sys_obj.root):
                 raise
             if not log_to_logger:
-                print(f"  ✗ {s['name']:<18} UNITCELL_DEFECT FAILED")
+                print(f"  ✗ {s['name']:<18} CPD analysis FAILED")
+    elif p == ANALYZE_READY:
+        try:
+            wave3_analyze(sys_obj, js, dry_run, log_to_logger=log_to_logger)
+        except Exception as exc:
+            _logger.error("%s defect analysis failed: %s", s["name"], exc)
+            if _unitcell_build_failure(sys_obj.root):
+                raise
+            if not log_to_logger:
+                print(f"  ✗ {s['name']:<18} defect analysis FAILED")
 
     # ── Post-cycle phase is re-derived from disk next cycle (ADR 0011) ─
 
@@ -1712,9 +1727,10 @@ class BatchOrchestrator:
         to skip a ``converged`` record whose verdict is unconverged, but
         ``competing_dirs`` used to trust the record alone — a phase whose
         OUTCAR was removed while the record survived deadlocked the system
-        in CHEM_POT_DIAGRAM forever (observed 2026-08-11, SrGa4O7:Fe, 13
-        cpd phases).  Resetting to ``pending`` is the sanctioned recovery:
-        the next cycle resubmits through the normal submission paths.
+        in the CPD analysis gate forever (observed 2026-08-11, SrGa4O7:Fe,
+        13 cpd phases).  Resetting to ``pending`` is the sanctioned
+        recovery: the next cycle resubmits through the normal submission
+        paths.
 
         defect leg is deliberately skipped — its advance path self-heals
         stale ``converged`` records via CONTCAR restarts (ADR 0016), which
@@ -1851,7 +1867,7 @@ class BatchOrchestrator:
 
             p = System(s["root"], s["config"]).phase()
             failure = _unitcell_build_failure(s["root"])
-            if p == UNITCELL_DEFECT and failure:
+            if failure:
                 self.blocked_systems.add(name)
                 reason = failure["reason"]
                 diagnostic = failure["diagnostic"]

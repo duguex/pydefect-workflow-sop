@@ -508,8 +508,10 @@ def build_graph(root: Path, *, system_filter: str | None = None) -> dict:
                     _add_edge(edges, aid, did, LINEAGE, label="defect input source")
 
         # The actual wave2 dispatch fans out CPD and defects/perfect in
-        # COMPETING; this is a relation layer, not a blocking gate.
-        if phase in ("COMPETING", "UNITCELL_DEFECT"):
+        # every cycle (ADR 0026); this is a relation layer, not a
+        # blocking gate.  RUNNING = submission active; CPD_READY can
+        # still be submitting legs in parallel with the diagram.
+        if phase in ("RUNNING", "CPD_READY", "ANALYZE_READY"):
             did = f"{sid}:dispatch:wave2"
             nodes[did] = Node(
                 id=did, kind="dispatch", label="wave2 dispatch", status="running"

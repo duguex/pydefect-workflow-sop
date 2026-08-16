@@ -27,12 +27,25 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # ── Phase constants ────────────────────────────────────────────────────────
+# Phases are ANALYSIS GATES, not submission gates (ADR 0026): submission is
+# unconditional per cycle (any dir whose inputs are ready gets submitted);
+# a phase says which downstream analysis is blocked and why.
+#   RUNNING         — some calculation is not converged yet (submit active)
+#   CPD_READY       — all cpd phases converged; chem-pot diagram not computed
+#   ANALYZE_READY   — CPD done + all legs converged; defect analysis not run
+#   COMPLETE        — defect analysis done
+#   NO_TARGET       — no host phase (chemical-environment absent target)
+RUNNING = "RUNNING"
+CPD_READY = "CPD_READY"
+ANALYZE_READY = "ANALYZE_READY"
+COMPLETE = "COMPLETE"
+NO_TARGET = "NO_TARGET"
+
+# Legacy phase names (pre-ADR 0026) — kept for log/compat greps only.
 STRUCTURE_OPT = "STRUCTURE_OPT"
 COMPETING = "COMPETING"
 CHEM_POT_DIAGRAM = "CHEM_POT_DIAGRAM"
 UNITCELL_DEFECT = "UNITCELL_DEFECT"
-COMPLETE = "COMPLETE"
-NO_TARGET = "NO_TARGET"
 
 _STATE_FILE = "state.json"  # legacy ADR 0001 marker; no longer read or written
 
@@ -183,140 +196,100 @@ class System:
         cpd_root = self.cpd_dir
         target_vertices = cpd_root / "target_vertices.yaml"
 
-        # ── Phase-persistence gate ─────────────────────────────────────
-        # Once target_vertices.yaml exists the system is irrevocably past
-        # COMPETING.  Downstream UC/DF can still cycle but we never return
-        # COMPETING again for this system.
-        if target_vertices.is_file():
-            # ── Phase gate audit (issue #93) ────────────────────────────
-            # Verify CPD artifacts are valid before allowing UNITCELL_DEFECT.
-            tv_size = target_vertices.stat().st_size
-            if tv_size == 0:
-                logger.error(
-                    "%s: PHASE GATE FAILED — target_vertices.yaml exists but is "
-                    "empty (0 bytes). Cannot advance to UNITCELL_DEFECT.",
-                    self.name,
-                )
-                return CHEM_POT_DIAGRAM
-            se_path = cpd_root / "standard_energies.yaml"
-            if not se_path.is_file():
-                logger.error(
-                    "%s: PHASE GATE FAILED — standard_energies.yaml missing. "
-                    "Cannot advance to UNITCELL_DEFECT.",
-                    self.name,
-                )
-                return CHEM_POT_DIAGRAM
+        # ── Gate 1: every cpd phase converged (target + competitors) ────
+        # RUNNING means "submit stays active"; the chem-pot diagram needs
+        # all cpd energies, so anything unconverged blocks it.
+        if not convergence_verdict(td).converged:
+            return RUNNING
+        for pd in sorted(cpd_root.iterdir()):
+            if not pd.is_dir() or pd.name == "combos":
+                continue
+            if self._is_excluded_phase(pd):
+                continue
+            if not convergence_verdict(pd).converged:
+                return RUNNING
+        # A `.failed` marker blocks CPD computation: a failed latest
+        # attempt cannot validate an older converged OUTCAR.  Once the
+        # diagram exists the system does not regress past it (parity with
+        # the pre-ADR 0026 persistence gate).
+        if not target_vertices.is_file() and self.competing_blockers(_js):
+            return RUNNING
 
-            # Chemical-environment scope (ADR 0005): COMPLETE is reached
-            # when the CPD is done — target_vertices + standard_energies
-            # (checked above) plus composition_energies, chem_pot_diag and
-            # every competing phase converged. No unit-cell/defect legs.
-            if self.is_chemical_environment:
-                if not (cpd_root / "composition_energies.yaml").is_file():
-                    return CHEM_POT_DIAGRAM
-                if not (cpd_root / "chem_pot_diag.json").is_file():
-                    return CHEM_POT_DIAGRAM
-                for pd in sorted(cpd_root.iterdir()):
-                    if not pd.is_dir() or pd.name == "combos":
-                        continue
-                    if self._is_excluded_phase(pd):
-                        continue
-                    if not convergence_verdict(pd).converged:
-                        return CHEM_POT_DIAGRAM
-                return COMPLETE
+        # ── Gate 2: CPD artifacts present (CPD_READY = diagram to run) ──
+        if not target_vertices.is_file():
+            return CPD_READY
+        if target_vertices.stat().st_size == 0:
+            logger.error(
+                "%s: PHASE GATE FAILED — target_vertices.yaml exists but is "
+                "empty (0 bytes). Re-run CPD post-processing.",
+                self.name,
+            )
+            return CPD_READY
+        for art in ("standard_energies.yaml", "composition_energies.yaml",
+                    "chem_pot_diag.json"):
+            if not (cpd_root / art).is_file():
+                return CPD_READY
 
-            uc_root = self.uc_dir
-            uc_tasks = ("band", "dos", "dielectric")
-            uc_has_inputs = any((uc_root / t / "INCAR").is_file() for t in uc_tasks)
-            if not uc_has_inputs:
-                return UNITCELL_DEFECT
-
-            if not (uc_root / "unitcell.yaml").is_file():
-                return UNITCELL_DEFECT
-            if not (cpd_root / "composition_energies.yaml").is_file():
-                return UNITCELL_DEFECT
-            if not (cpd_root / "standard_energies.yaml").is_file():
-                return UNITCELL_DEFECT
-            if not (cpd_root / "chem_pot_diag.json").is_file():
-                return UNITCELL_DEFECT
-
-            # COMPLETE means every calculation on disk has actually
-            # converged (ADR 0004): a dir that ran and failed, or was
-            # never prepared, keeps the system in UNITCELL_DEFECT.
-            # ``structure_opt`` is a staging copy, not a calculation;
-            # ``combos`` is the MP combo cache, not a phase.
-            for pd in sorted(cpd_root.iterdir()):
-                if not pd.is_dir() or pd.name == "combos":
-                    continue
-                if self._is_excluded_phase(pd):
-                    continue
-                if not convergence_verdict(pd).converged:
-                    return UNITCELL_DEFECT
-
-            uc_root = self.uc_dir
-            uc_tasks = ("band", "dos", "dielectric")
-            for task in uc_tasks:
-                task_dir = uc_root / task
-                if task_dir.is_dir() and not convergence_verdict(
-                    task_dir, task_type=task
-                ).converged:
-                    return UNITCELL_DEFECT
-
-            df_root = self.defect_dir
-            if not df_root.is_dir():
-                return UNITCELL_DEFECT
-
-            from vasp_sop.defect import is_anion_cation_antisite
-
-            # Only the valid defect set counts toward COMPLETE (ADR 0013):
-            # anion-cation antisites are excluded from the defect set and
-            # must not block the phase gate.  Everything else on disk —
-            # including never-prepared junk dirs (ADR 0004) — still blocks.
-            for d in sorted(df_root.iterdir()):
-                if not d.is_dir() or is_anion_cation_antisite(d.name):
-                    continue
-                if not convergence_verdict(d).converged:
-                    return UNITCELL_DEFECT
-
-            # Post-processing artifacts per defect dir (all converged dirs
-            # must carry them).
-            for d in df_root.iterdir():
-                if (
-                    not d.is_dir()
-                    or d.name == "perfect"
-                    or is_anion_cation_antisite(d.name)
-                ):
-                    continue
-                # Skip non-calculation subdirs (no VASP inputs / OUTCAR).
-                if (
-                    not input_ready(d)
-                    and not (d / "OUTCAR").is_file()
-                    and not (d / "output" / "OUTCAR").is_file()
-                ):
-                    continue
-                if not (d / "calc_results.json").is_file():
-                    return UNITCELL_DEFECT
-                if not (d / "correction.json").is_file():
-                    return UNITCELL_DEFECT
-                if not (d / "defect_structure_info.json").is_file():
-                    return UNITCELL_DEFECT
-
-            perfect = df_root / "perfect"
-            if perfect.is_dir() and not (perfect / "perfect_band_edge_state.json").is_file():
-                return UNITCELL_DEFECT
-
-            # Full analysis summary required — a partial one is not complete.
-            if not (df_root / "defect_energy_summary.json").is_file():
-                return UNITCELL_DEFECT
-
+        # Chemical-environment scope (ADR 0005): no unit-cell/defect legs;
+        # COMPLETE is reached when the CPD is done.
+        if self.is_chemical_environment:
             return COMPLETE
 
-        # ── Normal upstream progression (CPD not yet complete) ──────────
-        if _js.latest(str(td.resolve())) != "converged":
-            return STRUCTURE_OPT
-        if self.competing_dirs(_js) or self.competing_blockers(_js):
-            return COMPETING
-        return CHEM_POT_DIAGRAM
+        # ── Gate 3: every relaxation leg converged ──────────────────────
+        # unitcell single-points + perfect + defect chain (ADR 0013
+        # excludes anion-cation antisites from the blocking set).
+        uc_root = self.uc_dir
+        for task in ("band", "dos", "dielectric"):
+            task_dir = uc_root / task
+            if task_dir.is_dir() and not convergence_verdict(
+                task_dir, task_type=task
+            ).converged:
+                return RUNNING
+        df_root = self.defect_dir
+        if not df_root.is_dir():
+            return RUNNING
+        from vasp_sop.defect import is_anion_cation_antisite
+
+        for d in sorted(df_root.iterdir()):
+            if not d.is_dir() or is_anion_cation_antisite(d.name):
+                continue
+            if not convergence_verdict(d).converged:
+                return RUNNING
+
+        # ── Gate 4: defect-analysis artifacts present ───────────────────
+        # ANALYZE_READY = all legs done, analysis not run yet.
+        if not (uc_root / "unitcell.yaml").is_file():
+            return ANALYZE_READY
+        for d in df_root.iterdir():
+            if (
+                not d.is_dir()
+                or d.name == "perfect"
+                or is_anion_cation_antisite(d.name)
+            ):
+                continue
+            # Skip non-calculation subdirs (no VASP inputs / OUTCAR).
+            if (
+                not input_ready(d)
+                and not (d / "OUTCAR").is_file()
+                and not (d / "output" / "OUTCAR").is_file()
+            ):
+                continue
+            for art in ("calc_results.json", "correction.json",
+                        "defect_structure_info.json"):
+                if not (d / art).is_file():
+                    return ANALYZE_READY
+
+        perfect = df_root / "perfect"
+        if perfect.is_dir() and not (
+            perfect / "perfect_band_edge_state.json"
+        ).is_file():
+            return ANALYZE_READY
+
+        # Full analysis summary required — a partial one is not complete.
+        if not (df_root / "defect_energy_summary.json").is_file():
+            return ANALYZE_READY
+
+        return COMPLETE
 
     def _excluded_phases(self) -> set[str]:
         """Read ``cpd_excluded_phases.yaml`` from the system root (issue #93).

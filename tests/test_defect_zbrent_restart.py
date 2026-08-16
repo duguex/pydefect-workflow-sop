@@ -41,6 +41,9 @@ class _Sys:
     def phase(self) -> str:
         return "UNITCELL_DEFECT"
 
+    def competing_dirs(self, js):
+        return []
+
 
 def _call_wave2(sys, js, monkeypatch) -> list[tuple[str, str | None]]:
     from vasp_sop.core import orchestrator

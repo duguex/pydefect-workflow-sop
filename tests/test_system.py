@@ -9,12 +9,11 @@ from types import SimpleNamespace
 import pytest
 
 from vasp_sop.core.system import (
+    ANALYZE_READY,
+    CPD_READY,
     COMPLETE,
-    COMPETING,
-    CHEM_POT_DIAGRAM,
     NO_TARGET,
-    STRUCTURE_OPT,
-    UNITCELL_DEFECT,
+    RUNNING,
     System,
 )
 
@@ -201,7 +200,7 @@ class TestPhaseInference:
         td.mkdir(parents=True)
         # JobStore returns None (not converged)
         self._patch(monkeypatch, {})
-        assert s.phase() == STRUCTURE_OPT
+        assert s.phase() == RUNNING
 
     def test_competing_when_competing_dirs_exist(self, tmp_path: Path, monkeypatch):
         s = _make_system(tmp_path)
@@ -215,7 +214,7 @@ class TestPhaseInference:
 
         td_str = str(td.resolve())
         self._patch(monkeypatch, {td_str: "converged"}, input_ready=lambda d: True)
-        assert s.phase() == COMPETING
+        assert s.phase() == RUNNING
 
     def test_chem_pot_diagram_when_all_converged(self, tmp_path: Path, monkeypatch):
         s = _make_system(tmp_path)
@@ -223,8 +222,9 @@ class TestPhaseInference:
         td.mkdir(parents=True)
 
         td_str = str(td.resolve())
-        self._patch(monkeypatch, {td_str: "converged"})
-        assert s.phase() == CHEM_POT_DIAGRAM
+        self._patch(monkeypatch, {td_str: "converged"},
+                    verdict_converged=True)
+        assert s.phase() == CPD_READY
 
     def test_unitcell_defect_when_target_vertices_exists_but_no_uc_inputs(
         self, tmp_path: Path, monkeypatch
@@ -234,9 +234,9 @@ class TestPhaseInference:
         td.mkdir(parents=True)
         (s.cpd_dir / "target_vertices.yaml").write_text("target: {}")
         (s.cpd_dir / "standard_energies.yaml").write_text("GaN: {}")
-        # No unitcell INCAR files → UNITCELL_DEFECT
-        self._patch(monkeypatch, {})
-        assert s.phase() == UNITCELL_DEFECT
+        # No unitcell INCAR files → CPD_READY (diagram artifacts incomplete)
+        self._patch(monkeypatch, {}, verdict_converged=True)
+        assert s.phase() == CPD_READY
 
     @staticmethod
     def _build_complete_system(tmp_path: Path) -> tuple[System, Path]:
@@ -335,7 +335,10 @@ class TestPhaseInference:
 
         self._patch(monkeypatch, {}, input_ready=lambda d: True,
                     verdict_converged=True)
-        assert s.phase() == UNITCELL_DEFECT
+        # CPD artifacts exist in the shared scaffold; the valid defect
+        # dir is missing correction.json → ANALYZE_READY (analysis
+        # artifacts incomplete). Antisite exclusion still applies.
+        assert s.phase() == ANALYZE_READY
 
     def test_unitcell_defect_when_defect_missing_correction(self, tmp_path: Path, monkeypatch):
         s = _make_system(tmp_path)
@@ -366,8 +369,11 @@ class TestPhaseInference:
         perfect.mkdir()
         (perfect / "perfect_band_edge_state.json").write_text("{}")
 
-        self._patch(monkeypatch, {}, input_ready=lambda d: True)
-        assert s.phase() == UNITCELL_DEFECT
+        # All legs converged + CPD done; correction.json missing →
+        # ANALYZE_READY (analysis artifacts incomplete).
+        self._patch(monkeypatch, {}, verdict_converged=True,
+                    input_ready=lambda d: True)
+        assert s.phase() == ANALYZE_READY
 
 
 class TestChemicalEnvironmentScope:
@@ -421,7 +427,7 @@ class TestChemicalEnvironmentScope:
     def test_missing_artifacts_keeps_cpd(self, tmp_path, monkeypatch):
         s = self._ce_system(tmp_path, with_artifacts=False)
         self._patch(monkeypatch, {}, verdict_converged=True)
-        assert s.phase() == CHEM_POT_DIAGRAM
+        assert s.phase() == CPD_READY
 
     def test_unconverged_phase_keeps_cpd(self, tmp_path, monkeypatch):
         s = self._ce_system(tmp_path)
@@ -429,13 +435,13 @@ class TestChemicalEnvironmentScope:
         comp.mkdir()
         # verdict mock defaults to False -> competing phase not converged
         self._patch(monkeypatch, {})
-        assert s.phase() == CHEM_POT_DIAGRAM
+        assert s.phase() == RUNNING
 
     def test_defects_scope_unaffected(self, tmp_path, monkeypatch):
         """Default scope still requires the full defect workflow."""
         s = self._ce_system(tmp_path, scope="defects")  # no UC/defect dirs
         self._patch(monkeypatch, {}, verdict_converged=True)
-        assert s.phase() == UNITCELL_DEFECT
+        assert s.phase() == RUNNING
 
 
 # ── Stale JobStore 'converged' (ADR 0016 parity for cpd) ────────────────────

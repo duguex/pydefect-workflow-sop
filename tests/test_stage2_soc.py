@@ -121,6 +121,7 @@ class TestWave2Stage2Trigger:
             "cpd_dir": Path("/nonexistent/cpd"), "uc_dir": Path("/nonexistent/uc"),
             "defect_dir": df, "derive_phase": lambda self, js: "UNITCELL_DEFECT",
             "phase": lambda self: "UNITCELL_DEFECT",
+            "competing_dirs": lambda self, js: [],
         })()
 
     def test_trigger_submits_converged_dirs(self, tmp_path, monkeypatch):
