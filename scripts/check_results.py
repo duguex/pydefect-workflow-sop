@@ -513,10 +513,12 @@ def main() -> int:
                 if (els & collapse_elems) and ispin == "2" and abs(mag) < 1.0:
                     mag_collapse.append(f"{pname}(mag={mag:.1f})")
 
-        # 2b3b. MAGMOM 缺失(输入侧根因, 记录级):真磁性元素(INITIAL_MAGMOM
-        #       键)相 ISPIN=2 却无 MAGMOM 初始化 → SCF 从 VASP 默认 1.0/site
-        #       起跑,可落非磁鞍点(issue #151 Gd 4f 塌缩根因)。
-        mag_missing = []
+        # 2b3b. MAGMOM 缺失/磁性元素=0(输入侧根因, 记录级):真磁性元素
+        #       (INITIAL_MAGMOM 键)相 ISPIN=2 却无 MAGMOM 初始化或磁性
+        #       元素显式 0 → SCF 从 VASP 默认/错误起点跑,可落非磁鞍点
+        #       (issue #151 Gd 4f 塌缩; 2026-08-17 cpd Cr3[FeO6]2 等 14
+        #       个 vise 把 Cr 猜成 0)。紧凑格式(12*0.0 1*5.0)按原子序展开。
+        mag_bad = []
         for r in active:
             inc = r.get("incar", {})
             if not inc:
@@ -526,8 +528,40 @@ def main() -> int:
                 continue
             if inc.get("ISPIN") != "2":
                 continue
-            if "MAGMOM" not in inc:
-                mag_missing.append(Path(r["dir"]).name)
+            magm = inc.get("MAGMOM", "")
+            if not magm:
+                mag_bad.append(Path(r["dir"]).name)
+                continue
+            vals: list[float] = []
+            try:
+                for part in magm.replace(",", " ").split():
+                    if "*" in part:
+                        n, v = part.split("*")
+                        vals.extend([float(v)] * int(n))
+                    else:
+                        vals.append(float(part))
+            except ValueError:
+                mag_bad.append(f"{Path(r['dir']).name}(MAGMOM不可解析)")
+                continue
+            # 原子序物种: POSCAR 物种行 × 计数行(POTCAR 序=原子序)
+            rdir = Path(r["dir"])
+            species = poscar_species(rdir)
+            counts: list[int] = []
+            try:
+                lines = (rdir / "POSCAR").read_text(errors="ignore").splitlines()
+                if len(lines) > 6:
+                    counts = [int(x) for x in lines[6].split()]
+            except (OSError, ValueError):
+                counts = []
+            if not species or not counts or len(vals) != sum(counts):
+                continue  # 无法对齐,跳过(其他检查覆盖段数)
+            atoms: list[str] = []
+            for s, c in zip(species, counts):
+                atoms.extend([s] * c)
+            for s, v in zip(atoms, vals):
+                if s in INITIAL_MAGMOM and v == 0.0:
+                    mag_bad.append(f"{rdir.name}({s}=0)")
+                    break
 
         # 2b4. 磁矩漂移(同目录 *.log 序列, 记录级; |Δ|>--drift-mag μB)
         drift_warns = []
@@ -612,9 +646,9 @@ def main() -> int:
             record_warnings.append("磁矩塌缩: " + "; ".join(mag_collapse[:8]))
         if drift_warns:
             record_warnings.append("磁矩漂移: " + "; ".join(drift_warns[:8]))
-        if mag_missing:
+        if mag_bad:
             record_warnings.append(
-                f"无MAGMOM初始化({len(mag_missing)}): " + "; ".join(mag_missing[:8]))
+                f"MAGMOM缺失/磁性元素=0({len(mag_bad)}): " + "; ".join(mag_bad[:8]))
         if protocol_violations:
             record_warnings.append(
                 f"协议不符({len(protocol_violations)}): "

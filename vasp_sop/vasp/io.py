@@ -108,9 +108,17 @@ def prepare_inputs(
     #   - if inputs already complete: patch (idempotent retrofit) and return
     #   - else: run vise to generate, then patch (vise never sets SOC tags)
     # patch_incar is read-modify-write, so existing non-SOC tags are preserved.
+    # MAGMOM-only retrofit (content-aware): vise guesses initial moments by
+    # species and can set a magnetic element to 0 (e.g. Cr in Cr3[FeO6]2),
+    # and INCARs that pre-exist never went through the generate path —
+    # patch_incar_magmom is idempotent and no-ops on already-correct values.
+    # Deliberately NOT patching U/spin here: the branch cannot tell stage1
+    # from stage2 (two-phase DFT+U, ADR 0025) — spin falls out of
+    # patch_incar_u's apply path and U is owned by _submit_stage2.
     if input_ready(work_dir):
         logger.debug("VASP input already ready in %s", work_dir)
         _apply_soc_tags(work_dir, config, task_type)
+        patch_incar_magmom(work_dir)
         return
 
     if charge is not None:
@@ -521,6 +529,22 @@ def apply_final_protocol(work_dir: Path, config, task_type: str = "") -> None:
     patch_incar_u(work_dir, apply_u=True)
 
 
+def _magmom_values(text: str) -> list[float]:
+    """Expand a MAGMOM value string into floats (VASP compact form).
+
+    Accepts ``111*0.0 1*5.0`` (compact) and ``0.0 0.0 5.0`` (explicit).
+    Raises ValueError on unparseable input.
+    """
+    out: list[float] = []
+    for part in text.replace(",", " ").split():
+        if "*" in part:
+            n, v = part.split("*", 1)
+            out.extend([float(v)] * int(n))
+        else:
+            out.append(float(part))
+    return out
+
+
 def patch_incar_magmom(work_dir: Path) -> None:
     """Set MAGMOM in POSCAR atom order (0 for non-magnetic species).
 
@@ -540,7 +564,18 @@ def patch_incar_magmom(work_dir: Path) -> None:
     moments = magmom_values(species)
     if moments is None:
         return
-    patch_incar(work_dir, MAGMOM=" ".join(str(m) for m in moments))
+    want = " ".join(str(m) for m in moments)
+    # Content-aware: identical MAGMOM must not touch the file (mtime),
+    # otherwise every input_ready directory gets flagged as
+    # "INCAR newer than OUTCAR" and converged dirs are re-submitted.
+    # Compare numerically (VASP compact "12*0.0 1*5.0" vs expanded).
+    cur = read_incar(incar).get("MAGMOM", "")
+    try:
+        if _magmom_values(cur) == moments:
+            return
+    except ValueError:
+        pass  # unparseable -> fall through to rewrite
+    patch_incar(work_dir, MAGMOM=want)
 
 
 # ── POTCAR restore (ADR 0007: input restore) ─────────────────────────────

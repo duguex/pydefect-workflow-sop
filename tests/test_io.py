@@ -428,6 +428,47 @@ class TestMagmomPatch:
         io_mod.patch_incar_magmom(tmp_path)
         assert "MAGMOM" not in (tmp_path / "INCAR").read_text()
 
+    def test_identical_compact_magmom_not_rewritten(self, tmp_path: Path):
+        """Content-aware: an already-correct MAGMOM (in VASP compact form)
+        must not touch the file — else every input_ready dir gets flagged
+        "INCAR newer than OUTCAR" and converged dirs get re-submitted
+        (regression 2026-08-17)."""
+        from pymatgen.core import Lattice, Structure
+        from vasp_sop.vasp import io as io_mod
+
+        struct = Structure(Lattice.cubic(5.0), ["Sr", "Fe", "O"],
+                           [[0, 0, 0], [0.5, 0.5, 0.5], [0.25, 0.25, 0.25]])
+        struct.to(filename=str(tmp_path / "POSCAR"))
+        inc = tmp_path / "INCAR"
+        inc.write_text("ISPIN = 2\nMAGMOM = 1*0.0 1*5.0 1*0.0\n")
+        before = inc.stat().st_mtime_ns
+        import time as _t
+        _t.sleep(0.01)  # ensure a rewritable window for mtime comparison
+        io_mod.patch_incar_magmom(tmp_path)
+        after = inc.stat().st_mtime_ns
+        assert before == after, "identical MAGMOM must not touch mtime"
+
+    def test_wrong_magmom_rewritten(self, tmp_path: Path):
+        """Cr guessed to 0 by vise must be corrected to 5.0."""
+        from pymatgen.core import Lattice, Structure
+        from vasp_sop.vasp import io as io_mod
+
+        struct = Structure(Lattice.cubic(5.0), ["Cr", "Fe", "O"],
+                           [[0, 0, 0], [0.5, 0.5, 0.5], [0.25, 0.25, 0.25]])
+        struct.to(filename=str(tmp_path / "POSCAR"))
+        (tmp_path / "INCAR").write_text(
+            "ISPIN = 2\nMAGMOM = 1*0.0 1*5.0 1*0.0\n")
+        io_mod.patch_incar_magmom(tmp_path)
+        mag = next(l for l in io_mod.read_incar(tmp_path)["MAGMOM"].split() if True)
+        txt = (tmp_path / "INCAR").read_text()
+        vals = []
+        for part in io_mod.read_incar(tmp_path)["MAGMOM"].split():
+            if "*" in part:
+                n, v = part.split("*"); vals.extend([float(v)] * int(n))
+            else:
+                vals.append(float(part))
+        assert vals == [5.0, 5.0, 0.0], vals  # Cr/Fe=5, O=0
+
 
 class TestCpdEdiffProtocol:
     """CLI-path EDIFF=1e-4 (operator decision 2026-08-11, incl. cpd)."""
