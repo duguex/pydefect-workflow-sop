@@ -439,13 +439,23 @@ def ensure_target_results(
 
 
 def collect_cpd_phase_provenance(cpd_root: Path) -> dict[str, list[dict[str, str]]]:
-    """Record phase sources and reject duplicate reduced compositions."""
+    """Record phase sources and reject duplicate reduced compositions.
+
+    Excluded phases (``cpd_excluded_phases.yaml``, issue #93) are scope
+    decisions and never participate in the CPD — they are skipped here
+    too, so a same-composition metastable polymorph excluded in favour of
+    its ground-state sibling does not trip the duplicate gate
+    (2026-08-17: Li2ZnGe3O8 cpd had 6 compositions with 2-3 polymorphs).
+    """
     from pymatgen.core import Structure
 
     phases: list[dict[str, str]] = []
     by_composition: dict[str, list[str]] = {}
+    system_root = cpd_root.parent
     for phase_dir in sorted(cpd_root.iterdir()):
         if not phase_dir.is_dir():
+            continue
+        if is_excluded_phase(system_root, phase_dir):
             continue
         structure_path = phase_dir / "CONTCAR"
         if not structure_path.is_file():

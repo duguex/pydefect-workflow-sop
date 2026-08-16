@@ -173,6 +173,52 @@ class TestCpdMcePreflight:
         assert result.phase_dirs == ()
         assert result.ready is True
 
+    def test_provenance_skips_excluded_same_composition_polymorph(self, tmp_path: Path):
+        """An excluded same-composition metastable polymorph must not trip
+        the duplicate gate — the ground-state sibling is what enters the
+        convex hull (2026-08-17 Li2ZnGe3O8 cpd)."""
+        import pytest
+        from vasp_sop.defect.cpd import collect_cpd_phase_provenance
+
+        system = tmp_path / "system1"
+        cpd_root = system / "cpd"
+        cpd_root.mkdir(parents=True)
+        a = cpd_root / "Li2CrFeO4_mp-754348"   # excluded (metastable)
+        b = cpd_root / "Li2CrFeO4_mp-756242"   # kept (ground state)
+        a.mkdir(); b.mkdir()
+        for d in (a, b):
+            (d / "POSCAR").write_text(
+                "Li2CrFeO4\n1.0\n"
+                "8.0 0.0 0.0\n0.0 8.0 0.0\n0.0 0.0 8.0\n"
+                "Li Cr Fe O\n4 2 2 8\nDirect\n"
+                + "\n".join("0.1 0.1 0.1" for _ in range(16)) + "\n")
+        (system / "cpd_excluded_phases.yaml").write_text(
+            "- Li2CrFeO4_mp-754348\n")
+
+        provenance = collect_cpd_phase_provenance(cpd_root)
+
+        assert "Li2CrFeO4" in {p["composition"] for p in provenance["phases"]}
+        assert (cpd_root / "cpd_phase_provenance.yaml").is_file()
+
+    def test_provenance_rejects_duplicate_unexcluded_composition(self, tmp_path: Path):
+        """Without exclusion, same-composition polymorphs still trip the gate."""
+        import pytest
+        from vasp_sop.defect.cpd import collect_cpd_phase_provenance
+
+        system = tmp_path / "system2"
+        cpd_root = system / "cpd"
+        cpd_root.mkdir(parents=True)
+        for name in ("Li2CrFeO4_mp-754348", "Li2CrFeO4_mp-756242"):
+            d = cpd_root / name
+            d.mkdir()
+            (d / "POSCAR").write_text(
+                "Li2CrFeO4\n1.0\n"
+                "8.0 0.0 0.0\n0.0 8.0 0.0\n0.0 0.0 8.0\n"
+                "Li Cr Fe O\n4 2 2 8\nDirect\n"
+                + "\n".join("0.1 0.1 0.1" for _ in range(16)) + "\n")
+        with pytest.raises(ValueError, match="Duplicate CPD compositions"):
+            collect_cpd_phase_provenance(cpd_root)
+
 
     def test_compute_writes_blocked_preflight_before_mce(self, tmp_path, monkeypatch):
         phase = tmp_path / "NaCl_mp-1"
