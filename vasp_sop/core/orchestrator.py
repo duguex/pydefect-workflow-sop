@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any, Callable
@@ -370,11 +371,10 @@ def _submit_stage2(child: Path, sys: Any, js: Any, dry_run: bool,
     """
     from vasp_sop.vasp.io import apply_final_protocol
 
-    if not dry_run:
-        apply_final_protocol(child, sys.config, task_type)
-        cont = child / "CONTCAR"
-        if cont.is_file() and cont.stat().st_size > 0:
-            (child / "POSCAR").write_text(cont.read_text(errors="ignore"))
+    apply_final_protocol(child, sys.config, task_type)
+    cont = child / "CONTCAR"
+    if cont.is_file() and cont.stat().st_size > 0:
+        (child / "POSCAR").write_text(cont.read_text(errors="ignore"))
     _submit_or_skip(child, f"st2:{child.name}", sys.name, dry_run, info_fn,
                     js=js, source="stage2", priority=priority)
 
@@ -1313,6 +1313,22 @@ class BatchOrchestrator:
         self.dry_run = dry_run
         self.exclude = list(exclude or [])
         self._excluded_roots: list[Path] = []
+        self._dryrun_base: Path | None = None
+        if dry_run:
+            # Dry-run writes to an isolated mirror tree — never production
+            # (a dry-run pass must not patch/seed/restart real INCAR/POSCAR
+            # or write the shared JobStore; operator decision 2026-08-16).
+            import time as _t
+
+            from vasp_sop.core.paths import override_cache_root
+
+            self._dryrun_base = (
+                Path(os.environ.get("HOME", str(Path.home())))
+                / ".vasp_sop" / "dryrun"
+                / _t.strftime("%Y%m%d_%H%M%S")
+            )
+            self._dryrun_base.mkdir(parents=True, exist_ok=True)
+            override_cache_root(self._dryrun_base / ".vasp_sop")
         self.poll_interval = poll_interval
         self.loop = loop
         self.retry_failed = retry_failed
@@ -1345,6 +1361,48 @@ class BatchOrchestrator:
                 return 10 * (len(self.roots) - 1 - index)
         return 0
 
+    def _mirror_system(self, root: Path) -> Path:
+        """Mirror a system tree into the isolated dry-run base.
+
+        Inputs (INCAR/POSCAR/POTCAR/KPOINTS/CONTCAR + plan/defect_in +
+        json/yaml state) are copied so every write a dry-run pass performs
+        lands in the mirror; OUTCAR is symlinked so convergence verdicts
+        read the real production state without copying multi-MB outputs.
+        Returns the mirror root.
+        """
+        import os as _os
+        import shutil
+
+        dst = self._dryrun_base / root.name
+        if dst.exists():
+            shutil.rmtree(dst)
+        _COPY = {
+            "INCAR", "POSCAR", "POTCAR", "KPOINTS", "CONTCAR",
+            "plan.yaml", "defect_in.yaml",
+        }
+        copied = symlinked = 0
+        # Preserve the full directory skeleton (including empty dirs) —
+        # verdict/status logic keys on dir existence (e.g. defect_root).
+        for dirpath, dirnames, filenames in _os.walk(root):
+            rel_dir = Path(dirpath).relative_to(root)
+            (dst / rel_dir).mkdir(parents=True, exist_ok=True)
+            for name in filenames:
+                src = Path(dirpath) / name
+                rel = src.relative_to(root)
+                tgt = dst / rel
+                tgt.parent.mkdir(parents=True, exist_ok=True)
+                if name in _COPY or name.endswith((".json", ".yaml")):
+                    shutil.copy2(src, tgt)
+                    copied += 1
+                elif name == "OUTCAR":
+                    tgt.symlink_to(src)
+                    symlinked += 1
+        logger.info(
+            "dry-run mirror: %s -> %s (%d files copied, %d OUTCAR symlinked)",
+            root.name, dst, copied, symlinked,
+        )
+        return dst
+
     def _collect_systems(self) -> None:
         from vasp_sop.core.config import PipelineConfig
 
@@ -1375,6 +1433,13 @@ class BatchOrchestrator:
                 })
         if self.exclude:
             sys_list = [s for s in sys_list if s["name"] not in self.exclude]
+        if self.dry_run and self._dryrun_base is not None:
+            # Dry-run operates on isolated mirrors of the *kept* systems
+            # only — every write (seed/restart/patch/build) lands in the
+            # mirror, verdicts read the real OUTCAR via symlink. Excluded
+            # systems are never touched, not even mirrored.
+            for s in sys_list:
+                s["root"] = self._mirror_system(s["root"])
         self.systems = sys_list
         # Roots of excluded systems — the hard boundary for every global
         # sweep (_restore_crisp_active/_poll_tracked), not just advance.

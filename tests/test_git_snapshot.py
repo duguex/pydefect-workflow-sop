@@ -128,7 +128,7 @@ class TestOrchestratorSnapshots:
 
         from vasp_sop.core.orchestrator import BatchOrchestrator
 
-        orch = BatchOrchestrator(tmp_path / "p", dry_run=True)
+        orch = BatchOrchestrator(tmp_path / "p", dry_run=False)
         try:
             n = orch._git_snapshots()
             assert n == 2, n  # both systems baseline-committed

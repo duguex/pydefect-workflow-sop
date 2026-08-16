@@ -54,6 +54,10 @@ output/
 *.pdf
 *.html
 __pycache__/
+
+# crisp runtime markers (transient; can vanish mid-snapshot)
+.timeout
+.crisp-submission.json
 """
 
 _GIT_IDENTITY = ("vasp-sop", "vasp-sop@localhost")

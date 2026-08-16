@@ -39,7 +39,7 @@ class TestReconcileStaleConverged:
         _make_system(tmp_path / "p", with_defect=with_defect)
         # BatchOrchestrator's root is the parent: systems are discovered
         # as subdirectories carrying plan.yaml (production layout).
-        return BatchOrchestrator(tmp_path, dry_run=True)
+        return BatchOrchestrator(tmp_path, dry_run=False)
 
     def _patch(self, monkeypatch, converged: bool,
                reason: str = "missing_outcar"):

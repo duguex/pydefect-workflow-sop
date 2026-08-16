@@ -1944,6 +1944,9 @@ class TestBatchRunLoopObservability:
         tmp_path: Path,
         monkeypatch,
     ):
+        from vasp_sop.core.paths import override_cache_root
+
+        override_cache_root(tmp_path / ".vasp_sop")
         root = self._campaign(tmp_path)
         status = root / "GaN" / "unitcell" / "unitcell_build_status.json"
         monkeypatch.setattr(
@@ -1990,7 +1993,11 @@ class TestBatchRunLoopObservability:
 
         from vasp_sop.cli.main import _batch_run
 
-        _batch_run(root, poll_interval=0, dry_run=True, loop=True)
+        # Runtime-blocked detection reads unitcell_build_status.json written
+        # by the failing advance — dry_run isolation would hide it behind a
+        # stale mirror, so run with isolation off (tmp_path is already
+        # isolated; the store is redirected above).
+        _batch_run(root, poll_interval=0, dry_run=False, loop=True)
 
         assert len(advance_calls) == 1
         assert status.is_file()
@@ -2064,7 +2071,9 @@ class TestHandleUnconvergedPoll:
 
         from vasp_sop.core.orchestrator import BatchOrchestrator
 
-        orch = BatchOrchestrator(tmp_path, dry_run=True)
+        # Method-level test: assert chain_wait record in THIS test's JobStore
+        # (dry_run isolation would redirect the store — use real path).
+        orch = BatchOrchestrator(tmp_path, dry_run=False)
         orch.handle_unconverged(wd)
 
         assert (wd / "POSCAR").read_text() == "pristine\n"  # no restart
