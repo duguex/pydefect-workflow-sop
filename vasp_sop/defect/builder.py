@@ -61,14 +61,22 @@ def build_all(
     # inputs are broken and must not be submitted (charge errors are
     # silent killers — they ran to "completion" with wrong electron
     # counts in the 2025 tree).
-    problems = verify_nelect(defect_root, config)
+    # 修复优先:prepare_inputs 恢复 PSP 库 POTCAR 后,vise 按库 POTCAR 算的
+    # NELECT 可能与恢复后 ZVAL 不一致——按目录 POTCAR 重算修正(ADR 0025
+    # 增补),再重验确认全绿。
+    problems = verify_nelect(defect_root, config, fix=True)
     if problems:
-        for p in problems[:20]:
-            logger.error("NELECT verify: %s", p)
-        raise RuntimeError(
-            f"NELECT verification failed for {len(problems)} "
-            f"directory/directories (first: {problems[0] if problems else ''})"
-        )
+        remaining = verify_nelect(defect_root, config)
+        if remaining:
+            for p in remaining[:20]:
+                logger.error("NELECT verify: %s", p)
+            raise RuntimeError(
+                f"NELECT verification failed for {len(remaining)} "
+                f"directory/directories (first: {remaining[0] if remaining else ''})"
+            )
+        logger.info(
+            "NELECT: fixed %d dirs to on-disk POTCAR ZVALs (vise library "
+            "mismatch after POTCAR restore)", len(problems))
 
     # Write fingerprint *after* successful build.
     _write_fingerprint(defect_root, config)
@@ -323,15 +331,21 @@ def _generate_vasp_inputs(defect_root: Path, config: PipelineConfig) -> None:
             logger.warning("%s: input generation failed: %s", d.name, exc)
 
 
-def verify_nelect(defect_root: Path, config: PipelineConfig) -> list[str]:
+def verify_nelect(defect_root: Path, config: PipelineConfig,
+                  *, fix: bool = False) -> list[str]:
     """Verify NELECT in every defect INCAR against POSCAR×ZVAL − q.
 
     Returns a list of problem descriptions (empty when all correct).
     Neutral dirs (q=0) must have NO NELECT line (VASP default); charged
     dirs must carry exactly ΣNᵢZVALᵢ − q.  ZVALs come from each dir's
     own POTCAR, falling back to plan.yaml pp variants.
+
+    With ``fix=True``, mismatches are corrected in place: charged dirs
+    get NELECT = ΣNᵢZVALᵢ − q (from the on-disk POTCAR — the restored
+    PSP-library POTCAR is the submission truth, vise's library ZVALs may
+    differ, ADR 0025 addendum), neutral dirs lose a stray NELECT line.
     """
-    from vasp_sop.vasp.io import _pick_psp_variant
+    from vasp_sop.vasp.io import _pick_psp_variant, _strip_incar_tags, patch_incar
     from vasp_sop.defect import is_valid_defect_dir
     import re
 
@@ -403,15 +417,21 @@ def verify_nelect(defect_root: Path, config: PipelineConfig) -> list[str]:
                     f"{wd.name}: neutral but NELECT={actual:.0f} "
                     f"(should be absent, default {correct:.0f})"
                 )
+                if fix:
+                    _strip_incar_tags(wd, "NELECT")
         elif actual is None:
             problems.append(
                 f"{wd.name}: charged q={q} but NELECT missing "
                 f"(should be {correct:.0f})"
             )
+            if fix:
+                patch_incar(wd, NELECT=int(round(correct)))
         elif actual != correct:
             problems.append(
                 f"{wd.name}: NELECT={actual:.0f} != {correct:.0f} (q={q})"
             )
+            if fix:
+                patch_incar(wd, NELECT=int(round(correct)))
     return problems
 
 

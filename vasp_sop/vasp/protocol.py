@@ -70,10 +70,14 @@ TASK_TO_LEG: dict[str, str] = {
 # 元素子集与 check_results 一致。Gd=7.0 修复 SOC 无 MAGMOM 初始化导致
 # 的 Gd³⁺ 4f 磁矩塌缩(~0 μB,issue #151)。
 INITIAL_MAGMOM: dict[str, float] = {
+    # 3d 统一高自旋 5(2026-08-16 决策:初始磁矩是 SCF 起点,统一 5 简化;
+    # Mn²⁺/Fe³⁺ d⁵ 的 2S=5 是 3d 高自旋上限——起跑点足够把 SCF 推离
+    # 非磁鞍点,最终值由 SCF 收敛;Co³⁺ d⁶/Ni²⁺ d⁸ 略高但无害)
+    "Cr": 5.0,
     "Mn": 5.0,
     "Fe": 5.0,
-    "Co": 3.0,
-    "Ni": 2.0,
+    "Co": 5.0,
+    "Ni": 5.0,
     "Ce": 1.0, "Pr": 2.0, "Nd": 3.0, "Sm": 5.0, "Eu": 6.0, "Gd": 7.0,
     "Tb": 6.0, "Dy": 5.0, "Ho": 4.0, "Er": 3.0, "Tm": 2.0, "Yb": 1.0,
 }
@@ -86,6 +90,7 @@ _RE_ENMAX = re.compile(r"ENMAX\s*=\s*([\d.]+)")
 # 静默丢 Ti 标签,这里补丁保持 cpd/defect/band/dos 一致(ADR 0012)。
 U_TABLE: dict[str, tuple[float, int]] = {
     "Ti": (4.0, 2),
+    "Cr": (3.0, 2),  # 3d 过渡金属惯例(与 Mn/Fe 一致);2026-08-16 Li2ZnGe3O8 批决定
     "Mn": (3.0, 2), "Fe": (3.0, 2), "Co": (3.0, 2), "Ni": (3.0, 2),
     "Cu": (5.0, 2), "Zn": (5.0, 2),
     "Ce": (5.0, 3), "Pr": (5.0, 3), "Nd": (5.0, 3), "Sm": (5.0, 3),

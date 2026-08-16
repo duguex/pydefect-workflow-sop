@@ -487,7 +487,7 @@ def main() -> int:
                          "Ce", "Pr", "Nd", "Sm", "Eu", "Tb", "Dy", "Ho",
                          "Er", "Tm", "Yb", "Lu"}
         # 塌缩敏感元素: 3d/4f 磁序元素(Ti4+/Cu+/Zn2+ 无磁, 排除)
-        collapse_elems = {"Mn", "Fe", "Co", "Ni", "Gd",
+        collapse_elems = {"Cr", "Mn", "Fe", "Co", "Ni", "Gd",
                           "Ce", "Pr", "Nd", "Sm", "Eu", "Tb", "Dy",
                           "Ho", "Er", "Tm", "Yb", "Lu"}
         ispin_mismatch = []

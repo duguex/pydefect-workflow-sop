@@ -112,6 +112,15 @@ class TestMagmom:
         assert magmom_values([]) is None
         assert magmom_values(["O", "Ba", "Si"]) is None
 
+    def test_3d_unified_at_5(self):
+        # 3d 统一高自旋 5(2026-08-16 决策)——初始磁矩是 SCF 起点,
+        # Mn/Fe/Cr/Co/Ni 全部 5;Ti(d⁰)/Cu(d⁹ 弱)/Zn(d¹⁰) 不进表。
+        for el in ("Cr", "Mn", "Fe", "Co", "Ni"):
+            assert INITIAL_MAGMOM[el] == 5.0, el
+        assert magmom_values(["Cr", "O"]) == [5.0, 0.0]
+        for el in ("Ti", "Cu", "Zn"):
+            assert el not in INITIAL_MAGMOM, el
+
     def test_ti_alone_no_moment(self):
         # Ti4+ d0 无磁——magmom_values 不得因 Ti 返回非 None。
         assert magmom_values(["Ti", "O"]) is None

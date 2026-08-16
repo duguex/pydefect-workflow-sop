@@ -129,9 +129,17 @@ def _verify_dir(d: Path) -> list[str]:
             if [f"{v:g}" for v in got_vals] != [f"{v:g}" for v in want]:
                 problems.append(f"MAGMOM={got}(应 {' '.join(f'{v:g}' for v in want)})")
 
-    # ── LDAU:U 元素 → LDAUU/LDAUL 按元素序匹配协议表───────────────
+    # ── LDAU:U 元素 → LDAUU/LDAUL 按元素序匹配协议表────────────────
+    # 两阶段(ADR 0025):弛豫腿 stage1 无 LDAU 是协议预期(自旋段保留,
+    # U 由 stage2 补充)——只在目录已达最终协议(含 LSORBIT 或单点腿)
+    # 时要求 LDAU。
     if els & set(U_TABLE):
-        if str(incar.get("LDAU", "")).lower() not in (".true.", "true"):
+        final_stage = (str(incar.get("LSORBIT", "")).lower() == ".true."
+                       or kind in ("unitcell/band", "unitcell/dos",
+                                   "unitcell/dielectric"))
+        if not final_stage:
+            pass  # stage1:无 LDAU 预期(记录级待 stage2)
+        elif str(incar.get("LDAU", "")).lower() not in (".true.", "true"):
             problems.append(f"LDAU={incar.get('LDAU')}(应 .TRUE.:U 元素 {sorted(els & set(U_TABLE))})")
         else:
             ordered = list(dict.fromkeys(species))
