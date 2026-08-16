@@ -465,13 +465,19 @@ def patch_incar_u(work_dir: Path, *, apply_u: bool = False) -> None:
     incar = work_dir / "INCAR"
     if not incar.is_file():
         return
-    species = _poscar_species(work_dir / "POSCAR") or []
+    # VASP's LDAUU/LDAUL rows are per POTCAR species, and POTCAR is
+    # ordered by the POSCAR species line — which may repeat an element
+    # for split sites (e.g. "Li Zn Li Ge O Cr": Li1/Li2 are two VASP
+    # species).  The species LINE (not the deduped element set) is the
+    # authoritative count; a short LDAUL row makes VASP abort with
+    # "Error reading item LDAUL (IERR=5)" (2026-08-17 Li2ZnGe3O8 Cr
+    # defects).  Fall back to deduped per-atom symbols only when the
+    # POSCAR has no species line (VASP4 format).
+    species = _poscar_species_line(work_dir / "POSCAR")
+    if species is None:
+        species = list(dict.fromkeys(_poscar_species(work_dir / "POSCAR") or []))
     if not species:
         return
-    # _poscar_species returns per-atom symbols (pymatgen iterates the
-    # structure); VASP's LDAUU/LDAUL rows are per POTCAR species, so
-    # dedupe keeping order.
-    species = list(dict.fromkeys(species))
     # ISPIN=2 for any U-table species: vise's cpd template leaves spin
     # polarization out even for magnetic FeO.
     if any(s in U_TABLE for s in species):
@@ -537,13 +543,25 @@ def _poscar_species(poscar: Path) -> list[str] | None:
         return [str(sp.specie) for sp in structure]
     except Exception:
         pass
+    return _poscar_species_line(poscar)
+
+
+def _poscar_species_line(poscar: Path) -> list[str] | None:
+    """The POSCAR species line, verbatim (VASP/POTCAR species order).
+
+    The same element may appear more than once for split sites (e.g.
+    Li1/Li2 → ``Li Zn Li Ge O Cr``); VASP counts each entry as a
+    separate species, so the line's length — not the unique-element
+    count — drives per-species tags like LDAUU/LDAUL.  ``None`` when
+    the POSCAR has no symbol line (VASP4 format: line 6 holds counts).
+    """
     try:
         lines = poscar.read_text().splitlines()
         for line in lines[5:9]:
             parts = line.split()
             if parts and all(p[:1].isalpha() and p[0].isupper() for p in parts):
                 return parts
-    except Exception:
+    except OSError:
         return None
     return None
 

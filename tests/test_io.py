@@ -232,6 +232,30 @@ class TestPatchIncarU:
         assert "LDAUL = 3 -1" in txt
         assert "LMAXMIX = 6" in txt
 
+    def test_split_site_species_line_not_deduped(self, tmp_path: Path):
+        """A POSCAR species line that repeats an element (Li1/Li2 split
+        sites, e.g. "Li Zn Li Ge O Cr") must yield one LDAUL/LDAUU value
+        per VASP species, not per unique element.
+
+        Regression: 2026-08-17 Li2ZnGe3O8 Cr defects crashed at startup
+        with "Error reading item LDAUL from file INCAR (IERR=5)" — the
+        deduped row had 5 values against 6 POTCAR species.
+        """
+        from vasp_sop.vasp.io import patch_incar_u
+        d = tmp_path / "calc"
+        d.mkdir()
+        (d / "INCAR").write_text("NSW = 50\n")
+        (d / "POSCAR").write_text(
+            "title\n1.0\n"
+            "10.0 0.0 0.0\n0.0 10.0 0.0\n0.0 0.0 10.0\n"
+            "Li Zn Li Ge O Cr\n1 1 1 1 1 1\nDirect\n"
+            "0 0 0\n0.5 0.5 0.5\n0.25 0.25 0.25\n0.75 0.75 0.75\n"
+            "0.1 0.1 0.1\n0.2 0.2 0.2\n")
+        patch_incar_u(d, apply_u=True)
+        txt = (d / "INCAR").read_text()
+        assert "LDAUU = 0 5.0 0 0 0 3.0" in txt, txt
+        assert "LDAUL = -1 2 -1 -1 -1 2" in txt, txt
+
 
 class TestDielectricProtocol:
     """DFPT dielectric INCAR protocol: NSW=1, LREAL=.FALSE., no SOC tags —
