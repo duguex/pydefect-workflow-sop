@@ -577,17 +577,16 @@ class TestHtmlTemplate:
         # Typeset title (HTML <sub>) and display-name segment map.
         assert "CsPbBr<sub>3</sub>" in html
         assert '"Bi_Pb1": [["n", "Bi"], ["s", "Pb1"]]' in html
-        # Chemical-potential card and responsive native chart sizing.
+        # Chemical-potential card and fixed canvas dimensions.
         assert "当前化学条件" in html
         assert "拖动滑块逐元素调节" in html
         assert "function buildMuPanel" in html
         assert "function updateMuPanel" in html
         assert "function updateSelectionCard" in html
         assert "devicePixelRatio" in html
-        assert "function layout" in html
+        assert "Fixed canvas dimensions" in html
         assert "fe-tip" in html
         assert "fe-note" in html
-        assert "matchMedia" in html
         # Inspector/legend use typeset HTML names.
         assert "function segHtml" in html
         assert "class='csub'" in html

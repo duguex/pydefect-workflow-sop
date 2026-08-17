@@ -167,6 +167,94 @@ def _extract_vertex_data(
 
 
 # ═════════════════════════════════════════════════════════════════════
+# Defect local structure extraction
+# ═════════════════════════════════════════════════════════════════════
+
+def _extract_defect_structure(
+    system_dir: Path, defect_name: str, charge: int, cutoff: float = 5.0
+) -> dict[str, Any] | None:
+    """Extract local structure around a defect.
+    
+    Reads defect_entry.json, identifies the defect center atom, and extracts
+    all atoms within cutoff distance. Returns JSON with atoms list and metadata.
+    """
+    import numpy as np
+    
+    # Find defect directory
+    defect_dir = system_dir / "defect" / f"{defect_name}_{charge}"
+    if not defect_dir.exists():
+        for d in (system_dir / "defect").iterdir():
+            if d.is_dir() and d.name.startswith(defect_name):
+                defect_dir = d
+                break
+        else:
+            return None
+    
+    defect_entry_path = defect_dir / "defect_entry.json"
+    if not defect_entry_path.exists():
+        return None
+    
+    with open(defect_entry_path) as f:
+        defect_data = json.load(f)
+    
+    structure = defect_data["structure"]
+    sites = structure["sites"]
+    
+    # Parse defect name to identify center atom
+    parts = defect_name.split("_")
+    defect_species = parts[0] if len(parts) >= 2 else defect_name
+    host_site = parts[1] if len(parts) >= 2 else None
+    
+    # Find defect center atom
+    defect_center_idx = None
+    for i, site in enumerate(sites):
+        label = site.get("label", "")
+        species = site["species"][0]["element"]
+        
+        if defect_species != "Va" and species == defect_species:
+            if host_site and host_site in label:
+                defect_center_idx = i
+                break
+            elif not host_site:
+                defect_center_idx = i
+                break
+    
+    if defect_center_idx is None:
+        defect_center_idx = 0
+    
+    center_xyz = np.array(sites[defect_center_idx]["xyz"])
+    
+    # Extract atoms within cutoff
+    atoms = []
+    for i, site in enumerate(sites):
+        xyz = np.array(site["xyz"])
+        distance = float(np.linalg.norm(xyz - center_xyz))
+        
+        if distance <= cutoff or i == defect_center_idx:
+            atoms.append({
+                "element": site["species"][0]["element"],
+                "x": round(float(xyz[0]), 4),
+                "y": round(float(xyz[1]), 4),
+                "z": round(float(xyz[2]), 4),
+                "is_defect": i == defect_center_idx,
+                "is_neighbor": distance <= cutoff and i != defect_center_idx,
+                "distance": round(distance, 4),
+                "label": site.get("label", ""),
+            })
+    
+    return {
+        "atoms": atoms,
+        "metadata": {
+            "defect_name": defect_name,
+            "charge": charge,
+            "formula": defect_data.get("formula", ""),
+            "cutoff": cutoff,
+            "num_atoms": len(atoms),
+        },
+    }
+
+
+# ═════════════════════════════════════════════════════════════════════
 # Defect data (filtered, corrected)
 # ═════════════════════════════════════════════════════════════════════
 
@@ -486,7 +574,7 @@ def _cpd_canvas_js(
 
     common = f"""
 var cc = document.getElementById("cpd"), cctx = cc.getContext("2d");
-var cW = 300, cH = 300, cP = {{l:35,r:10,t:20,b:25}};
+var cW = 600, cH = 450, cP = {{l:35,r:10,t:20,b:25}};
 /* ── HiDPI: backing store scaled by devicePixelRatio; logical coords
  * remain cW×cH so all drawing code below is resolution-independent. ── */
 var DPR = window.devicePixelRatio || 1;
@@ -1480,12 +1568,26 @@ canvas{{display:block;background:var(--canvas);border:1px solid var(--line);bord
 <header class="report-head"><h2>{title_html}</h2><span class="report-kicker">Defect thermodynamics</span></header>
 <main class="report-grid">
 <section class="report-card" id="cpdCard"><header class="report-card__head"><h3>化学势稳定区</h3><span class="report-card__hint">拖动或点击选择化学条件</span></header><div class="report-card__body cpd-card__body">
-<canvas id="cpd" width="420" height="420"></canvas>
+<canvas id="cpd" width="600" height="450"></canvas>
 <section class="selection-card" aria-live="polite"><div class="selection-card__head"><span class="selection-card__title">当前化学条件</span><span id="selection-state" class="selection-card__state">区域内插值</span></div><div id="selection-constraints" class="selection-card__constraints"></div><div id="selection-mu" class="selection-card__mu"></div><div class="mupanel"><div class="mupanel-title">化学势 μ (eV) · 拖动滑块逐元素调节 · 点「固定」约束该元素并绘制截面</div><div id="murows"></div></div></section>
 </div></section>
-<section class="report-card" id="feCard"><header class="report-card__head"><h3>缺陷形成能</h3><span class="report-card__hint">移动查询 E<sub>F</sub></span></header><div class="report-card__body"><div class="fe-workspace"><div class="fe-plot"><canvas id="cv" width="800" height="520"></canvas><div class="leg" id="leg"></div><div class="fe-note">查询层按 E<sub>f</sub> 降序列出当前可见缺陷 · 本征缺陷 · 1000 K · 未含自由载流子</div></div></div></div></section>
+<section class="report-card" id="feCard"><header class="report-card__head"><h3>缺陷形成能</h3><span class="report-card__hint">移动查询 E<sub>F</sub></span></header><div class="report-card__body"><div class="fe-workspace"><div class="fe-plot"><canvas id="cv" width="600" height="450"></canvas><div class="leg" id="leg"></div><div class="fe-note">查询层按 E<sub>f</sub> 降序列出当前可见缺陷 · 本征缺陷 · 1000 K · 未含自由载流子</div></div></div></div></section>
+<section class="report-card" id="structureCard" style="grid-column: 1 / -1;"><header class="report-card__head"><h3>缺陷局域结构</h3><span class="report-card__hint">选择缺陷查看 3D 结构</span></header><div class="report-card__body">
+<div id="structure-viewer" style="width:100%;height:500px;position:relative;">
+<div id="viewer3d" style="width:100%;height:100%;"></div>
+<div id="atom-info" style="position:absolute;top:10px;right:10px;background:rgba(255,255,255,0.95);padding:10px;border-radius:8px;display:none;font-size:12px;box-shadow:0 2px 8px rgba(0,0,0,0.1);"></div>
+</div>
+<div style="margin-top:10px;display:flex;gap:20px;align-items:center;">
+<div style="flex:1;"><label style="font-size:12px;font-weight:600;color:var(--text-secondary);">近邻距离 cutoff:</label>
+<input type="range" id="cutoff-slider" min="2" max="10" value="5" step="0.5" style="width:100%;margin-top:5px;">
+<span id="cutoff-value" style="font-size:12px;color:var(--text-muted);">5.0 Å</span></div>
+<div id="defect-selector" style="flex:1;"><label style="font-size:12px;font-weight:600;color:var(--text-secondary);">选择缺陷:</label>
+<select id="defect-select" style="width:100%;margin-top:5px;padding:6px;border:1px solid var(--line);border-radius:4px;font-size:13px;"></select></div>
+</div>
+</div></section>
 <div id="tip" class="fe-tip"></div>
 </main>
+<script src="https://3Dmol.org/build/3Dmol-min.js"></script>
 <script>"""
 
 _COMMON_JS_DECLS = """var DEF = {def_json};
@@ -1496,13 +1598,14 @@ var names = {names_json};
 var DISP = {disp_json};
 var MAG = {mag_json};
 var VOX = {vox_json};
+var STRUCTURES = {structures_json};
 var nEF = 200;
 var hidden = {{}}; names.forEach(function(n){{hidden[n]=false;}});
 """
 
 _FE_CANVAS_JS = """
 var cv=document.getElementById("cv"), cx=cv.getContext("2d");
-var W=800, H=520, P={l:64,r:20,t:24,b:52};
+var W=600, H=450, P={l:64,r:20,t:24,b:52};
 /* ── HiDPI: same pattern as CPD canvas ── */
 var dpr = window.devicePixelRatio || 1;
 cv.width = W * dpr; cv.height = H * dpr;
@@ -1895,22 +1998,171 @@ Object.keys(CATS).forEach(function(base){
   g.appendChild(h);CATS[base].forEach(function(d){g.appendChild(d);});leg.appendChild(g);
 });
 
-// Responsive sizing: each scientific card owns its native chart ratio.
-// On narrow displays the CSS grid stacks the two cards.
-function layout(){
-  var dpr=window.devicePixelRatio||1;
-  var cpdCard=document.getElementById("cpdCard");
-  var cw=Math.max(250,Math.min(520,cpdCard.clientWidth-30));
-  cc.width=cw*dpr;cc.height=cw*dpr;cc.style.width=cw+"px";cc.style.height=cw+"px";
-  cctx.setTransform(dpr,0,0,dpr,0,0);cW=cw;cH=cw;
-  var plot=cv.parentElement,fw=Math.max(300,Math.round(plot.clientWidth));
-  var fh=Math.max(360,Math.min(640,Math.round(fw*.72)));
-  cv.width=fw*dpr;cv.height=fh*dpr;cv.style.width=fw+"px";cv.style.height=fh+"px";
-  cx.setTransform(dpr,0,0,dpr,0,0);W=fw;H=fh;
-  if(curMu)update(curMu);
+// ── 3D Viewer for defect local structures ──
+var viewer3d = null;
+var currentDefect = null;
+var currentCharge = null;
+var currentCutoff = 5.0;
+
+function init3DViewer() {
+  var viewerDiv = document.getElementById("viewer3d");
+  if (!viewerDiv || typeof $3Dmol === 'undefined') return;
+  
+  viewer3d = $3Dmol.createViewer(viewerDiv, {backgroundColor: "white"});
+  
+  var select = document.getElementById("defect-select");
+  if (select) {
+    Object.keys(DEF).forEach(function(name) {
+      DEF[name].charges.forEach(function(c) {
+        var opt = document.createElement("option");
+        opt.value = name + "_" + c.q;
+        opt.textContent = name + " (q=" + c.q + ")";
+        select.appendChild(opt);
+      });
+    });
+    
+    if (select.options.length > 0) {
+      select.selectedIndex = 0;
+      loadDefectStructure(select.value);
+    }
+    
+    select.onchange = function() {
+      loadDefectStructure(this.value);
+    };
+  }
+  
+  var slider = document.getElementById("cutoff-slider");
+  var valueDisplay = document.getElementById("cutoff-value");
+  if (slider) {
+    slider.oninput = function() {
+      currentCutoff = parseFloat(this.value);
+      if (valueDisplay) valueDisplay.textContent = currentCutoff.toFixed(1) + " Å";
+      if (currentDefect !== null) {
+        loadDefectStructure(currentDefect + "_" + currentCharge);
+      }
+    };
+  }
 }
-window.addEventListener("resize",layout);
-layout();
+
+function loadDefectStructure(defectChargeStr) {
+  if (!viewer3d) return;
+  
+  var parts = defectChargeStr.split("_");
+  if (parts.length < 2) return;
+  
+  var charge = parseInt(parts[parts.length - 1]);
+  var defectName = parts.slice(0, -1).join("_");
+  
+  currentDefect = defectName;
+  currentCharge = charge;
+  
+  // Use embedded STRUCTURES data instead of API call
+  if (STRUCTURES && STRUCTURES[defectName] && STRUCTURES[defectName][charge]) {
+    var data = STRUCTURES[defectName][charge];
+    renderDefectStructure(data);
+  } else {
+    console.warn("No structure data for", defectName, "q=", charge);
+  }
+}
+
+function renderDefectStructure(data) {
+  if (!viewer3d || !data || !data.atoms) return;
+  
+  viewer3d.removeAllModels();
+  
+  var xyz = data.atoms.length + "\\n" + data.metadata.defect_name + " (q=" + data.metadata.charge + ")\\n";
+  data.atoms.forEach(function(atom) {
+    xyz += atom.element + " " + atom.x.toFixed(4) + " " + atom.y.toFixed(4) + " " + atom.z.toFixed(4) + "\\n";
+  });
+  
+  viewer3d.addModel(xyz, "xyz");
+  viewer3d.setStyle({}, {stick: {radius: 0.1, opacity: 0.7}, sphere: {scale: 0.3, opacity: 0.8}});
+  
+  data.atoms.forEach(function(atom, idx) {
+    if (atom.is_defect) {
+      viewer3d.setStyle({serial: idx}, {sphere: {scale: 0.5, color: "red", opacity: 1.0}});
+    } else if (atom.is_neighbor) {
+      viewer3d.setStyle({serial: idx}, {sphere: {scale: 0.35, color: "yellow", opacity: 0.9}});
+    }
+  });
+  
+  viewer3d.setClickable({}, true, function(atom) {
+    showAtomInfo(atom, data.atoms[atom.serial]);
+  });
+  
+  viewer3d.zoomTo();
+  viewer3d.render();
+}
+
+function showAtomInfo(viewerAtom, atomData) {
+  var infoDiv = document.getElementById("atom-info");
+  if (!infoDiv) return;
+  
+  var html = "<strong>" + atomData.element + "</strong><br>";
+  html += "位置: (" + atomData.x.toFixed(2) + ", " + atomData.y.toFixed(2) + ", " + atomData.z.toFixed(2) + ")<br>";
+  html += "距离: " + atomData.distance.toFixed(2) + " Å<br>";
+  if (atomData.is_defect) {
+    html += "<span style='color:red;font-weight:bold;'>缺陷中心</span>";
+  } else if (atomData.is_neighbor) {
+    html += "<span style='color:orange;'>近邻原子</span>";
+  }
+  
+  infoDiv.innerHTML = html;
+  infoDiv.style.display = "block";
+  
+  setTimeout(function() {
+    infoDiv.style.display = "none";
+  }, 5000);
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", init3DViewer);
+} else {
+  init3DViewer();
+}
+
+// Link legend clicks with 3D viewer
+function linkLegendWith3DViewer() {
+  var legDiv = document.getElementById("leg");
+  if (!legDiv) return;
+  
+  legDiv.addEventListener("click", function(e) {
+    var target = e.target;
+    while (target && target !== legDiv) {
+      if (target.getAttribute && target.getAttribute("data-name")) {
+        var defectName = target.getAttribute("data-name");
+        var select = document.getElementById("defect-select");
+        if (select) {
+          // Find the first charge state for this defect
+          for (var i = 0; i < select.options.length; i++) {
+            if (select.options[i].value.startsWith(defectName + "_")) {
+              select.selectedIndex = i;
+              loadDefectStructure(select.value);
+              // Scroll to 3D viewer
+              var structureCard = document.getElementById("structureCard");
+              if (structureCard) {
+                structureCard.scrollIntoView({behavior: "smooth", block: "nearest"});
+              }
+              break;
+            }
+          }
+        }
+        break;
+      }
+      target = target.parentElement;
+    }
+  });
+}
+
+// Call linkLegendWith3DViewer after DOM is ready
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", linkLegendWith3DViewer);
+} else {
+  linkLegendWith3DViewer();
+}
+
+// Fixed canvas dimensions: both canvases are 600×450.
+// No responsive resizing — dimensions are set in HTML and JS.
 update(curMu);
 </script></body></html>"""
 
@@ -1932,12 +2184,13 @@ def _html_template(
     exo_elements: list[str],
     mags: dict[str, dict[int, float]] | None = None,
     vox: dict[str, dict[str, Any]] | None = None,
+    defect_structures: dict[str, dict[int, dict[str, Any]]] | None = None,
 ) -> str:
     """Render the self-contained interactive HTML page."""
     js = json.dumps
     mags = mags or {}
     vox = vox or {}
-
+    defect_structures = defect_structures or {}
     # Compute impurity elements (in vertex_mu but not host vertex_elements)
     host_set = set(vertex_elements)
     impurity_set: set[str] = set()
@@ -1977,6 +2230,10 @@ def _html_template(
                          for n, qm in mags.items()}),
             vox_json=js({n: vox.get(n, {"p": "?", "h": None})
                          for n in sorted_names}),
+            structures_json=js({
+                name: {str(q): data for q, data in charges.items()}
+                for name, charges in defect_structures.items()
+            }),
         )
         + "\n" + cpd_js + "\n" + fe_canvas + fermi_js + "\n" + _COMMON_JS_FOOTER
     )
@@ -2040,6 +2297,16 @@ def generate_interactive_html(system_dir: Path) -> Path | None:
             "ion-valence labels render as ?", host_name, host_name,
         )
 
+    # Extract defect structures for 3D viewer (pre-loaded, no API needed)
+    defect_structures = {}
+    for name in sorted_names:
+        defect_structures[name] = {}
+        for charge_data in defects[name]["charges"]:
+            charge = int(charge_data["q"])
+            structure = _extract_defect_structure(system_dir, name, charge, cutoff=5.0)
+            if structure:
+                defect_structures[name][charge] = structure
+
     ref_mu: dict[str, float] = vertex_mu[0] if vertex_mu else {}
 
     if len(vertex_elements) >= 2:
@@ -2077,6 +2344,7 @@ def generate_interactive_html(system_dir: Path) -> Path | None:
         exo_elements=exo_elements,
         mags=mags,
         vox=vox,
+        defect_structures=defect_structures,
     )
 
     out_path = system_dir / "formation_energy_interactive.html"
