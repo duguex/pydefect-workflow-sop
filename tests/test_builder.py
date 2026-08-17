@@ -43,55 +43,10 @@ class TestBuildAll:
         with pytest.raises(FileNotFoundError, match="POSCAR"):
             build_all(defect_root, target_dir, config)
 
-    def test_sync_lattice_from_perfect(self, tmp_path: Path):
-        """Perfect(ISIF=3)收敛后,其晶格同步到全部 defect POSCAR——
-        只换晶格,原子坐标(缺陷结构)不变;perfect 未收敛则不动。"""
-        from pymatgen.core import Lattice, Structure
-        from vasp_sop.defect import builder as b
-
-        defect_root = tmp_path / "defect"
-        perfect = defect_root / "perfect"
-        a_def = defect_root / "Bi_Gd1_0"
-        perfect.mkdir(parents=True)
-        a_def.mkdir(parents=True)
-
-        # perfect 弛豫晶格(ISIF=3 后)与构建晶格不同。
-        build_lattice = Lattice.from_parameters(10.0, 10.0, 12.5, 90, 90, 90)
-        relaxed_lattice = Lattice.from_parameters(10.253, 10.253, 12.5, 90, 90, 90)
-        Structure(build_lattice, ["Gd", "O"], [[0, 0, 0], [0.5, 0.5, 0.5]]) \
-            .to(fmt="poscar", filename=str(perfect / "CONTCAR"))
-        def_struct = Structure(build_lattice, ["Gd", "O"], [[0, 0, 0], [0.5, 0.5, 0.5]])
-        def_struct.to(fmt="poscar", filename=str(a_def / "POSCAR"))
-
-        # 未同步前:构建晶格(对称)。
-        before = Structure.from_file(str(a_def / "POSCAR"))
-        assert before.lattice.a == pytest.approx(10.0)
-
-        n = b.sync_lattice_from_perfect(defect_root)
-        assert n == 1
-        after = Structure.from_file(str(a_def / "POSCAR"))
-        assert after.lattice.a == pytest.approx(10.253)
-        # 原子坐标/组成不变(只换晶格)。
-        assert [str(s.species_string) for s in after] == ["Gd", "O"]
-        assert after.frac_coords[0].tolist() == pytest.approx([0.0, 0.0, 0.0])
-
-    def test_sync_skips_when_perfect_unconverged(self, tmp_path: Path):
-        from vasp_sop.defect import builder as b
-
-        defect_root = tmp_path / "defect"
-        perfect = defect_root / "perfect"
-        perfect.mkdir(parents=True)
-        a_def = defect_root / "Bi_Gd1_0"
-        a_def.mkdir(parents=True)
-        from pymatgen.core import Lattice, Structure
-        Structure(Lattice.cubic(10.0), ["Gd"], [[0, 0, 0]]) \
-            .to(fmt="poscar", filename=str(a_def / "POSCAR"))
-        # perfect 无 CONTCAR → 同步为 no-op。
-        assert b.sync_lattice_from_perfect(defect_root) == 0
-
-    def test_perfect_incar_gets_isif3(self, tmp_path: Path, monkeypatch):
-        """2026-08-16 协议修正:perfect 无缺陷超胞 ISIF=3(晶格弛豫);
-        普通 defect 保持 ISIF=2(固定 perfect 晶格)。"""
+    def test_perfect_incar_gets_no_isif3_patch(self, tmp_path: Path, monkeypatch):
+        """2026-08-17 策略:不再有 perfect ISIF=3 弛豫——perfect 与普通
+        defect 走同一条 prepare_inputs 路径,INCAR 不再被 patch 成 ISIF=3
+        (一律 ISIF=2 固定构建晶格)。"""
         from vasp_sop.defect import builder as b
 
         defect_root = tmp_path / "defect"
@@ -100,7 +55,7 @@ class TestBuildAll:
         perfect.mkdir(parents=True)
         a_def.mkdir(parents=True)
         # prepare_inputs 被 mock 成"生成过 INCAR"(实际不写), 触发
-        # perfect 的 ISIF=3 patch;input_ready 恒 False 走生成分支。
+        # 生成分支;input_ready 恒 False 走生成分支。
         calls: list[str] = []
         monkeypatch.setattr(
             "vasp_sop.vasp.io.prepare_inputs",
@@ -114,9 +69,15 @@ class TestBuildAll:
                              supercell_min_atoms=100, supercell_max_atoms=600)
         b._generate_vasp_inputs(defect_root, cfg)
 
-        perfect_incar = (perfect / "INCAR").read_text()
-        assert "ISIF = 3" in perfect_incar, perfect_incar
-        assert "ISIF" not in (a_def / "INCAR").read_text()
+        # 与 defect 完全同路径:perfect 不写 INCAR 文件,更无 ISIF=3。
+        assert not (perfect / "INCAR").is_file()
+        assert not (a_def / "INCAR").is_file()
+
+    def test_no_lattice_sync_api(self):
+        """2026-08-17 策略:sync_lattice_from_perfect 已移除——不再有
+        perfect 晶格同步步骤(晶格在超胞构建时一次定死)。"""
+        from vasp_sop.defect import builder as b
+        assert not hasattr(b, "sync_lattice_from_perfect")
 
 
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")

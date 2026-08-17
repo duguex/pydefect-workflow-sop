@@ -702,22 +702,11 @@ def wave2_submit(
 
     # Submit defect directories
     if df_root.is_dir() and not (df_root / "defect_energy_summary.json").is_file():
-        # 2026-08-16:perfect(ISIF=3)收敛后,先同步其晶格到全部 defect
-        # POSCAR(只换晶格,结构不变——构建已早于晶格弛豫完成,等价格位
-        # 正确)。未收敛时 no-op:defect 暂以构建晶格提交,后续 perfect
-        # 收敛后同步并重提由操作员决定。
-        if perfect_dir.is_dir() and convergence_verdict(perfect_dir).converged:
-            try:
-                from vasp_sop.defect.builder import sync_lattice_from_perfect
-
-                n_synced = sync_lattice_from_perfect(df_root)
-                if n_synced:
-                    logger.info(
-                        "%s: synced perfect lattice to %d defect dirs",
-                        sys.name, n_synced,
-                    )
-            except Exception as exc:  # noqa: BLE001
-                logger.error("%s lattice sync failed: %s", sys.name, exc)
+        # 2026-08-17 策略:晶格在超胞构建时一次定死,perfect 与全部 defect
+        # 一律 ISIF=2 固定该晶格——不再有 perfect ISIF=3 弛豫,也不再做
+        # 晶格同步(旧 sync_lattice_from_perfect 已移除)。缺陷按构建晶格
+        # 提交即可,perfect 与其共享同一晶格,analyze 的 efnv 晶格比对
+        # 天然一致。
         from vasp_sop.vasp.io import (
             has_vasprun,
             recover_vasprun_artifacts,

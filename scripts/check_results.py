@@ -468,10 +468,8 @@ def main() -> int:
             if kind == "cpd" and Path(r["dir"]).name.startswith("mol_"):
                 continue  # 分子相固定 cell 合法
             expect = isif_protocol.get(kind)
-            if kind == "defect" and Path(r["dir"]).name == "perfect":
-                # 2026-08-16 协议修正:无缺陷超胞晶格自由弛豫(ISIF=3),
-                # 其晶格作为全部 defect 的固定参考(ISIF=2)。
-                expect = "3"
+            # 2026-08-17 策略:perfect 不再 ISIF=3(与全部 defect 同为
+            # ISIF=2 固定构建晶格),无特殊豁免。
             if expect and r.get("isif") not in (None, expect):
                 isif_violations.append(f"{Path(r['dir']).name}(ISIF={r['isif']}≠{expect})")
 

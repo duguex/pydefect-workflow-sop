@@ -30,8 +30,8 @@ MP 公式搜索默认按 material_id 升序返回，`_docs[0]` = id 最小的多
 1. **代码修复**（`config.py` fallback）：公式搜索后按 `energy_above_hull` 升序取最低相，不再取 `_docs[0]`；若最低相 e_above_hull > 0.05 eV/atom，打告警日志要求人确认。对“唯一条目”体系不受影响。
 2. **重建范围**：Y₂Ti₂O₇ 用 mp-5373（Fd-3m），BaAl₄O₇ 用 mp-1019534；两体系全量重建（unitcell → supercell → cpd 主相 → defect 枚举 → 全部缺陷 → 解析产物）。旧缺陷树/解析产物全部归档作废，不迁移不混用。
 3. **重建协议**（仅重建两体系；其余 8 体系维持现状，结果表带 protocol 标签不静默合并）：
-   - 宿主晶格：perfect 先 ISIF=3 弛豫得到平衡晶格；
-   - 缺陷：一律 ISIF=2 固定该平衡晶格；
+   - 宿主晶格：~~perfect 先 ISIF=3 弛豫得到平衡晶格~~ **（2026-08-17 修订：不再进行 perfect ISIF=3 弛豫，也不再做晶格更新——晶格在超胞构建时一次定死（unitcell CONTCAR），perfect 与全部缺陷一律 ISIF=2 固定该晶格；`sync_lattice_from_perfect` 已从代码移除，见 builder.py / orchestrator.py）**；
+   - 缺陷：一律 ISIF=2 固定该晶格；
    - 超胞：Y₂Ti₂O₇ 从 88 原子常规胞（min_distance=10）起步，验收门不过再升级；
    - ENCUT：按体系默认（plan `encut: null`），不固定跨体系值（2026-08-14 用户裁定：ENCUT 跟随体系）；其余电子参数沿用（PBEsol、Ti U=4、两阶段 SOC per ADR 0014/0022）。
 4. **验收门**（任一不满足即回查，不逐级放宽）：
@@ -56,3 +56,4 @@ MP 公式搜索默认按 material_id 升序返回，`_docs[0]` = id 最小的多
 
 - 诊断与复核：2026-08-14 会话，MP API 复核 10 体系；StructureMatcher 判定两案例宿主身份错误（Y₂Ti₂O₇: local fit mp-1173093=True / mp-5373=False；BaAl₄O₇: local fit mp-1019532=True / mp-1019534=False）。
 - 术语：CONTEXT.md 新增「参考相」「宿主身份」。
+- 2026-08-17 修订：perfect ISIF=3 弛豫 + 晶格同步导致 Li₂ZnGe₃O₈ analyze 卡死（defect 与 perfect 弛豫晶格 0.36% 分歧，pydefect efnv `SupercellError`，174/174 correction 失败）——策略改为 perfect 不再 ISIF=3、不再做晶格更新；代码移除 `sync_lattice_from_perfect`（builder.py/orchestrator.py）与 perfect ISIF=3 patch，check_results.py 的 perfect 豁免同步删除。
