@@ -244,7 +244,7 @@ def _add_report_parser(subparsers) -> None:
     report_parser.add_argument(
         "--interactive",
         action="store_true",
-        help="Generate interactive formation-energy HTML instead of Markdown",
+        help="Generate interactive formation-energy HTML for the crisp webui (not a standalone artifact)",
     )
 
 

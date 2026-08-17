@@ -487,6 +487,14 @@ def _cpd_canvas_js(
     common = f"""
 var cc = document.getElementById("cpd"), cctx = cc.getContext("2d");
 var cW = 300, cH = 300, cP = {{l:35,r:10,t:20,b:25}};
+/* ── HiDPI: backing store scaled by devicePixelRatio; logical coords
+ * remain cW×cH so all drawing code below is resolution-independent. ── */
+var DPR = window.devicePixelRatio || 1;
+cc.width = cW * DPR; cc.height = cH * DPR;
+cc.style.width = cW + "px"; cc.style.height = cH + "px";
+cctx.scale(DPR, DPR);
+var FONT_SANS = "-apple-system,BlinkMacSystemFont,'Segoe UI','Inter','Helvetica Neue',Arial,'Noto Sans',sans-serif";
+var FONT_MONO = "'JetBrains Mono','Fira Code',ui-monospace,SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace";
 var POLY = {js(poly_2d)};   // 2D projection — spring-layout seed only
 var VPHASES = {js(vertex_phases)};
 var VERTEX_MU = {js(vertex_mu)};
@@ -910,7 +918,7 @@ function drawEdgeLabel(i,j){{
   var px=cP.l+cx*(cW-cP.l-cP.r),py=cP.t+cy*(cH-cP.t-cP.b);
   if((mx-px)*nx+(my-py)*ny<0){{nx=-nx;ny=-ny;}}
   var tx=mx+nx*11,ty=my+ny*11;
-  cctx.font="600 10px Arial";cctx.textAlign="center";cctx.textBaseline="middle";
+  cctx.font="600 11px "+FONT_SANS;cctx.textAlign="center";cctx.textBaseline="middle";
   var w=cctx.measureText(ph).width+8;
   cctx.fillStyle="rgba(255,255,255,0.88)";
   cctx.fillRect(tx-w/2,ty-8,w,16);
@@ -1205,7 +1213,7 @@ function pickMu(px,py){{
         return common + f"""
 function drawCPD(mu){{
   cctx.clearRect(0,0,cW,cH);
-  cctx.fillStyle="#555";cctx.font="21px Arial";cctx.textAlign="center";
+  cctx.fillStyle="#64748b";cctx.font="500 13px "+FONT_SANS;cctx.textAlign="center";
   cctx.fillText("mu fixed at vertex {vertex_names[0]}",cW/2,cH/2);
 }}
 var curMu=JSON.parse(JSON.stringify(VERTEX_MU[0]));
@@ -1216,10 +1224,10 @@ function drawCPD(mu){{
   cctx.clearRect(0,0,cW,cH);
   if(SECTION){{
     if(SECTION.empty){{
-      cctx.fillStyle="#555";cctx.font="19px Arial";cctx.textAlign="center";
+      cctx.fillStyle="#64748b";cctx.font="500 13px "+FONT_SANS;cctx.textAlign="center";
       cctx.fillText("约束下无稳定区",cW/2,cH/2-10);
       var fixDesc=SECTION.fe.map(function(e){{return "μ_"+e+"="+SECTION.cv[e].toFixed(2);}}).join(" · ");
-      cctx.font="13px Arial";
+      cctx.font="400 12px "+FONT_SANS;
       cctx.fillText(fixDesc,cW/2,cH/2+12);
       return;
     }}
@@ -1228,7 +1236,7 @@ function drawCPD(mu){{
       cctx.beginPath();
       ord.forEach(function(vi,i){{var p=layPx(SECTION.xy[vi]);i===0?cctx.moveTo(p[0],p[1]):cctx.lineTo(p[0],p[1]);}});
       cctx.closePath();
-      cctx.fillStyle="rgba(22,155,120,0.10)";cctx.fill();
+      cctx.fillStyle="rgba(29,78,216,0.10)";cctx.fill();
       cctx.strokeStyle="#475569";cctx.lineWidth=2;cctx.stroke();
       for(var e2=0;e2<ord.length;e2++){{
         var ph=sectionLabel(e2,(e2+1)%ord.length);
@@ -1241,7 +1249,7 @@ function drawCPD(mu){{
         var px0=cP.l+cx*(cW-cP.l-cP.r),py0=cP.t+cy*(cH-cP.t-cP.b);
         if((mx-px0)*nx+(my-py0)*ny<0){{nx=-nx;ny=-ny;}}
         var tx=mx+nx*11,ty=my+ny*11;
-        cctx.font="600 10px Arial";cctx.textAlign="center";cctx.textBaseline="middle";
+        cctx.font="600 11px "+FONT_SANS;cctx.textAlign="center";cctx.textBaseline="middle";
         var w=cctx.measureText(ph).width+8;
         cctx.fillStyle="rgba(255,255,255,0.88)";cctx.fillRect(tx-w/2,ty-8,w,16);
         cctx.fillStyle="#374151";cctx.fillText(ph,tx,ty+1);
@@ -1254,7 +1262,7 @@ function drawCPD(mu){{
       cctx.beginPath();cctx.moveTo(a[0],a[1]);cctx.lineTo(b2[0],b2[1]);cctx.stroke();
       var ph=sectionLabel(0,ord.length-1);
       if(ph){{
-        cctx.font="600 10px Arial";cctx.textAlign="center";cctx.textBaseline="middle";
+        cctx.font="600 11px "+FONT_SANS;cctx.textAlign="center";cctx.textBaseline="middle";
         var w=cctx.measureText(ph).width+8;
         cctx.fillStyle="rgba(255,255,255,0.88)";cctx.fillRect((a[0]+b2[0])/2-w/2,(a[1]+b2[1])/2-8,w,16);
         cctx.fillStyle="#374151";cctx.fillText(ph,(a[0]+b2[0])/2,(a[1]+b2[1])/2+1);
@@ -1267,7 +1275,7 @@ function drawCPD(mu){{
     if(mu){{
       var p=secPos(mu);
       cctx.beginPath();cctx.arc(p[0],p[1],6,0,2*Math.PI);
-      cctx.fillStyle="#169b78";cctx.fill();
+      cctx.fillStyle="#1d4ed8";cctx.fill();
       cctx.strokeStyle=hullState(mu).inside?"#fff":"#e11d48";
       cctx.lineWidth=2;cctx.stroke();
     }}
@@ -1282,7 +1290,7 @@ function drawCPD(mu){{
     [0,1].forEach(function(vi){{
       var ph=(VPHASES[vi].competing||[]).join(" · ");
       var p=layPx(LAY[vi]);
-      cctx.font="600 10px Arial";cctx.textAlign="center";cctx.textBaseline="middle";
+      cctx.font="600 11px "+FONT_SANS;cctx.textAlign="center";cctx.textBaseline="middle";
       var w=cctx.measureText(ph).width+8;
       var tx=p[0],ty=p[1]+(vi===0?-16:16);
       cctx.fillStyle="rgba(255,255,255,0.88)";cctx.fillRect(tx-w/2,ty-8,w,16);
@@ -1294,7 +1302,7 @@ function drawCPD(mu){{
     cctx.beginPath();
     order2.forEach(function(vi,i){{var p=layPx(LAY[vi]);i===0?cctx.moveTo(p[0],p[1]):cctx.lineTo(p[0],p[1]);}});
     cctx.closePath();
-    cctx.fillStyle="rgba(22,155,120,0.10)";cctx.fill();
+    cctx.fillStyle="rgba(29,78,216,0.10)";cctx.fill();
     cctx.strokeStyle="#475569";cctx.lineWidth=2;cctx.stroke();
     EDGES.forEach(function(e){{drawEdgeLabel(e[0],e[1]);}});
   }}else{{
@@ -1306,7 +1314,7 @@ function drawCPD(mu){{
         i===0?cctx.moveTo(p[0],p[1]):cctx.lineTo(p[0],p[1]);
       }});
       cctx.closePath();
-      cctx.fillStyle="rgba(22,155,120,0.07)";
+      cctx.fillStyle="rgba(29,78,216,0.07)";
       cctx.fill();
     }});
     cctx.strokeStyle="#d8e0ea";cctx.lineWidth=1;
@@ -1334,7 +1342,7 @@ function drawCPD(mu){{
   if(mu){{
     var p=markerPos(mu);
     cctx.beginPath();cctx.arc(p[0],p[1],6,0,2*Math.PI);
-    cctx.fillStyle="#169b78";cctx.fill();
+    cctx.fillStyle="#1d4ed8";cctx.fill();
     cctx.strokeStyle=hullState(mu).inside?"#fff":"#e11d48";
     cctx.lineWidth=2;cctx.stroke();
   }}
@@ -1353,54 +1361,121 @@ VERTEX_MU.forEach(function(vm){{for(var e in vm)if(vm[e]!==undefined)curMu[e]=(c
 _COMMON_HTML_HEAD = """<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{title} Formation Energy</title>
+<title>{title} · Defect thermodynamics</title>
 <style>
-:root{{--ink:#172033;--muted:#657084;--line:#dbe1e9;--grid:#e9edf2;--card:#fff;--canvas:#fbfcfe;--accent:#169b78;--accent-soft:#e7f6f1}}
+/* ── Design tokens (duplicated from crisp webui light theme) ────────
+ * Source: crisp/frontend/src/styles/tokens.css :root[data-theme="light"].
+ * Self-contained: no external stylesheet fetch — the report must render
+ * identically when served through the webui iframe and when the HTML file
+ * is opened from disk. Update both places in lockstep.
+ * ─────────────────────────────────────────────────────────────────── */
+:root{{
+  --surface-base:#f7f8fa;--surface-raised:#fff;--surface-sunken:#eef0f4;
+  --surface-divider:#d6dae3;
+  --text-primary:#0f172a;--text-secondary:#475569;--text-muted:#64748b;
+  --text-inverse:#fff;
+  --accent-primary:#1d4ed8;--accent-primary-hover:#1e40af;
+  --accent-soft:#dbeafe;
+  --tone-info-text:#1d4ed8;--tone-info-soft:#dbeafe;
+  --radius-sm:4px;--radius-md:8px;--radius-lg:12px;
+  --space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;
+  --space-5:20px;--space-6:24px;
+  --shadow-sm:0 1px 2px rgba(15,23,42,.06);
+  --shadow-md:0 4px 12px rgba(15,23,42,.08);
+  --shadow-lg:0 12px 32px rgba(15,23,42,.12);
+  --font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI","Inter",
+    "Helvetica Neue",Arial,"Noto Sans",sans-serif;
+  --font-mono:"JetBrains Mono","Fira Code",ui-monospace,SFMono-Regular,
+    Consolas,"Liberation Mono",Menlo,monospace;
+  --fs-xs:.75rem;--fs-sm:.875rem;--fs-base:1rem;
+  --fs-lg:1.125rem;--fs-xl:1.25rem;
+  --fw-regular:400;--fw-medium:500;--fw-semibold:600;--fw-bold:700;
+  --lh-tight:1.2;--lh-normal:1.5
+}}
+/* Internal aliases — so existing class rules and canvas-color constants
+ * below keep reading familiar names while inheriting the webui values. */
+:root{{
+  --ink:var(--text-primary);--muted:var(--text-muted);
+  --line:var(--surface-divider);--grid:#e9edf2;
+  --card:var(--surface-raised);--canvas:var(--surface-base);
+  --accent:var(--accent-primary)
+}}
+
 *{{box-sizing:border-box}}
-html,body{{min-height:100%;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;margin:0;background:#f4f6f9;color:var(--ink)}}
-body{{padding:14px}}
-h2{{margin:0;font-size:17px;letter-spacing:-.01em}}
-.report-head{{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin:0 0 12px}}
-.report-kicker{{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--accent)}}
-.report-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:start;position:relative;max-width:1240px;margin:0 auto}}
-.report-card{{min-width:0;background:var(--card);border:1px solid var(--line);border-radius:10px;box-shadow:0 1px 2px rgba(15,23,42,.04);overflow:hidden}}
-.report-card__head{{display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:11px 13px 9px;border-bottom:1px solid var(--line)}}
-.report-card__head h3{{margin:0;font-size:13px;letter-spacing:.01em}}
-.report-card__hint{{font-size:11px;color:var(--muted)}}
-.report-card__body{{padding:12px}}
-.cpd-card__body{{display:flex;flex-direction:column;align-items:center;gap:10px}}
-canvas{{display:block;background:var(--canvas);border:1px solid var(--line);border-radius:7px}}
-.selection-card{{width:100%;border:1px solid var(--line);border-radius:7px;background:#f8fafc;padding:10px 11px}}
-.selection-card__head{{display:flex;justify-content:space-between;gap:8px;align-items:baseline;margin-bottom:7px}}
-.selection-card__title{{font-size:12px;font-weight:700}}
-.selection-card__state{{font-size:11px;color:var(--accent);font-weight:650}}
-.selection-card__constraints{{font-size:12px;line-height:1.45;color:#39465b;min-height:18px}}
-.selection-card__mu{{margin:7px 0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;line-height:1.45;color:#4c596d;word-break:break-word}}
-.mupanel{{font-size:12px;color:#444}}
-.mupanel-title{{font-size:11px;font-weight:700;color:var(--muted);margin:2px 0 5px;letter-spacing:.02em}}
-.murow{{display:grid;grid-template-columns:30px 42px 1fr 42px 34px;gap:6px;align-items:center;margin:3px 0}}
-.muel{{font-weight:700;color:#334155}}.mumin,.mumax{{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:10px;color:#7b8797;text-align:right}}
-.muslider{{width:100%;height:16px;accent-color:var(--accent);margin:0;cursor:pointer}}
-.mufix{{font-size:10px;line-height:1;padding:3px 0;border:1px solid var(--line);border-radius:5px;background:#fff;color:#64748b;cursor:pointer;font-weight:700}}
-.mufix.on{{background:var(--accent);border-color:var(--accent);color:#fff}}
+html,body{{min-height:100%;margin:0}}
+body{{
+  font-family:var(--font-sans);font-size:var(--fs-base);
+  line-height:var(--lh-normal);color:var(--text-primary);
+  background:var(--surface-base);
+  -webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;
+  padding:var(--space-5)
+}}
+h2{{margin:0;font-size:var(--fs-xl);font-weight:var(--fw-semibold);line-height:var(--lh-tight);letter-spacing:-.01em}}
+h3{{font-size:var(--fs-sm);font-weight:var(--fw-semibold);line-height:var(--lh-tight)}}
+
+.report-head{{display:flex;align-items:baseline;justify-content:space-between;gap:var(--space-3);margin:0 0 var(--space-4)}}
+.report-kicker{{font-size:var(--fs-xs);font-weight:var(--fw-bold);letter-spacing:.08em;text-transform:uppercase;color:var(--accent-primary)}}
+
+.report-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--space-5);align-items:start;position:relative;max-width:1240px;margin:0 auto}}
+.report-card{{min-width:0;background:var(--card);border:1px solid var(--line);border-radius:var(--radius-lg);box-shadow:var(--shadow-sm);overflow:hidden}}
+.report-card__head{{display:flex;align-items:baseline;justify-content:space-between;gap:var(--space-2);padding:var(--space-3) var(--space-4);border-bottom:1px solid var(--line)}}
+.report-card__hint{{font-size:var(--fs-xs);color:var(--text-muted)}}
+.report-card__body{{padding:var(--space-4)}}
+
+.cpd-card__body{{display:flex;flex-direction:column;align-items:center;gap:var(--space-3)}}
+canvas{{display:block;background:var(--canvas);border:1px solid var(--line);border-radius:var(--radius-md)}}
+
+.selection-card{{width:100%;border:1px solid var(--line);border-radius:var(--radius-md);background:var(--surface-sunken);padding:var(--space-3)}}
+.selection-card__head{{display:flex;justify-content:space-between;gap:var(--space-2);align-items:baseline;margin-bottom:var(--space-2)}}
+.selection-card__title{{font-size:var(--fs-sm);font-weight:var(--fw-bold);color:var(--text-primary)}}
+.selection-card__state{{font-size:var(--fs-xs);color:var(--accent-primary);font-weight:var(--fw-semibold)}}
+.selection-card__constraints{{font-size:var(--fs-sm);line-height:var(--lh-normal);color:var(--text-secondary);min-height:18px}}
+.selection-card__mu{{margin:var(--space-2) 0;font-family:var(--font-mono);font-size:var(--fs-xs);line-height:var(--lh-normal);color:var(--text-secondary);word-break:break-word;font-variant-numeric:tabular-nums}}
+
+.mupanel{{font-size:var(--fs-sm);color:var(--text-secondary)}}
+.mupanel-title{{font-size:var(--fs-xs);font-weight:var(--fw-bold);color:var(--text-muted);margin:var(--space-1) 0 var(--space-2);letter-spacing:.04em;text-transform:uppercase}}
+.murow{{display:grid;grid-template-columns:30px 42px 1fr 42px 34px;gap:var(--space-2);align-items:center;margin:3px 0}}
+.muel{{font-weight:var(--fw-bold);color:var(--text-primary)}}
+.mumin,.mumax{{font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-muted);text-align:right;font-variant-numeric:tabular-nums}}
+.muslider{{width:100%;height:16px;accent-color:var(--accent-primary);margin:0;cursor:pointer;transition:opacity .15s ease}}
+.muslider:hover{{opacity:.85}}
+.muslider:active{{opacity:1}}
+.mufix{{font-size:var(--fs-xs);line-height:1;padding:var(--space-1) 0;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--card);color:var(--text-muted);cursor:pointer;font-weight:var(--fw-bold);transition:all .12s ease}}
+.mufix:hover{{border-color:var(--accent-primary);color:var(--accent-primary)}}
+.mufix:focus-visible{{outline:none;box-shadow:var(--focus-ring)}}
+.mufix.on{{background:var(--accent-primary);border-color:var(--accent-primary);color:var(--text-inverse)}}
+.mufix.on:hover{{background:var(--accent-primary-hover)}}
 .muslider:disabled{{opacity:.45;cursor:not-allowed}}
+
 .fe-workspace{{display:block}}
 .fe-plot{{min-width:0;position:relative}}
-.fe-tip{{position:absolute;z-index:40;display:none;overflow-y:auto;background:#fff;border:1px solid var(--line);border-radius:8px;box-shadow:0 6px 18px rgba(15,23,42,.16);padding:8px 10px;font-size:14px}}
-.fe-tip__head{{font-size:11px;font-weight:700;color:var(--accent);margin-bottom:4px}}
-.fe-tip__foot{{font-size:10px;color:var(--muted);margin-top:4px}}
-.fe-tip .row{{display:grid;grid-template-columns:10px minmax(0,1fr) auto auto;gap:8px;align-items:center;padding:4px 2px;border-bottom:1px solid #eef2f6;font-size:14px}}
+
+.fe-tip{{position:absolute;z-index:40;display:none;overflow-y:auto;background:var(--card);border:1px solid var(--line);border-radius:var(--radius-md);box-shadow:var(--shadow-lg);padding:var(--space-2) var(--space-3);font-size:var(--fs-sm);animation:feTipFadeIn .15s ease-out}}
+@keyframes feTipFadeIn{{from{{opacity:0;transform:translateY(-4px)}}to{{opacity:1;transform:translateY(0)}}}}
+.fe-tip__head{{font-size:var(--fs-xs);font-weight:var(--fw-bold);color:var(--accent-primary);margin-bottom:var(--space-1);text-transform:uppercase;letter-spacing:.04em}}
+.fe-tip__foot{{font-size:var(--fs-xs);color:var(--text-muted);margin-top:var(--space-1)}}
+.fe-tip .row{{display:grid;grid-template-columns:10px minmax(0,1fr) auto auto;gap:var(--space-2);align-items:center;padding:var(--space-1);border-bottom:1px solid var(--surface-sunken);font-size:var(--fs-sm)}}
 .fe-tip .row:last-child{{border-bottom:0}}
 .fe-tip .swatch{{width:8px;height:8px;border-radius:50%}}
-.fe-tip .tnamebox{{display:flex;align-items:center;gap:6px;min-width:0}}
+.fe-tip .tnamebox{{display:flex;align-items:center;gap:var(--space-2);min-width:0}}
 .fe-tip .tname{{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
-.fe-tip .tspin{{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;color:#7b8797;text-align:right;white-space:nowrap}}
-.fe-tip .tenergy{{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:#4c596d}}
-.fe-note{{font-size:10px;color:var(--muted);margin-top:8px;line-height:1.4}}
-.leg{{display:flex;flex-wrap:wrap;gap:5px;margin-top:10px}}.leg-group{{display:flex;flex-wrap:wrap;gap:4px;min-width:0;margin:2px 0;padding:2px 4px;border-left:2px solid #dfe6ee}}.leg>div{{display:flex;align-items:center;gap:3px;font-size:12px;cursor:pointer;padding:2px 5px;border-radius:3px}}.leg>div:hover{{background:#eef3f6}}.leg-cat{{font-size:10px!important;font-weight:700;color:var(--accent);flex-basis:100%}}.leg-cat:hover{{background:var(--accent-soft)!important}}
-.csub{{font-size:.72em;vertical-align:sub}}.csup{{font-size:.72em;vertical-align:super}}
+.fe-tip .tspin{{font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-muted);text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}}
+.fe-tip .tenergy{{font-family:var(--font-mono);font-size:var(--fs-sm);color:var(--text-secondary);font-variant-numeric:tabular-nums}}
+
+.fe-note{{font-size:var(--fs-xs);color:var(--text-muted);margin-top:var(--space-2);line-height:var(--lh-normal)}}
+
+.leg{{display:flex;flex-wrap:wrap;gap:var(--space-1);margin-top:var(--space-3)}}
+.leg-group{{display:flex;flex-wrap:wrap;gap:var(--space-1);min-width:0;margin:var(--space-1) 0;padding:var(--space-1);border-left:2px solid var(--surface-divider)}}
+.leg>div{{display:flex;align-items:center;gap:3px;font-size:var(--fs-sm);cursor:pointer;padding:2px var(--space-1);border-radius:var(--radius-sm);transition:background .12s ease}}
+.leg>div:hover{{background:var(--surface-sunken)}}
+.leg-cat{{font-size:var(--fs-xs)!important;font-weight:var(--fw-bold);color:var(--accent-primary);flex-basis:100%;text-transform:uppercase;letter-spacing:.04em}}
+.leg-cat:hover{{background:var(--accent-soft)!important}}
+
+.csub{{font-size:.72em;vertical-align:sub}}
+.csup{{font-size:.72em;vertical-align:super}}
+
 @media(max-width:800px){{.report-grid{{grid-template-columns:1fr}}}}
-@media(max-width:560px){{body{{padding:8px}}.report-head{{align-items:flex-start;flex-direction:column}}.report-card__body{{padding:8px}}}}
+@media(max-width:560px){{body{{padding:var(--space-3)}}.report-head{{align-items:flex-start;flex-direction:column}}.report-card__body{{padding:var(--space-3)}}}}
 </style></head><body>
 <header class="report-head"><h2>{title_html}</h2><span class="report-kicker">Defect thermodynamics</span></header>
 <main class="report-grid">
@@ -1428,6 +1503,11 @@ var hidden = {{}}; names.forEach(function(n){{hidden[n]=false;}});
 _FE_CANVAS_JS = """
 var cv=document.getElementById("cv"), cx=cv.getContext("2d");
 var W=800, H=520, P={l:64,r:20,t:24,b:52};
+/* ── HiDPI: same pattern as CPD canvas ── */
+var dpr = window.devicePixelRatio || 1;
+cv.width = W * dpr; cv.height = H * dpr;
+cv.style.width = W + "px"; cv.style.height = H + "px";
+cx.scale(dpr, dpr);
 var minY=-10, maxY=10;
 var cursorEF=null;
 
@@ -1489,18 +1569,21 @@ function calcE(name,mu,eF){
 
 function drawFE(mu){
   cx.clearRect(0,0,W,H);
-  cx.strokeStyle="#e9edf2";cx.lineWidth=1;cx.fillStyle="#657084";cx.font="21px Arial";
+  cx.lineJoin="round";cx.lineCap="round";
+  cx.strokeStyle="#e9edf2";cx.lineWidth=1;cx.fillStyle="#64748b";cx.font="500 13px "+FONT_SANS;
   for(var i=0;i<=5;i++){
     var x=xPx(i*BG/5);cx.beginPath();cx.moveTo(x,P.t);cx.lineTo(x,H-P.b);cx.stroke();
     cx.textAlign="center";cx.fillText((i*BG/5).toFixed(1),x,H-P.b+18);
+    cx.beginPath();cx.moveTo(x,H-P.b);cx.lineTo(x,H-P.b+4);cx.stroke();
   }
   var step=(maxY-minY)/8;
   for(var j=0;j<=8;j++){
     var y=yPx(minY+j*step);cx.beginPath();cx.moveTo(P.l,y);cx.lineTo(W-P.r,y);cx.stroke();
     cx.textAlign="right";cx.fillText((minY+j*step).toFixed(1),P.l-7,y+4);
+    cx.beginPath();cx.moveTo(P.l,y);cx.lineTo(P.l-4,y);cx.stroke();
   }
-  cx.strokeStyle="#94a3b8";cx.lineWidth=1.25;cx.beginPath();cx.moveTo(P.l,P.t);cx.lineTo(P.l,H-P.b);cx.lineTo(W-P.r,H-P.b);cx.stroke();
-  cx.fillStyle="#475569";cx.textAlign="center";cx.fillText("E − E_VBM (eV)",W/2,H-5);
+  cx.strokeStyle="#94a3b8";cx.lineWidth=1.5;cx.beginPath();cx.moveTo(P.l,P.t);cx.lineTo(P.l,H-P.b);cx.lineTo(W-P.r,H-P.b);cx.stroke();
+  cx.fillStyle="#475569";cx.textAlign="center";cx.font="500 13px "+FONT_SANS;cx.fillText("E − E_VBM (eV)",W/2,H-5);
   cx.save();cx.translate(14,H/2);cx.rotate(-Math.PI/2);cx.fillText("Formation energy E_f (eV)",0,0);cx.restore();
 
   names.forEach(function(n,i){
@@ -1516,7 +1599,7 @@ function drawFE(mu){
     cx.stroke();cx.setLineDash([]);cx.globalAlpha=1;
   });
   if(cursorEF!==null){
-    cx.strokeStyle="rgba(22,155,120,.55)";cx.lineWidth=1;cx.setLineDash([4,4]);
+    cx.strokeStyle="rgba(29,78,216,.5)";cx.lineWidth=1;cx.setLineDash([4,4]);
     cx.beginPath();cx.moveTo(xPx(cursorEF),P.t);cx.lineTo(xPx(cursorEF),H-P.b);cx.stroke();cx.setLineDash([]);
   }
   drawFermi(mu);
@@ -1558,9 +1641,9 @@ function drawFermi(mu){{
   var ef=calcFermi(mu);
   if(ef===null) return;
   var x=xPx(ef),label="E_F="+ef.toFixed(2)+" eV (电荷中性)";
-  cx.strokeStyle="#16c79a";cx.lineWidth=2;cx.setLineDash([]);
+  cx.strokeStyle="#1d4ed8";cx.lineWidth=2;cx.setLineDash([]);
   cx.beginPath();cx.moveTo(x,P.t);cx.lineTo(x,H-P.b);cx.stroke();
-  cx.fillStyle="#16c79a";cx.font="bold 24px Arial";
+  cx.fillStyle="#1d4ed8";cx.font="600 14px "+FONT_SANS;
   // Anchor to the plot interior. Near the right edge, paint leftward so the
   // physical E_F annotation is never clipped by the canvas boundary.
   var gap=6,w=cx.measureText(label).width;

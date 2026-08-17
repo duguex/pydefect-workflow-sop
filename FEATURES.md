@@ -40,7 +40,7 @@
 | | `check` | Check VASP completion (OUTCAR existence + convergence) |
 | `cpd` | `energies` | Compute composition energies from VASP outputs |
 | | `diagram` | Solve and plot the chemical-potential phase diagram |
-| `report` | — | Generate an evidence-based Markdown calculation report from a system directory; read-only except for the report output |
+| `report` | — | Generate an evidence-based Markdown calculation report or interactive formation-energy HTML for the crisp webui from a system directory; read-only except for the report output |
 | `unitcell` | `yaml` | Generate `unitcell.yaml` from completed VASP outputs |
 
 **Global flags:**
