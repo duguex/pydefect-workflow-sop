@@ -51,6 +51,35 @@ def is_anion_cation_antisite(name: str) -> bool:
     return (m.group(1) in _ANION_ELEMENTS) != (m.group(2) in _ANION_ELEMENTS)
 
 
+def _antisite_exceptions(defect_root: Path) -> frozenset[str]:
+    """Project-level antisite exception list from ``plan.yaml``.
+
+    Reads ``defects.include_antisites`` (list of defect base names such as
+    ``Fe_P1``) from the system's ``plan.yaml`` (located at
+    ``<system>/plan.yaml``, two levels above the ``defect/`` root).  Any
+    exception listed there bypasses the ADR 0013 anion-cation antisite
+    exclusion, so it is submitted and analysed like any other defect.
+    """
+    plan = defect_root.parent / "plan.yaml"
+    if not plan.is_file():
+        return frozenset()
+    try:
+        import yaml
+        data = yaml.safe_load(plan.read_text(encoding="utf-8")) or {}
+        exc = (data.get("defects") or {}).get("include_antisites") or []
+        return frozenset(str(e) for e in exc)
+    except Exception:  # corrupt plan → conservative: no exceptions
+        return frozenset()
+
+
+def _base_name(path: Path) -> str | None:
+    """Defect base name ("Fe_P1" from "Fe_P1_0"), else None."""
+    m = _SINGLE_DEFECT_RE.match(path.name)
+    if m is None:
+        return None
+    return f"{m.group(1)}_{m.group(2)}{m.group(3)}"
+
+
 def is_valid_defect_dir(path: Path, *, include_defect_new: bool = False) -> bool:
     """Return True if *path* is a legitimate defect calculation directory.
 
@@ -65,6 +94,10 @@ def is_valid_defect_dir(path: Path, *, include_defect_new: bool = False) -> bool
 
     Junk directories (no ``_`` in name, no ``defect_entry.json``) are
     excluded so they are never counted in scans or accidentally submitted.
+
+    Anion-cation antisites (ADR 0013) are excluded but each named defect
+    base may be opted back in via ``plan.yaml``
+    ``defects.include_antisites``.
     """
     if not path.is_dir():
         return False
@@ -85,9 +118,13 @@ def is_valid_defect_dir(path: Path, *, include_defect_new: bool = False) -> bool
 
     # Anion-cation antisites are excluded (ADR 0013): still on disk, but
     # never submitted or counted by any scan (this gate is the single
-    # entry point for wave2 submission and analysis enumeration).
+    # entry point for wave2 submission and analysis enumeration).  A
+    # defect listed under ``defects.include_antisites`` in plan.yaml is
+    # opted back in and treated like any other defect.
     if is_anion_cation_antisite(name):
-        return False
+        base = _base_name(path)
+        if not (base and base in _antisite_exceptions(path.parent)):
+            return False
 
     # Check Name_Charge pattern: split on first "_", both parts non-empty
     if "_" in name:
