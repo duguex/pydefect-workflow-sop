@@ -83,6 +83,10 @@ _Avoid_: auto retry, 自动重试
 How a failed calculation directory is categorized at the retry decision point, parsed from crisp's raw diagnostics (`.failed`, `{jobid}.log`) by vasp-sop. **Transient** failures (SIGKILL, time limit, submit/network errors) are retried every loop cycle — cluster recovery makes them self-healing. **Persistent** failures (ZBRENT, force-gate) are physics answers, retried a bounded number of times (default 2, configurable) before going *terminal*.
 _Avoid_: crash reason, 失败类型
 
+**重试风暴 (Retry storm)**:
+A calculation directory resubmitted unboundedly because its failure is classified transient (SIGKILL/OOM/time-limit) while the root cause is persistent (insufficient memory, oversized cell). The retry state machine retries transient failures every cycle *by design*, so a genuinely permanent resource problem loops without bound — observed 274× (2025 `CaMg2(SO4)3/unitcell/band`) and 243× (2026 `Gd2GaSbO7:Bi/cpd`) — until a human or an OOM-specific detection interrupts it. The storm is the failure mode to detect, not the retry itself; bounded retries are the intended behaviour.
+_Avoid_: 无限重试 (as if the retry policy were broken), calling every retry a storm
+
 **Terminal**:
 A calculation directory that has exhausted its retry budget and will not be automatically resubmitted again. Recorded as calculation state `failed` with `reason=terminal:<class>`; surfaced by `batch blockers` for human decision (retry via `--retry-failed` / `batch retry`, fix inputs, or exclude — an exclusion is a scope decision, never a failure bucket).
 _Avoid_: dead, 放弃, gave up

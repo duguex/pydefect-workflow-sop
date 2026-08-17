@@ -1,3 +1,17 @@
+# Next Actions — Undergo 错误普查差距清单（2026-08-18）
+
+> **来源**：`docs/audits/2026-08-18-undergo-error-census.md`（2025/2026 两树 log 普查 + SOP 覆盖四桶审查，只读审计）。
+> **已自动规避/修复（无需动作）**：MAGMOM（2026 零告警，实证）、ZBRENT（2026 仅 1 例）、NELM 门、stage1/2、CPD stale 自动重建、`.failed` 门控路径 mtime 感知。
+> **差距项（候选修复，按序）**：
+> 1. **A1 — auto_heal 休眠**：`errors.py`+`auto_heal.py`（frozen_job/positive_energy/scf_no_converge/edwav/brion_error）仅 `defect/compute.py::run_vasp` 可达，而 `run_vasp` 全仓零调用（已复核）→ 接入 orchestrator failure-class 路径，或删除死代码。
+> 2. **A2 — 瞬态重试无上限**：OOM 型持久失败无界重试风暴（2025 `CaMg2(SO4)3/unitcell/band` 274 次；2026 `Gd2GaSbO7:Bi/cpd` 243 次）→ 目录级累计失败上限 + EXIT_CODE 255/signal 9 识别为资源类 → 停止自动重提进 blockers。
+> 3. **A3 — POTCAR↔POSCAR 物种数生成时校验**（2025 MgS/SrS Be 缺陷 13 目录全废的教训）。
+> 4. **A4 — 运行期自旋漂移检测**（输入侧已证有效，收敛后磁态跳变仍无检测）。
+> 5. **A5 — BRMIX 无专门处理**（2025: 706 目录/33%）：归入泛化重试或加混合参数修复。
+> 6. **A6 — CONTCAR 完整性校验**（restart_from_contcar 直接复制）。
+> 7. **A7 — stale `.failed` 展示误导**（2026: 79/80 陈旧）：展示层复用 `_failed_newer_than_output`。
+> **待决策**：A1/A2 是否本期实现（涉及 orchestrator 行为变更，建议各起一个 ADR/issue）；Gd2GaSbO7:Bi/cpd 的 SIGKILL 风暴需排查该体系内存/墙钟配置（`short` tag 队列容量）。
+
 # Next Actions — 参考相错误重建（2026-08-14，ADR 0023 / issue #149）
 
 > **宿主身份错误实锤**：Y2Ti2O7（mp-1173093 P2，0.162 eV/atom）与 BaAl4O7（mp-1019532 Pnma，0.0239）的宿主相均为 MP 公式搜索 `_docs[0]` 误选（material_id 升序≠凸包稳定序）。两体系全部缺陷/形成能无效；**之前基于 P2 宿主的 12 Å / ISIF=3 诊断全部作废**。其余 8 体系复核无此问题（e_above_hull=0.000 或 MP 唯一条目）。
