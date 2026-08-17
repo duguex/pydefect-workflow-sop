@@ -170,16 +170,66 @@ def _extract_vertex_data(
 # Defect local structure extraction
 # ═════════════════════════════════════════════════════════════════════
 
+# CPK chemical-element colors (classic, widely recognised in scientific
+# visualization; matches 3Dmol defaults) — defect center stays red.
+_ELEMENT_COLORS: dict[str, str] = {
+    "H": "#FFFFFF", "C": "#909090", "N": "#3050F8", "O": "#FF0D0D",
+    "F": "#90E050", "Na": "#AB5CF2", "Mg": "#8AFF00", "Al": "#BFA6A6",
+    "Si": "#F0C8A0", "P": "#FF8000", "S": "#FFFF30", "Cl": "#1FF01F",
+    "K": "#30F090", "Ca": "#3DFF00", "Sc": "#90B28D", "Ti": "#BABABA",
+    "V": "#C0A8FF", "Cr": "#7E7FFF", "Mn": "#9C7C63", "Fe": "#CC8899",
+    "Co": "#B088B8", "Ni": "#8F8FFF", "Cu": "#C88033", "Zn": "#7F80B0",
+    "Ga": "#C78F8F", "Ge": "#668F66", "As": "#BD80E3", "Se": "#FFA100",
+    "Br": "#A62929", "Rb": "#702EB0", "Sr": "#00FF00", "Y": "#94FFFF",
+    "Zr": "#94E0E0", "Nb": "#73C2C9", "Mo": "#54B5B5", "Tc": "#3B9E9E",
+    "Ru": "#248F8F", "Rh": "#0A7D7D", "Pd": "#006985", "Ag": "#C0C0C0",
+    "Cd": "#FFD98F", "In": "#A67573", "Sn": "#668080", "Sb": "#9E63B5",
+    "Te": "#D47A00", "I": "#940094", "Ba": "#00C900", "La": "#70D4FF",
+    "Ce": "#FFFFC7", "Pr": "#D9FFC7", "Nd": "#C7FFC7", "Sm": "#8FFFC7",
+    "Eu": "#61FFC7", "Gd": "#45FFC7", "Hf": "#4DC2FF", "Ta": "#43AFFF",
+    "W": "#38B0E0", "Re": "#267DAB", "Os": "#175487", "Ir": "#175487",
+    "Pt": "#0E2E61", "Au": "#FFD123", "Hg": "#B8B8D0", "Tl": "#A6544D",
+    "Pb": "#575961", "Bi": "#9E4FB5",
+}
+_ELEMENT_COLORS.setdefault("__default__", "#BBBBBB")
+
+# Covalent radii (Å) for proportional atom sizes.
+_ELEMENT_RADII: dict[str, float] = {
+    "H": 0.31, "C": 0.76, "N": 0.71, "O": 0.66, "F": 0.57, "Na": 1.66,
+    "Mg": 1.41, "Al": 1.21, "Si": 1.11, "P": 1.07, "S": 1.05, "Cl": 1.02,
+    "K": 2.03, "Ca": 1.76, "Sc": 1.70, "Ti": 1.60, "V": 1.53, "Cr": 1.39,
+    "Mn": 1.39, "Fe": 1.32, "Co": 1.26, "Ni": 1.24, "Cu": 1.32, "Zn": 1.22,
+    "Ga": 1.22, "Ge": 1.20, "As": 1.19, "Se": 1.20, "Br": 1.20, "Rb": 2.20,
+    "Sr": 1.95, "Y": 1.90, "Zr": 1.75, "Nb": 1.64, "Mo": 1.54, "Tc": 1.47,
+    "Ru": 1.46, "Rh": 1.42, "Pd": 1.39, "Ag": 1.45, "Cd": 1.44, "In": 1.42,
+    "Sn": 1.40, "Sb": 1.40, "Te": 1.36, "I": 1.39, "Ba": 2.15, "La": 2.07,
+    "Ce": 2.04, "Gd": 1.96, "Bi": 1.48,
+}
+
+
+def defect_data_formula(defect_data: dict[str, Any]) -> str:
+    """Best-effort formula string from a pydefect defect_entry record."""
+    formula = defect_data.get("formula")
+    if isinstance(formula, str) and formula:
+        return formula
+    reduced = defect_data.get("reduced_formula") or ""
+    return str(reduced)
+
+
 def _extract_defect_structure(
     system_dir: Path, defect_name: str, charge: int, cutoff: float = 5.0
 ) -> dict[str, Any] | None:
     """Extract local structure around a defect.
-    
-    Reads defect_entry.json, identifies the defect center atom, and extracts
-    all atoms within cutoff distance. Returns JSON with atoms list and metadata.
+
+    Uses pydefect's ``defect_center`` (fractional coords) as the authoritative
+    defect position and minimum-image (PBC) distances to the supercell sites.
+    The center atom is reported separately (it may not coincide with any site,
+    e.g. vacancies); neighbors are all sites within *cutoff* using min-image
+    distance. Per-atom element colors and radii are included so the page
+    renders scientific CPK-style atoms without recomputing chemistry.
     """
     import numpy as np
-    
+
     # Find defect directory
     defect_dir = system_dir / "defect" / f"{defect_name}_{charge}"
     if not defect_dir.exists():
@@ -189,67 +239,75 @@ def _extract_defect_structure(
                 break
         else:
             return None
-    
+
     defect_entry_path = defect_dir / "defect_entry.json"
     if not defect_entry_path.exists():
         return None
-    
+
     with open(defect_entry_path) as f:
         defect_data = json.load(f)
-    
+
     structure = defect_data["structure"]
     sites = structure["sites"]
-    
-    # Parse defect name to identify center atom
-    parts = defect_name.split("_")
-    defect_species = parts[0] if len(parts) >= 2 else defect_name
-    host_site = parts[1] if len(parts) >= 2 else None
-    
-    # Find defect center atom
-    defect_center_idx = None
-    for i, site in enumerate(sites):
-        label = site.get("label", "")
-        species = site["species"][0]["element"]
-        
-        if defect_species != "Va" and species == defect_species:
-            if host_site and host_site in label:
-                defect_center_idx = i
-                break
-            elif not host_site:
-                defect_center_idx = i
-                break
-    
-    if defect_center_idx is None:
-        defect_center_idx = 0
-    
-    center_xyz = np.array(sites[defect_center_idx]["xyz"])
-    
-    # Extract atoms within cutoff
+    M = np.array(structure["lattice"]["matrix"], dtype=float)
+
+    # Fractional coordinates of the defect center (pydefect's authoritative
+    # value) → Cartesian. PBC-aware: only coordinates within [0,1) per axis.
+    dc_abc = defect_data.get("defect_center")
+    if (
+        dc_abc is None
+        or not isinstance(dc_abc, (list, tuple))
+        or len(dc_abc) != 3
+    ):
+        return None
+    center_xyz = np.array([dc_abc[0] * M[0] + dc_abc[1] * M[1] + dc_abc[2] * M[2]],
+                          dtype=float)[0]
+
+    # 27 periodic images of the center for min-image distance.
+    shifts = np.array(
+        [[i, j, k] for i in (-1, 0, 1) for j in (-1, 0, 1) for k in (-1, 0, 1)],
+        dtype=float,
+    )
+    imgs = center_xyz + shifts @ M  # (27, 3)
+
+    coords = np.array([s["xyz"] for s in sites])
+    dmin = np.min(
+        np.linalg.norm(coords[:, None, :] - imgs[None, :, :], axis=2), axis=1
+    )
+
     atoms = []
     for i, site in enumerate(sites):
-        xyz = np.array(site["xyz"])
-        distance = float(np.linalg.norm(xyz - center_xyz))
-        
-        if distance <= cutoff or i == defect_center_idx:
-            atoms.append({
-                "element": site["species"][0]["element"],
-                "x": round(float(xyz[0]), 4),
-                "y": round(float(xyz[1]), 4),
-                "z": round(float(xyz[2]), 4),
-                "is_defect": i == defect_center_idx,
-                "is_neighbor": distance <= cutoff and i != defect_center_idx,
-                "distance": round(distance, 4),
-                "label": site.get("label", ""),
-            })
-    
+        dist = float(dmin[i])
+        # The site coinciding with the defect center (substitutional atom) is
+        # represented by the independent red sphere — not a neighbor.
+        if dist < 1e-6 or dist > cutoff:
+            continue
+        el = site["species"][0]["element"]
+        atoms.append({
+            "element": el,
+            "x": round(float(coords[i][0]), 4),
+            "y": round(float(coords[i][1]), 4),
+            "z": round(float(coords[i][2]), 4),
+            "distance": round(dist, 4),
+            "label": site.get("label", ""),
+        })
+
     return {
         "atoms": atoms,
+        "center": {
+            "x": round(float(center_xyz[0]), 4),
+            "y": round(float(center_xyz[1]), 4),
+            "z": round(float(center_xyz[2]), 4),
+            "abc": [round(float(v), 6) for v in dc_abc],
+        },
         "metadata": {
             "defect_name": defect_name,
             "charge": charge,
-            "formula": defect_data.get("formula", ""),
+            "formula": defect_data_formula(defect_data),
             "cutoff": cutoff,
-            "num_atoms": len(atoms),
+            "num_neighbors": len(atoms),
+            "element_colors": _ELEMENT_COLORS,
+            "element_radii": _ELEMENT_RADII,
         },
     }
 
@@ -1572,10 +1630,10 @@ canvas{{display:block;background:var(--canvas);border:1px solid var(--line);bord
 <section class="selection-card" aria-live="polite"><div class="selection-card__head"><span class="selection-card__title">当前化学条件</span><span id="selection-state" class="selection-card__state">区域内插值</span></div><div id="selection-constraints" class="selection-card__constraints"></div><div id="selection-mu" class="selection-card__mu"></div><div class="mupanel"><div class="mupanel-title">化学势 μ (eV) · 拖动滑块逐元素调节 · 点「固定」约束该元素并绘制截面</div><div id="murows"></div></div></section>
 </div></section>
 <section class="report-card" id="feCard"><header class="report-card__head"><h3>缺陷形成能</h3><span class="report-card__hint">移动查询 E<sub>F</sub></span></header><div class="report-card__body"><div class="fe-workspace"><div class="fe-plot"><canvas id="cv" width="600" height="450"></canvas><div class="leg" id="leg"></div><div class="fe-note">查询层按 E<sub>f</sub> 降序列出当前可见缺陷 · 本征缺陷 · 1000 K · 未含自由载流子</div></div></div></div></section>
-<section class="report-card" id="structureCard" style="grid-column: 1 / -1;"><header class="report-card__head"><h3>缺陷局域结构</h3><span class="report-card__hint">选择缺陷查看 3D 结构</span></header><div class="report-card__body">
+<section class="report-card" id="structureCard" style="grid-column: 1 / -1;"><header class="report-card__head"><h3>缺陷局域结构</h3><span class="report-card__hint">配位、键长、局域结构</span></header><div class="report-card__body">
 <div id="structure-viewer" style="width:100%;height:500px;position:relative;">
 <div id="viewer3d" style="width:100%;height:100%;"></div>
-<div id="atom-info" style="position:absolute;top:10px;right:10px;background:rgba(255,255,255,0.95);padding:10px;border-radius:8px;display:none;font-size:12px;box-shadow:0 2px 8px rgba(0,0,0,0.1);"></div>
+<div id="structure-info" style="position:absolute;top:10px;right:10px;width:240px;height:calc(100% - 20px);overflow-y:auto;background:rgba(255,255,255,0.95);padding:10px;border-radius:8px;font-size:12px;box-shadow:0 2px 8px rgba(0,0,0,0.1);"></div>
 </div>
 <div style="margin-top:10px;display:flex;gap:20px;align-items:center;">
 <div style="flex:1;"><label style="font-size:12px;font-weight:600;color:var(--text-secondary);">近邻距离 cutoff:</label>
@@ -2004,6 +2062,15 @@ var currentDefect = null;
 var currentCharge = null;
 var currentCutoff = 5.0;
 
+// Element display scaling: uniform-axis coords are auto-centered by zoomTo,
+// so only the aspect matters (sphere radius). Radii/colors come with the data.
+function elStyle(element, colors, radii, isCenter) {
+  var color = isCenter ? "#e11d48" : (colors[element] || "#bbbbbb");
+  var r = radii[element] || 1.2;
+  var scale = 0.35 * (isCenter ? 1.6 : 1.0) * Math.min(1.2, Math.max(0.5, r / 1.2 + 0.2));
+  return {sphere: {scale: scale, color: color, opacity: isCenter ? 1.0 : 0.95}};
+}
+
 function init3DViewer() {
   var viewerDiv = document.getElementById("viewer3d");
   if (!viewerDiv || typeof $3Dmol === 'undefined') return;
@@ -2056,63 +2123,147 @@ function loadDefectStructure(defectChargeStr) {
   currentDefect = defectName;
   currentCharge = charge;
   
-  // Use embedded STRUCTURES data instead of API call
+  // Use embedded STRUCTURES data (no API call): filter atoms by currentCutoff
+  // and re-render. The embedded record carries up to 10 Å worth of neighbors;
+  // cutoff is applied client-side so the slider is reactive without a server.
   if (STRUCTURES && STRUCTURES[defectName] && STRUCTURES[defectName][charge]) {
     var data = STRUCTURES[defectName][charge];
-    renderDefectStructure(data);
+    renderDefectStructure(data, currentCutoff);
   } else {
     console.warn("No structure data for", defectName, "q=", charge);
   }
+  drawStructureInfo(defectName, charge);
 }
 
-function renderDefectStructure(data) {
-  if (!viewer3d || !data || !data.atoms) return;
-  
-  viewer3d.removeAllModels();
-  
-  var xyz = data.atoms.length + "\\n" + data.metadata.defect_name + " (q=" + data.metadata.charge + ")\\n";
-  data.atoms.forEach(function(atom) {
-    xyz += atom.element + " " + atom.x.toFixed(4) + " " + atom.y.toFixed(4) + " " + atom.z.toFixed(4) + "\\n";
+function visibleAtoms(data, cutoff) {
+  var out = [];
+  (data.atoms || []).forEach(function(a) {
+    if (a.distance <= cutoff + 1e-9) out.push(a);
   });
+  out.sort(function(a, b) { return a.distance - b.distance; });
+  return out;
+}
+
+function renderDefectStructure(data, cutoff) {
+  if (!viewer3d || !data || !data.center) return;
+  var colors = (data.metadata && data.metadata.element_colors) || {};
+  var radii = (data.metadata && data.metadata.element_radii) || {};
   
+  var atoms = visibleAtoms(data, cutoff);
+  
+  // Clear previous frame: models + viewer-level GLShapes (bond cylinders) and
+  // label sprites persist across removeAllModels — must reset all three or
+  // switching defect/charge/cutoff accumulates old bonds & text.
+  viewer3d.removeAllModels();
+  try { viewer3d.removeAllShapes(); } catch (e) {}
+  if (Array.isArray(viewer3d.labels)) viewer3d.labels.length = 0;
+  
+  // Atom model: neighbors as normal markers; center added as a dedicated atom
+  // so clickable + a single red sphere survive.
+  var xyz = "";
+  var count = atoms.length + 1;
+  xyz += count + "\\nce\\n";
+  var sym = "D";
+  var realAtoms = [{element: sym, x: data.center.x, y: data.center.y, z: data.center.z}].concat(atoms);
+  realAtoms.forEach(function(a) { xyz += a.element + " " + a.x + " " + a.y + " " + a.z + "\\n"; });
   viewer3d.addModel(xyz, "xyz");
-  viewer3d.setStyle({}, {stick: {radius: 0.1, opacity: 0.7}, sphere: {scale: 0.3, opacity: 0.8}});
   
-  data.atoms.forEach(function(atom, idx) {
-    if (atom.is_defect) {
-      viewer3d.setStyle({serial: idx}, {sphere: {scale: 0.5, color: "red", opacity: 1.0}});
-    } else if (atom.is_neighbor) {
-      viewer3d.setStyle({serial: idx}, {sphere: {scale: 0.35, color: "yellow", opacity: 0.9}});
-    }
+  // Center: red sphere, always visible. Neighbors: per element color/radius.
+  viewer3d.setStyle({serial: 0}, {sphere: {scale: 0.55, color: "#e11d48", opacity: 1.0}});
+  atoms.forEach(function(a, idx) {
+    viewer3d.setStyle({serial: idx + 1}, elStyle(a.element, colors, radii, false));
   });
   
   viewer3d.setClickable({}, true, function(atom) {
-    showAtomInfo(atom, data.atoms[atom.serial]);
+    var which = atom.serial === 0 ? data.center : atoms[atom.serial - 1];
+    showAtomInfo(atom, which, atom.serial === 0);
   });
   
-  viewer3d.zoomTo();
+  // Bonds 中心→近邻, colored per neighbor element, full length labels.
+  atoms.forEach(function(a, idx) {
+    var c = colors[a.element] || "#999999";
+    viewer3d.addCylinder({
+      start: {x: data.center.x, y: data.center.y, z: data.center.z},
+      end: {x: a.x, y: a.y, z: a.z},
+      radius: 0.09,
+      color: c,
+      fromCap: 2,
+      toCap: 2,
+      dashed: false
+    });
+  });
+  
+  // Labels for every bond length (mx: 10 Å cutoff keeps count bounded)
+  atoms.forEach(function(a) {
+    viewer3d.addLabel(a.distance.toFixed(2), {
+      position: {
+        x: (data.center.x + a.x) / 2,
+        y: (data.center.y + a.y) / 2,
+        z: (data.center.z + a.z) / 2
+      },
+      fontSize: 11,
+      fontColor: "#334155",
+      backgroundColor: "rgba(255,255,255,0.85)",
+      backgroundOpacity: 0.85,
+      showBackground: true,
+      alignment: "center",
+      inFront: true
+    });
+  });
+  
+  viewer3d.zoomTo({fixedPath: true});
   viewer3d.render();
 }
 
-function showAtomInfo(viewerAtom, atomData) {
-  var infoDiv = document.getElementById("atom-info");
+function showAtomInfo(viewerAtom, atomData, isCenter) {
+  var infoDiv = document.getElementById("structure-info");
   if (!infoDiv) return;
-  
-  var html = "<strong>" + atomData.element + "</strong><br>";
-  html += "位置: (" + atomData.x.toFixed(2) + ", " + atomData.y.toFixed(2) + ", " + atomData.z.toFixed(2) + ")<br>";
-  html += "距离: " + atomData.distance.toFixed(2) + " Å<br>";
-  if (atomData.is_defect) {
-    html += "<span style='color:red;font-weight:bold;'>缺陷中心</span>";
-  } else if (atomData.is_neighbor) {
-    html += "<span style='color:orange;'>近邻原子</span>";
+  if (isCenter) {
+    drawStructureInfo(currentDefect, currentCharge);
+    return;
   }
+  // Re-render panel with clicked atom highlighted (scroll the row into view)
+  drawStructureInfo(currentDefect, currentCharge);
+  var rows = infoDiv.querySelectorAll(".nbr-row");
+  var target = atomData.label || ("@" + atomData.distance.toFixed(2));
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i].getAttribute("data-label") === target ||
+        rows[i].textContent.indexOf(atomData.distance.toFixed(2)) >= 0) {
+      rows[i].style.background = "#eef2ff";
+      rows[i].style.outline = "1px solid #1d4ed8";
+      break;
+    }
+  }
+}
+
+// Bottom-right info panel: neighbor list + coordination summary + metadata.
+function drawStructureInfo(defectName, charge) {
+  var panel = document.getElementById("structure-info");
+  if (!panel) return;
+  var data = STRUCTURES && STRUCTURES[defectName] && STRUCTURES[defectName][charge];
+  if (!data) { panel.innerHTML = "无结构数据"; return; }
+  var atoms = visibleAtoms(data, currentCutoff);
   
-  infoDiv.innerHTML = html;
-  infoDiv.style.display = "block";
+  // coordination summary
+  var shell = {};
+  atoms.forEach(function(a) { shell[a.element] = (shell[a.element] || 0) + 1; });
+  var coordHtml = Object.keys(shell).sort().map(function(el) {
+    return "<span style='color:" + ((data.metadata.element_colors || {})[el] || "#999") + ";font-weight:600'>" + el + "</span> ×" + shell[el];
+  }).join(" · ");
   
-  setTimeout(function() {
-    infoDiv.style.display = "none";
-  }, 5000);
+  var html = "<div style='font-size:13px;font-weight:700;margin-bottom:6px;color:#0f172a;'>" +
+    data.metadata.defect_name + " (q=" + charge + ")</div>";
+  html += "<div style='margin-bottom:8px;font-size:12px;color:#64748b;'>中心 (分数) " +
+    data.center.abc.map(function(v){return v.toFixed(3);}).join(", ") + " · cutoff " + currentCutoff.toFixed(1) + " Å · " + atoms.length + " 近邻</div>";
+  html += "<div style='margin-bottom:8px;font-size:12px;color:#475569;'>配位: " + coordHtml + "</div>";
+  html += "<div style='font-size:11px;color:#94a3b8;border-top:1px solid #e2e8f0;padding-top:6px;max-height:220px;overflow-y:auto;'>";
+  atoms.forEach(function(a, i) {
+    html += "<div class='nbr-row' data-label='" + (a.label || "") + "' style='padding:1px 0;'>" +
+      (i + 1) + ". <b>" + a.element + "</b> " + a.distance.toFixed(2) + " Å " +
+      (a.label ? "(" + a.label + ")" : "") + "</div>";
+  });
+  html += "</div>";
+  panel.innerHTML = html;
 }
 
 // 3D viewer is created by bootCritical3DViewer() on window.load (see end of
@@ -2317,7 +2468,7 @@ def generate_interactive_html(system_dir: Path) -> Path | None:
         defect_structures[name] = {}
         for charge_data in defects[name]["charges"]:
             charge = int(charge_data["q"])
-            structure = _extract_defect_structure(system_dir, name, charge, cutoff=5.0)
+            structure = _extract_defect_structure(system_dir, name, charge, cutoff=10.0)
             if structure:
                 defect_structures[name][charge] = structure
 
