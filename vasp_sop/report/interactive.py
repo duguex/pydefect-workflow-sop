@@ -169,42 +169,9 @@ def _extract_vertex_data(
 # ═════════════════════════════════════════════════════════════════════
 # Defect local structure extraction
 # ═════════════════════════════════════════════════════════════════════
+_LOCAL_STRUCTURE_CUTOFF = 5.0
 
-# CPK chemical-element colors (classic, widely recognised in scientific
-# visualization; matches 3Dmol defaults) — defect center stays red.
-_ELEMENT_COLORS: dict[str, str] = {
-    "H": "#FFFFFF", "C": "#909090", "N": "#3050F8", "O": "#FF0D0D",
-    "F": "#90E050", "Na": "#AB5CF2", "Mg": "#8AFF00", "Al": "#BFA6A6",
-    "Si": "#F0C8A0", "P": "#FF8000", "S": "#FFFF30", "Cl": "#1FF01F",
-    "K": "#30F090", "Ca": "#3DFF00", "Sc": "#90B28D", "Ti": "#BABABA",
-    "V": "#C0A8FF", "Cr": "#7E7FFF", "Mn": "#9C7C63", "Fe": "#CC8899",
-    "Co": "#B088B8", "Ni": "#8F8FFF", "Cu": "#C88033", "Zn": "#7F80B0",
-    "Ga": "#C78F8F", "Ge": "#668F66", "As": "#BD80E3", "Se": "#FFA100",
-    "Br": "#A62929", "Rb": "#702EB0", "Sr": "#00FF00", "Y": "#94FFFF",
-    "Zr": "#94E0E0", "Nb": "#73C2C9", "Mo": "#54B5B5", "Tc": "#3B9E9E",
-    "Ru": "#248F8F", "Rh": "#0A7D7D", "Pd": "#006985", "Ag": "#C0C0C0",
-    "Cd": "#FFD98F", "In": "#A67573", "Sn": "#668080", "Sb": "#9E63B5",
-    "Te": "#D47A00", "I": "#940094", "Ba": "#00C900", "La": "#70D4FF",
-    "Ce": "#FFFFC7", "Pr": "#D9FFC7", "Nd": "#C7FFC7", "Sm": "#8FFFC7",
-    "Eu": "#61FFC7", "Gd": "#45FFC7", "Hf": "#4DC2FF", "Ta": "#43AFFF",
-    "W": "#38B0E0", "Re": "#267DAB", "Os": "#175487", "Ir": "#175487",
-    "Pt": "#0E2E61", "Au": "#FFD123", "Hg": "#B8B8D0", "Tl": "#A6544D",
-    "Pb": "#575961", "Bi": "#9E4FB5",
-}
-_ELEMENT_COLORS.setdefault("__default__", "#BBBBBB")
 
-# Covalent radii (Å) for proportional atom sizes.
-_ELEMENT_RADII: dict[str, float] = {
-    "H": 0.31, "C": 0.76, "N": 0.71, "O": 0.66, "F": 0.57, "Na": 1.66,
-    "Mg": 1.41, "Al": 1.21, "Si": 1.11, "P": 1.07, "S": 1.05, "Cl": 1.02,
-    "K": 2.03, "Ca": 1.76, "Sc": 1.70, "Ti": 1.60, "V": 1.53, "Cr": 1.39,
-    "Mn": 1.39, "Fe": 1.32, "Co": 1.26, "Ni": 1.24, "Cu": 1.32, "Zn": 1.22,
-    "Ga": 1.22, "Ge": 1.20, "As": 1.19, "Se": 1.20, "Br": 1.20, "Rb": 2.20,
-    "Sr": 1.95, "Y": 1.90, "Zr": 1.75, "Nb": 1.64, "Mo": 1.54, "Tc": 1.47,
-    "Ru": 1.46, "Rh": 1.42, "Pd": 1.39, "Ag": 1.45, "Cd": 1.44, "In": 1.42,
-    "Sn": 1.40, "Sb": 1.40, "Te": 1.36, "I": 1.39, "Ba": 2.15, "La": 2.07,
-    "Ce": 2.04, "Gd": 1.96, "Bi": 1.48,
-}
 
 
 def defect_data_formula(defect_data: dict[str, Any]) -> str:
@@ -215,101 +182,231 @@ def defect_data_formula(defect_data: dict[str, Any]) -> str:
     reduced = defect_data.get("reduced_formula") or ""
     return str(reduced)
 
+def _load_charge_structure(
+    defect_dir: Path,
+    defect_data: dict[str, Any],
+    entry_structure: Any,
+    structure_type: Any,
+) -> tuple[Any, str]:
+    """Prefer this charge state's relaxed geometry over the shared entry."""
+    entry_sites = defect_data.get("structure", {}).get("sites", [])
+    for filename in ("CONTCAR", "POSCAR"):
+        structure_path = defect_dir / filename
+        if not structure_path.is_file() or structure_path.stat().st_size == 0:
+            continue
+        try:
+            structure = structure_type.from_file(structure_path)
+        except Exception as exc:
+            logger.debug("Cannot read %s: %s", structure_path, exc)
+            continue
+        if len(structure) != len(entry_structure):
+            logger.debug(
+                "Ignoring %s: site count %d != entry count %d",
+                structure_path, len(structure), len(entry_structure),
+            )
+            continue
+        for index, entry_site in enumerate(entry_sites):
+            label = entry_site.get("label")
+            if label:
+                structure[index].label = str(label)
+        return structure, filename
+    return entry_structure, "defect_entry.json"
+
 
 def _extract_defect_structure(
-    system_dir: Path, defect_name: str, charge: int, cutoff: float = 5.0
+    system_dir: Path, defect_name: str, charge: int,
 ) -> dict[str, Any] | None:
-    """Extract local structure around a defect.
+    """Return a server-computed first-shell geometry record.
 
-    Uses pydefect's ``defect_center`` (fractional coords) as the authoritative
-    defect position and minimum-image (PBC) distances to the supercell sites.
-    The center atom is reported separately (it may not coincide with any site,
-    e.g. vacancies); neighbors are all sites within *cutoff* using min-image
-    distance. Per-atom element colors and radii are included so the page
-    renders scientific CPK-style atoms without recomputing chemistry.
+    ``defect_center`` is authoritative.  Substitutional defects (``X_Yn``)
+    map that position to the nearest real site; vacancies (``Va_Yn``) and
+    interstitials (``X_iN``) use a virtual center.  VoronoiNN supplies the
+    candidate faces, restricted to the fixed 5 Å first shell.  Multiple
+    periodic images of one site are collapsed to its nearest image before
+    distances and all pairwise center angles are computed.
     """
     import numpy as np
 
-    # Find defect directory
-    defect_dir = system_dir / "defect" / f"{defect_name}_{charge}"
-    if not defect_dir.exists():
-        for d in (system_dir / "defect").iterdir():
-            if d.is_dir() and d.name.startswith(defect_name):
-                defect_dir = d
-                break
-        else:
-            return None
+    defect_root = system_dir / "defect"
+    if not defect_root.is_dir():
+        return None
+
+    candidates = [defect_root / f"{defect_name}_{charge}"]
+    signed_name = defect_root / f"{defect_name}_{charge:+d}"
+    if signed_name != candidates[0]:
+        candidates.append(signed_name)
+    defect_dir = next((candidate for candidate in candidates if candidate.is_dir()), None)
+    if defect_dir is None:
+        return None
 
     defect_entry_path = defect_dir / "defect_entry.json"
-    if not defect_entry_path.exists():
+    if not defect_entry_path.is_file():
         return None
 
-    with open(defect_entry_path) as f:
-        defect_data = json.load(f)
+    try:
+        from pymatgen.core import DummySpecies, Structure
+        from pymatgen.core.local_env import VoronoiNN
 
-    structure = defect_data["structure"]
-    sites = structure["sites"]
-    M = np.array(structure["lattice"]["matrix"], dtype=float)
+        defect_data = json.loads(defect_entry_path.read_text())
+        entry_structure = Structure.from_dict(defect_data["structure"])
+        structure, structure_source = _load_charge_structure(
+            defect_dir, defect_data, entry_structure, Structure,
+        )
+        raw_center = defect_data.get("defect_center")
+        if (
+            not isinstance(raw_center, (list, tuple))
+            or len(raw_center) != 3
+        ):
+            return None
+        center_frac = np.asarray(raw_center, dtype=float)
+        if not np.all(np.isfinite(center_frac)):
+            return None
+        center_frac = np.mod(center_frac, 1.0)
 
-    # Fractional coordinates of the defect center (pydefect's authoritative
-    # value) → Cartesian. PBC-aware: only coordinates within [0,1) per axis.
-    dc_abc = defect_data.get("defect_center")
-    if (
-        dc_abc is None
-        or not isinstance(dc_abc, (list, tuple))
-        or len(dc_abc) != 3
-    ):
+        parts = defect_name.split("_")
+        is_virtual = (
+            parts[0] == "Va"
+            or (len(parts) > 1 and re.fullmatch(r"i\d+", parts[1]) is not None)
+        )
+        if is_virtual:
+            structure.append(
+                DummySpecies("X"),
+                center_frac.tolist(),
+                coords_are_cartesian=False,
+                validate_proximity=False,
+            )
+            center_index = len(structure) - 1
+            center_kind = "virtual"
+            center_label = "虚拟缺陷中心"
+            center_element = ""
+        else:
+            delta_frac = entry_structure.frac_coords - center_frac
+            delta_frac -= np.round(delta_frac)
+            delta_cart = delta_frac @ np.asarray(
+                entry_structure.lattice.matrix, dtype=float,
+            )
+            center_distances = np.linalg.norm(delta_cart, axis=1)
+            center_index = int(np.argmin(center_distances))
+            if float(center_distances[center_index]) > 1e-5:
+                return None
+            center_kind = "site"
+            center_site = structure[center_index]
+            center_label = getattr(center_site, "label", None) or (
+                f"site-{center_index + 1}"
+            )
+            center_element = getattr(
+                center_site.specie, "symbol", str(center_site.specie),
+            )
+
+        center_site = structure[center_index]
+        center_cart = np.asarray(center_site.coords, dtype=float)
+        nn_info = VoronoiNN(
+            cutoff=_LOCAL_STRUCTURE_CUTOFF,
+            tol=0.0,
+            compute_adj_neighbors=False,
+        ).get_nn_info(structure, center_index)
+
+        # A site can occur more than once through periodic images.  Keep the
+        # nearest image, which is the only one represented in the report.
+        nearest_by_site: dict[int, dict[str, Any]] = {}
+        for info in nn_info:
+            try:
+                site_index = int(info["site_index"])
+                neighbor_site = info["site"]
+            except (KeyError, TypeError, ValueError):
+                continue
+            if site_index == center_index:
+                continue
+            vector = np.asarray(neighbor_site.coords, dtype=float) - center_cart
+            distance = float(np.linalg.norm(vector))
+            if (
+                not np.isfinite(distance)
+                or distance <= 1e-8
+                or distance > _LOCAL_STRUCTURE_CUTOFF + 1e-8
+            ):
+                continue
+            previous = nearest_by_site.get(site_index)
+            if previous is not None and distance >= previous["_raw_distance"]:
+                continue
+            site = structure[site_index]
+            element = getattr(site.specie, "symbol", str(site.specie))
+            label = getattr(site, "label", None) or f"site-{site_index + 1}"
+            nearest_by_site[site_index] = {
+                "element": element,
+                "label": str(label),
+                "site_index": site_index,
+                "distance": round(distance, 3),
+                "_raw_distance": distance,
+                "_vector": vector,
+            }
+
+        neighbors = sorted(
+            nearest_by_site.values(),
+            key=lambda item: (item["_raw_distance"], item["label"]),
+        )
+        skipped_angles = 0
+        angles: list[dict[str, Any]] = []
+        for i, left in enumerate(neighbors):
+            for right in neighbors[i + 1:]:
+                left_vector = np.asarray(left["_vector"], dtype=float)
+                right_vector = np.asarray(right["_vector"], dtype=float)
+                left_norm = float(np.linalg.norm(left_vector))
+                right_norm = float(np.linalg.norm(right_vector))
+                denominator = left_norm * right_norm
+                if denominator <= 1e-12:
+                    skipped_angles += 1
+                    continue
+                cosine = float(np.dot(left_vector, right_vector) / denominator)
+                if not np.isfinite(cosine):
+                    skipped_angles += 1
+                    continue
+                angle = math.degrees(math.acos(float(np.clip(cosine, -1.0, 1.0))))
+                angles.append({
+                    "a": {
+                        "element": left["element"],
+                        "label": left["label"],
+                        "distance": left["distance"],
+                    },
+                    "b": {
+                        "element": right["element"],
+                        "label": right["label"],
+                        "distance": right["distance"],
+                    },
+                    "angle": round(angle, 1),
+                })
+
+        for item in neighbors:
+            item.pop("_raw_distance", None)
+            item.pop("_vector", None)
+
+        return {
+            "center": {
+                "element": center_element,
+                "label": center_label,
+                "abc": [round(float(value), 6) for value in center_frac],
+            },
+            "neighbors": neighbors,
+            "angles": angles,
+            "metadata": {
+                "defect_name": defect_name,
+                "charge": charge,
+                "formula": defect_data_formula(defect_data),
+                "center_kind": center_kind,
+                "structure_source": structure_source,
+                "cutoff": _LOCAL_STRUCTURE_CUTOFF,
+                "num_neighbors": len(neighbors),
+                "num_angles": len(angles),
+                "skipped_angles": skipped_angles,
+                "distance_precision": 3,
+                "angle_precision": 1,
+            },
+        }
+    except Exception as exc:
+        logger.warning(
+            "%s q=%s: local geometry unavailable: %s",
+            defect_name, charge, exc,
+        )
         return None
-    center_xyz = np.array([dc_abc[0] * M[0] + dc_abc[1] * M[1] + dc_abc[2] * M[2]],
-                          dtype=float)[0]
-
-    # 27 periodic images of the center for min-image distance.
-    shifts = np.array(
-        [[i, j, k] for i in (-1, 0, 1) for j in (-1, 0, 1) for k in (-1, 0, 1)],
-        dtype=float,
-    )
-    imgs = center_xyz + shifts @ M  # (27, 3)
-
-    coords = np.array([s["xyz"] for s in sites])
-    dmin = np.min(
-        np.linalg.norm(coords[:, None, :] - imgs[None, :, :], axis=2), axis=1
-    )
-
-    atoms = []
-    for i, site in enumerate(sites):
-        dist = float(dmin[i])
-        # The site coinciding with the defect center (substitutional atom) is
-        # represented by the independent red sphere — not a neighbor.
-        if dist < 1e-6 or dist > cutoff:
-            continue
-        el = site["species"][0]["element"]
-        atoms.append({
-            "element": el,
-            "x": round(float(coords[i][0]), 4),
-            "y": round(float(coords[i][1]), 4),
-            "z": round(float(coords[i][2]), 4),
-            "distance": round(dist, 4),
-            "label": site.get("label", ""),
-        })
-
-    return {
-        "atoms": atoms,
-        "center": {
-            "x": round(float(center_xyz[0]), 4),
-            "y": round(float(center_xyz[1]), 4),
-            "z": round(float(center_xyz[2]), 4),
-            "abc": [round(float(v), 6) for v in dc_abc],
-        },
-        "metadata": {
-            "defect_name": defect_name,
-            "charge": charge,
-            "formula": defect_data_formula(defect_data),
-            "cutoff": cutoff,
-            "num_neighbors": len(atoms),
-            "element_colors": _ELEMENT_COLORS,
-            "element_radii": _ELEMENT_RADII,
-        },
-    }
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -1612,6 +1709,24 @@ canvas{{display:block;background:var(--canvas);border:1px solid var(--line);bord
 
 .leg{{display:flex;flex-wrap:wrap;gap:var(--space-1);margin-top:var(--space-3)}}
 .leg-group{{display:flex;flex-wrap:wrap;gap:var(--space-1);min-width:0;margin:var(--space-1) 0;padding:var(--space-1);border-left:2px solid var(--surface-divider)}}
+.geometry-title{{font-size:13px;font-weight:700;color:var(--text-primary)}}
+.geometry-title__charge{{font-family:var(--font-mono);font-size:11px;color:var(--text-secondary)}}
+.geometry-summary,.geometry-coordination{{margin-top:4px;font-size:11px;color:var(--text-secondary);line-height:1.35}}
+.geometry-coordination{{margin-top:3px}}
+.geometry-tables{{display:grid;grid-template-columns:minmax(220px,.8fr) minmax(360px,1.2fr);gap:12px;align-items:start;margin-top:10px}}
+.geometry-section{{min-width:0}}
+.geometry-section h4{{margin:0 0 4px;font-size:12px;color:var(--text-primary)}}
+.geometry-table-wrap{{overflow-x:auto}}
+.geometry-table{{width:100%;border-collapse:collapse;font-size:11px;line-height:1.25;white-space:nowrap}}
+.geometry-table th,.geometry-table td{{padding:3px 5px}}
+.geometry-table thead tr{{text-align:left;color:var(--text-muted);border-bottom:1px solid var(--line)}}
+.geometry-table tbody tr{{border-bottom:1px solid var(--surface-sunken)}}
+.geometry-table tbody tr:last-child{{border-bottom:0}}
+.geometry-table .muted{{color:var(--text-muted)}}
+.geometry-table .mono{{font-family:var(--font-mono);font-variant-numeric:tabular-nums}}
+.geometry-table .number{{text-align:right}}
+.geometry-table .strong{{font-weight:600}}
+@media(max-width:900px){{.geometry-tables{{grid-template-columns:1fr}}}}
 .leg>div{{display:flex;align-items:center;gap:3px;font-size:var(--fs-sm);cursor:pointer;padding:2px var(--space-1);border-radius:var(--radius-sm);transition:background .12s ease}}
 .leg>div:hover{{background:var(--surface-sunken)}}
 .leg-cat{{font-size:var(--fs-xs)!important;font-weight:var(--fw-bold);color:var(--accent-primary);flex-basis:100%;text-transform:uppercase;letter-spacing:.04em}}
@@ -1630,23 +1745,18 @@ canvas{{display:block;background:var(--canvas);border:1px solid var(--line);bord
 <section class="selection-card" aria-live="polite"><div class="selection-card__head"><span class="selection-card__title">当前化学条件</span><span id="selection-state" class="selection-card__state">区域内插值</span></div><div id="selection-constraints" class="selection-card__constraints"></div><div id="selection-mu" class="selection-card__mu"></div><div class="mupanel"><div class="mupanel-title">化学势 μ (eV) · 拖动滑块逐元素调节 · 点「固定」约束该元素并绘制截面</div><div id="murows"></div></div></section>
 </div></section>
 <section class="report-card" id="feCard"><header class="report-card__head"><h3>缺陷形成能</h3><span class="report-card__hint">移动查询 E<sub>F</sub></span></header><div class="report-card__body"><div class="fe-workspace"><div class="fe-plot"><canvas id="cv" width="600" height="450"></canvas><div class="leg" id="leg"></div><div class="fe-note">查询层按 E<sub>f</sub> 降序列出当前可见缺陷 · 本征缺陷 · 1000 K · 未含自由载流子</div></div></div></div></section>
-<section class="report-card" id="structureCard" style="grid-column: 1 / -1;"><header class="report-card__head"><h3>缺陷局域结构</h3><span class="report-card__hint">配位、键长、局域结构</span></header><div class="report-card__body">
-<div id="structure-viewer" style="width:100%;height:500px;position:relative;">
-<div id="viewer3d" style="width:100%;height:100%;"></div>
-<div id="structure-info" style="position:absolute;top:10px;right:10px;width:240px;height:calc(100% - 20px);overflow-y:auto;background:rgba(255,255,255,0.95);padding:10px;border-radius:8px;font-size:12px;box-shadow:0 2px 8px rgba(0,0,0,0.1);"></div>
-</div>
-<div style="margin-top:10px;display:flex;gap:20px;align-items:center;">
-<div style="flex:1;"><label style="font-size:12px;font-weight:600;color:var(--text-secondary);">近邻距离 cutoff:</label>
-<input type="range" id="cutoff-slider" min="2" max="10" value="5" step="0.5" style="width:100%;margin-top:5px;">
-<span id="cutoff-value" style="font-size:12px;color:var(--text-muted);">5.0 Å</span></div>
-<div id="defect-selector" style="flex:1;"><label style="font-size:12px;font-weight:600;color:var(--text-secondary);">选择缺陷:</label>
-<select id="defect-select" style="width:100%;margin-top:5px;padding:6px;border:1px solid var(--line);border-radius:4px;font-size:13px;"></select></div>
-</div>
+<section class="report-card" id="structureCard" style="grid-column: 1 / -1;"><header class="report-card__head"><h3>缺陷局域结构</h3><span class="report-card__hint">Voronoi 最近邻 · 键长与键角</span></header><div class="report-card__body">
+<div id="structure-toolbar" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;"><div style="flex:1;min-width:260px;"><label for="defect-select" style="font-size:12px;font-weight:600;color:var(--text-secondary);">选择缺陷:</label><select id="defect-select" style="width:100%;margin-top:4px;padding:5px;border:1px solid var(--line);border-radius:4px;font-size:12px;"></select></div></div>
+<div id="structure-info" aria-live="polite" style="margin-top:10px;"></div>
+<div style="margin-top:10px;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--surface-sunken);font-size:11px;line-height:1.4;color:var(--text-secondary);">方法：以 <code>defect_center</code> 为中心，使用 <code>VoronoiNN(tol=0)</code> 构造面邻居并限定在 5 Å 第一近邻壳层；每个原始 site 只保留最近周期镜像。键长与键角均由服务端预计算；退化角跳过并在结果中计数。</div>
 </div></section>
 <div id="tip" class="fe-tip"></div>
 </main>
-<script src="https://3Dmol.org/build/3Dmol-min.js"></script>
 <script>"""
+
+
+
+
 
 _COMMON_JS_DECLS = """var DEF = {def_json};
 var REF = {ref_json};
@@ -1656,7 +1766,7 @@ var names = {names_json};
 var DISP = {disp_json};
 var MAG = {mag_json};
 var VOX = {vox_json};
-var STRUCTURES = {structures_json};
+var LOCAL_STRUCTURES = {structures_json};
 var nEF = 200;
 var hidden = {{}}; names.forEach(function(n){{hidden[n]=false;}});
 """
@@ -2025,7 +2135,7 @@ function update(mu){
 // Group the legend by defect KIND (site-independent base name):
 // Va_O1 / Va_O2 / Va_O13 all collapse under "Va_O"; Ga_Sb1/Ga_Sb2
 // under "Ga_Sb". Clicking a group heading toggles the whole kind.
-function defectBase(n){return n.replace(/\d+$/,"");}
+function defectBase(n){return n.replace(/[0-9]+$/,"");}
 function refreshVisibleDefects(){
   if(!curMu)return;
   drawFE(curMu);
@@ -2056,274 +2166,194 @@ Object.keys(CATS).forEach(function(base){
   g.appendChild(h);CATS[base].forEach(function(d){g.appendChild(d);});leg.appendChild(g);
 });
 
-// ── 3D Viewer for defect local structures ──
-var viewer3d = null;
+// ── Server-computed defect geometry ──
 var currentDefect = null;
 var currentCharge = null;
-var currentCutoff = 5.0;
 
-// Element display scaling: uniform-axis coords are auto-centered by zoomTo,
-// so only the aspect matters (sphere radius). Radii/colors come with the data.
-function elStyle(element, colors, radii, isCenter) {
-  var color = isCenter ? "#e11d48" : (colors[element] || "#bbbbbb");
-  var r = radii[element] || 1.2;
-  var scale = 0.35 * (isCenter ? 1.6 : 1.0) * Math.min(1.2, Math.max(0.5, r / 1.2 + 0.2));
-  return {sphere: {scale: scale, color: color, opacity: isCenter ? 1.0 : 0.95}};
+function geometryData(defectName, charge) {
+  var byCharge = LOCAL_STRUCTURES && LOCAL_STRUCTURES[defectName];
+  if (!byCharge) return null;
+  return byCharge[String(charge)] || byCharge[charge] || null;
 }
 
-function init3DViewer() {
-  var viewerDiv = document.getElementById("viewer3d");
-  if (!viewerDiv || typeof $3Dmol === 'undefined') return;
-  
-  viewer3d = $3Dmol.createViewer(viewerDiv, {backgroundColor: "white"});
-  
-  var select = document.getElementById("defect-select");
-  if (select) {
-    Object.keys(DEF).forEach(function(name) {
-      DEF[name].charges.forEach(function(c) {
-        var opt = document.createElement("option");
-        opt.value = name + "_" + c.q;
-        opt.textContent = name + " (q=" + c.q + ")";
-        select.appendChild(opt);
-      });
+function geometryEsc(value) {
+  return String(value === null || value === undefined ? "" : value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function geometryFixed(value, digits) {
+  var number = Number(value);
+  return isFinite(number) ? number.toFixed(digits) : "—";
+}
+
+function geometrySide(side) {
+  if (!side) return "—";
+  var element = side.element ? geometryEsc(side.element) + " " : "";
+  return element + geometryEsc(side.label || "site");
+}
+
+function geometrySelection(value) {
+  var split = value.lastIndexOf("|");
+  if (split < 1) return null;
+  return {
+    name: value.slice(0, split),
+    charge: parseInt(value.slice(split + 1), 10)
+  };
+}
+
+function renderGeometryTable(data) {
+  var neighbors = Array.isArray(data.neighbors) ? data.neighbors : [];
+  var angles = Array.isArray(data.angles) ? data.angles : [];
+  var metadata = data.metadata || {};
+  var html = "";
+  html += "<div class='geometry-title'>" +
+    geometryEsc(metadata.defect_name || "局域结构") +
+    " <span class='geometry-title__charge'>(q=" +
+    geometryEsc(metadata.charge) + ")</span></div>";
+  var center = data.center || {};
+  var centerKind = metadata.center_kind === "virtual" ? "虚拟中心" : "实际缺陷 site";
+  var centerText = geometryEsc(center.label || centerKind);
+  if (center.element) centerText += "（" + geometryEsc(center.element) + "）";
+  var abc = Array.isArray(center.abc) ? center.abc.map(function(value) {
+    return geometryFixed(value, 3);
+  }).join(", ") : "—";
+  html += "<div class='geometry-summary'>中心：" +
+    centerText + " · 分数坐标 (" + abc + ") · " + neighbors.length +
+    " 个近邻 · " + angles.length + " 个有效键角";
+  if (metadata.skipped_angles) {
+    html += " · 跳过退化角 " + geometryEsc(metadata.skipped_angles) + " 个";
+  }
+  html += "</div>";
+
+  var coordination = {};
+  neighbors.forEach(function(neighbor) {
+    var element = neighbor.element || "?";
+    coordination[element] = (coordination[element] || 0) + 1;
+  });
+  var coordinationText = Object.keys(coordination).sort().map(function(element) {
+    return geometryEsc(element) + " ×" + coordination[element];
+  }).join(" · ");
+  if (coordinationText) {
+    html += "<div class='geometry-coordination'>元素计数：" + coordinationText + "</div>";
+  }
+
+  html += "<div class='geometry-tables'>";
+  html += "<section class='geometry-section'><h4>中心—近邻距离（Å）</h4>";
+  if (neighbors.length) {
+    html += "<div class='geometry-table-wrap'><table class='geometry-table'><thead><tr><th>序号</th><th>元素</th><th>site label</th><th class='number'>距离 / Å</th></tr></thead><tbody>";
+    neighbors.forEach(function(neighbor, index) {
+      html += "<tr><td class='muted'>" +
+        (index + 1) + "</td><td class='strong'>" +
+        geometryEsc(neighbor.element || "?") + "</td><td class='mono'>" +
+        geometryEsc(neighbor.label || "site") + "</td><td class='mono number'>" +
+        geometryFixed(neighbor.distance, 3) + "</td></tr>";
     });
-    
-    if (select.options.length > 0) {
-      select.selectedIndex = 0;
-      loadDefectStructure(select.value);
-    }
-    
-    select.onchange = function() {
-      loadDefectStructure(this.value);
-    };
-  }
-  
-  var slider = document.getElementById("cutoff-slider");
-  var valueDisplay = document.getElementById("cutoff-value");
-  if (slider) {
-    slider.oninput = function() {
-      currentCutoff = parseFloat(this.value);
-      if (valueDisplay) valueDisplay.textContent = currentCutoff.toFixed(1) + " Å";
-      if (currentDefect !== null) {
-        loadDefectStructure(currentDefect + "_" + currentCharge);
-      }
-    };
-  }
-}
-
-function loadDefectStructure(defectChargeStr) {
-  if (!viewer3d) return;
-  
-  var parts = defectChargeStr.split("_");
-  if (parts.length < 2) return;
-  
-  var charge = parseInt(parts[parts.length - 1]);
-  var defectName = parts.slice(0, -1).join("_");
-  
-  currentDefect = defectName;
-  currentCharge = charge;
-  
-  // Use embedded STRUCTURES data (no API call): filter atoms by currentCutoff
-  // and re-render. The embedded record carries up to 10 Å worth of neighbors;
-  // cutoff is applied client-side so the slider is reactive without a server.
-  if (STRUCTURES && STRUCTURES[defectName] && STRUCTURES[defectName][charge]) {
-    var data = STRUCTURES[defectName][charge];
-    renderDefectStructure(data, currentCutoff);
+    html += "</tbody></table></div>";
   } else {
-    console.warn("No structure data for", defectName, "q=", charge);
+    html += "<div class='geometry-table muted'>没有落入固定 5 Å 壳层的 Voronoi 近邻。</div>";
   }
-  drawStructureInfo(defectName, charge);
-}
+  html += "</section>";
 
-function visibleAtoms(data, cutoff) {
-  var out = [];
-  (data.atoms || []).forEach(function(a) {
-    if (a.distance <= cutoff + 1e-9) out.push(a);
-  });
-  out.sort(function(a, b) { return a.distance - b.distance; });
-  return out;
-}
-
-function renderDefectStructure(data, cutoff) {
-  if (!viewer3d || !data || !data.center) return;
-  var colors = (data.metadata && data.metadata.element_colors) || {};
-  var radii = (data.metadata && data.metadata.element_radii) || {};
-  
-  var atoms = visibleAtoms(data, cutoff);
-  
-  // Clear previous frame: models + viewer-level GLShapes (bond cylinders) and
-  // label sprites persist across removeAllModels — must reset all three or
-  // switching defect/charge/cutoff accumulates old bonds & text.
-  viewer3d.removeAllModels();
-  try { viewer3d.removeAllShapes(); } catch (e) {}
-  if (Array.isArray(viewer3d.labels)) viewer3d.labels.length = 0;
-  
-  // Atom model: neighbors as normal markers; center added as a dedicated atom
-  // so clickable + a single red sphere survive.
-  var xyz = "";
-  var count = atoms.length + 1;
-  xyz += count + "\\nce\\n";
-  var sym = "D";
-  var realAtoms = [{element: sym, x: data.center.x, y: data.center.y, z: data.center.z}].concat(atoms);
-  realAtoms.forEach(function(a) { xyz += a.element + " " + a.x + " " + a.y + " " + a.z + "\\n"; });
-  viewer3d.addModel(xyz, "xyz");
-  
-  // Center: red sphere, always visible. Neighbors: per element color/radius.
-  viewer3d.setStyle({serial: 0}, {sphere: {scale: 0.55, color: "#e11d48", opacity: 1.0}});
-  atoms.forEach(function(a, idx) {
-    viewer3d.setStyle({serial: idx + 1}, elStyle(a.element, colors, radii, false));
-  });
-  
-  viewer3d.setClickable({}, true, function(atom) {
-    var which = atom.serial === 0 ? data.center : atoms[atom.serial - 1];
-    showAtomInfo(atom, which, atom.serial === 0);
-  });
-  
-  // Bonds 中心→近邻, colored per neighbor element, full length labels.
-  atoms.forEach(function(a, idx) {
-    var c = colors[a.element] || "#999999";
-    viewer3d.addCylinder({
-      start: {x: data.center.x, y: data.center.y, z: data.center.z},
-      end: {x: a.x, y: a.y, z: a.z},
-      radius: 0.09,
-      color: c,
-      fromCap: 2,
-      toCap: 2,
-      dashed: false
+  html += "<section class='geometry-section'><h4>中心键角（°，完整组合；按近邻组合顺序）</h4>";
+  if (angles.length) {
+    html += "<div class='geometry-table-wrap'><table class='geometry-table'><thead><tr><th>近邻 A</th><th class='number'>d<sub>A</sub> / Å</th><th>近邻 B</th><th class='number'>d<sub>B</sub> / Å</th><th class='number'>∠A–中心–B / °</th></tr></thead><tbody>";
+    angles.forEach(function(angle) {
+      html += "<tr><td>" +
+        geometrySide(angle.a) + "</td><td class='mono number'>" +
+        geometryFixed(angle.a && angle.a.distance, 3) + "</td><td>" +
+        geometrySide(angle.b) + "</td><td class='mono number'>" +
+        geometryFixed(angle.b && angle.b.distance, 3) + "</td><td class='mono number strong'>" +
+        geometryFixed(angle.angle, 1) + "</td></tr>";
     });
-  });
-  
-  // Labels for every bond length (mx: 10 Å cutoff keeps count bounded)
-  atoms.forEach(function(a) {
-    viewer3d.addLabel(a.distance.toFixed(2), {
-      position: {
-        x: (data.center.x + a.x) / 2,
-        y: (data.center.y + a.y) / 2,
-        z: (data.center.z + a.z) / 2
-      },
-      fontSize: 11,
-      fontColor: "#334155",
-      backgroundColor: "rgba(255,255,255,0.85)",
-      backgroundOpacity: 0.85,
-      showBackground: true,
-      alignment: "center",
-      inFront: true
-    });
-  });
-  
-  viewer3d.zoomTo({fixedPath: true});
-  viewer3d.render();
+    html += "</tbody></table></div>";
+  } else {
+    html += "<div class='geometry-table muted'>没有可显示的非退化中心键角。</div>";
+  }
+  html += "</section></div>";
+  return html;
 }
 
-function showAtomInfo(viewerAtom, atomData, isCenter) {
-  var infoDiv = document.getElementById("structure-info");
-  if (!infoDiv) return;
-  if (isCenter) {
-    drawStructureInfo(currentDefect, currentCharge);
-    return;
-  }
-  // Re-render panel with clicked atom highlighted (scroll the row into view)
-  drawStructureInfo(currentDefect, currentCharge);
-  var rows = infoDiv.querySelectorAll(".nbr-row");
-  var target = atomData.label || ("@" + atomData.distance.toFixed(2));
-  for (var i = 0; i < rows.length; i++) {
-    if (rows[i].getAttribute("data-label") === target ||
-        rows[i].textContent.indexOf(atomData.distance.toFixed(2)) >= 0) {
-      rows[i].style.background = "#eef2ff";
-      rows[i].style.outline = "1px solid #1d4ed8";
-      break;
-    }
-  }
-}
-
-// Bottom-right info panel: neighbor list + coordination summary + metadata.
 function drawStructureInfo(defectName, charge) {
   var panel = document.getElementById("structure-info");
   if (!panel) return;
-  var data = STRUCTURES && STRUCTURES[defectName] && STRUCTURES[defectName][charge];
-  if (!data) { panel.innerHTML = "无结构数据"; return; }
-  var atoms = visibleAtoms(data, currentCutoff);
-  
-  // coordination summary
-  var shell = {};
-  atoms.forEach(function(a) { shell[a.element] = (shell[a.element] || 0) + 1; });
-  var coordHtml = Object.keys(shell).sort().map(function(el) {
-    return "<span style='color:" + ((data.metadata.element_colors || {})[el] || "#999") + ";font-weight:600'>" + el + "</span> ×" + shell[el];
-  }).join(" · ");
-  
-  var html = "<div style='font-size:13px;font-weight:700;margin-bottom:6px;color:#0f172a;'>" +
-    data.metadata.defect_name + " (q=" + charge + ")</div>";
-  html += "<div style='margin-bottom:8px;font-size:12px;color:#64748b;'>中心 (分数) " +
-    data.center.abc.map(function(v){return v.toFixed(3);}).join(", ") + " · cutoff " + currentCutoff.toFixed(1) + " Å · " + atoms.length + " 近邻</div>";
-  html += "<div style='margin-bottom:8px;font-size:12px;color:#475569;'>配位: " + coordHtml + "</div>";
-  html += "<div style='font-size:11px;color:#94a3b8;border-top:1px solid #e2e8f0;padding-top:6px;max-height:220px;overflow-y:auto;'>";
-  atoms.forEach(function(a, i) {
-    html += "<div class='nbr-row' data-label='" + (a.label || "") + "' style='padding:1px 0;'>" +
-      (i + 1) + ". <b>" + a.element + "</b> " + a.distance.toFixed(2) + " Å " +
-      (a.label ? "(" + a.label + ")" : "") + "</div>";
-  });
-  html += "</div>";
-  panel.innerHTML = html;
+  var data = geometryData(defectName, charge);
+  if (!data) {
+    panel.innerHTML = "<div style='padding:12px;border:1px solid var(--line);border-radius:6px;color:var(--text-muted);'>该电荷态没有可用的 <code>defect_entry.json</code>，局域结构部分已降级；其余报告数据仍可用。</div>";
+    return;
+  }
+  panel.innerHTML = renderGeometryTable(data);
 }
 
-// 3D viewer is created by bootCritical3DViewer() on window.load (see end of
-// script) to avoid the dead-WebGL-context race seen when booting at
-// DOMContentLoaded.
+function loadDefectGeometry(value) {
+  var selection = geometrySelection(value);
+  if (!selection) return;
+  currentDefect = selection.name;
+  currentCharge = selection.charge;
+  drawStructureInfo(currentDefect, currentCharge);
+}
 
-// Link legend clicks with 3D viewer
-function linkLegendWith3DViewer() {
+function initGeometryPanel() {
+  var select = document.getElementById("defect-select");
+  if (!select) return;
+  Object.keys(DEF).forEach(function(name) {
+    DEF[name].charges.forEach(function(chargeData) {
+      var option = document.createElement("option");
+      option.value = name + "|" + chargeData.q;
+      option.textContent = name + " (q=" + chargeData.q + ")";
+      select.appendChild(option);
+    });
+  });
+  if (!select.options.length) {
+    drawStructureInfo("", 0);
+    return;
+  }
+  select.selectedIndex = 0;
+  select.onchange = function() { loadDefectGeometry(this.value); };
+  loadDefectGeometry(select.value);
+}
+
+function selectFirstGeometryCharge(defectName) {
+  var select = document.getElementById("defect-select");
+  if (!select) return;
+  for (var i = 0; i < select.options.length; i++) {
+    var selection = geometrySelection(select.options[i].value);
+    if (selection && selection.name === defectName) {
+      select.selectedIndex = i;
+      loadDefectGeometry(select.value);
+      var card = document.getElementById("structureCard");
+      if (card) card.scrollIntoView({behavior: "smooth", block: "nearest"});
+      return;
+    }
+  }
+}
+
+function linkLegendWithGeometry() {
   var legDiv = document.getElementById("leg");
   if (!legDiv) return;
-  
-  legDiv.addEventListener("click", function(e) {
-    var target = e.target;
+  legDiv.addEventListener("click", function(event) {
+    var target = event.target;
     while (target && target !== legDiv) {
       if (target.getAttribute && target.getAttribute("data-name")) {
-        var defectName = target.getAttribute("data-name");
-        var select = document.getElementById("defect-select");
-        if (select) {
-          // Find the first charge state for this defect
-          for (var i = 0; i < select.options.length; i++) {
-            if (select.options[i].value.startsWith(defectName + "_")) {
-              select.selectedIndex = i;
-              loadDefectStructure(select.value);
-              // Scroll to 3D viewer
-              var structureCard = document.getElementById("structureCard");
-              if (structureCard) {
-                structureCard.scrollIntoView({behavior: "smooth", block: "nearest"});
-              }
-              break;
-            }
-          }
-        }
-        break;
+        selectFirstGeometryCharge(target.getAttribute("data-name"));
+        return;
       }
       target = target.parentElement;
     }
   });
 }
 
-// Call linkLegendWith3DViewer after DOM is ready
+function bootGeometryPanel() {
+  initGeometryPanel();
+  linkLegendWithGeometry();
+}
 if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", linkLegendWith3DViewer);
+  document.addEventListener("DOMContentLoaded", bootGeometryPanel);
 } else {
-  linkLegendWith3DViewer();
-}
-
-// Defer 3D viewer creation until window.load: booting on DOMContentLoaded
-// (before the final layout pass) can yield a dead WebGL context — the atoms
-// never reach the screen and the canvas stays empty. On window.load the
-// layout is settled and the context is valid. (Do NOT probe for a dead
-// context via glDOM.getContext('webgl'): in some headless Desktop GL
-// environments that reads null even when rendering works.)
-function bootCritical3DViewer() {
-  if (viewer3d) return;   // guard against double load events
-  init3DViewer();
-}
-if (window.addEventListener) {
-  window.addEventListener('load', bootCritical3DViewer);
-} else {
-  window.onload = bootCritical3DViewer;
+  bootGeometryPanel();
 }
 
 // Fixed canvas dimensions: both canvases are 600×450.
@@ -2349,13 +2379,13 @@ def _html_template(
     exo_elements: list[str],
     mags: dict[str, dict[int, float]] | None = None,
     vox: dict[str, dict[str, Any]] | None = None,
-    defect_structures: dict[str, dict[int, dict[str, Any]]] | None = None,
+    local_structures: dict[str, dict[int, dict[str, Any]]] | None = None,
 ) -> str:
     """Render the self-contained interactive HTML page."""
     js = json.dumps
     mags = mags or {}
     vox = vox or {}
-    defect_structures = defect_structures or {}
+    local_structures = local_structures or {}
     # Compute impurity elements (in vertex_mu but not host vertex_elements)
     host_set = set(vertex_elements)
     impurity_set: set[str] = set()
@@ -2397,7 +2427,7 @@ def _html_template(
                          for n in sorted_names}),
             structures_json=js({
                 name: {str(q): data for q, data in charges.items()}
-                for name, charges in defect_structures.items()
+                for name, charges in local_structures.items()
             }),
         )
         + "\n" + cpd_js + "\n" + fe_canvas + fermi_js + "\n" + _COMMON_JS_FOOTER
@@ -2462,15 +2492,15 @@ def generate_interactive_html(system_dir: Path) -> Path | None:
             "ion-valence labels render as ?", host_name, host_name,
         )
 
-    # Extract defect structures for 3D viewer (pre-loaded, no API needed)
-    defect_structures = {}
+    # Extract local geometry server-side; missing entries only affect this card.
+    local_structures: dict[str, dict[int, dict[str, Any]]] = {}
     for name in sorted_names:
-        defect_structures[name] = {}
+        local_structures[name] = {}
         for charge_data in defects[name]["charges"]:
             charge = int(charge_data["q"])
-            structure = _extract_defect_structure(system_dir, name, charge, cutoff=10.0)
+            structure = _extract_defect_structure(system_dir, name, charge)
             if structure:
-                defect_structures[name][charge] = structure
+                local_structures[name][charge] = structure
 
     ref_mu: dict[str, float] = vertex_mu[0] if vertex_mu else {}
 
@@ -2509,7 +2539,7 @@ def generate_interactive_html(system_dir: Path) -> Path | None:
         exo_elements=exo_elements,
         mags=mags,
         vox=vox,
-        defect_structures=defect_structures,
+        local_structures=local_structures,
     )
 
     out_path = system_dir / "formation_energy_interactive.html"

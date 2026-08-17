@@ -9,12 +9,13 @@ import yaml
 
 from vasp_sop.report.interactive import (
     _build_defects,
+    _defect_kind,
     _defect_segments,
+    _extract_defect_structure,
     _extract_vertex_data,
     _formula_html,
     _formula_subscripts,
     _html_template,
-    _defect_kind,
     _infer_host_valences,
     _ion_valence_template,
     _kind_colors,
@@ -187,6 +188,151 @@ def _write_system(tmp_path: Path) -> Path:
         yaml.dump(_make_minimal_tv())
     )
     return root
+
+
+def _write_geometry_entry(
+    tmp_path: Path, defect_name: str, charge: int, *, vacancy: bool,
+    asymmetric: bool = False,
+) -> Path:
+    """Write a compact periodic structure with shell sites."""
+    from pymatgen.core import Lattice, Structure
+
+    root = tmp_path / f"{defect_name}_{charge}"
+    defect_dir = root / "defect" / f"{defect_name}_{charge}"
+    defect_dir.mkdir(parents=True)
+    if vacancy:
+        structure = Structure(
+            Lattice.cubic(6.0),
+            ["Si", "Si", "Si"],
+            [[0.5, 0.0, 0.0], [0.0, 0.5, 0.0], [0.0, 0.0, 0.5]],
+        )
+    elif asymmetric:
+        structure = Structure(
+            Lattice.cubic(10.0),
+            ["O", "Si", "Si", "Si", "Si"],
+            [
+                [0.0, 0.0, 0.0], [0.2, 0.0, 0.0], [0.0, 0.3, 0.0],
+                [0.0, 0.0, 0.4], [0.2, 0.2, 0.2],
+            ],
+        )
+    else:
+        structure = Structure(
+            Lattice.cubic(6.0),
+            ["O", "Si", "Si", "Si"],
+            [[0.0, 0.0, 0.0], [0.5, 0.0, 0.0],
+             [0.0, 0.5, 0.0], [0.0, 0.0, 0.5]],
+        )
+    structure_data = structure.as_dict()
+    for index, site in enumerate(structure_data["sites"]):
+        site["label"] = f"{site['species'][0]['element']}_{index + 1}"
+    payload = {
+        "structure": structure_data,
+        "defect_center": [0.0, 0.0, 0.0],
+        "formula": "SiO",
+    }
+    (defect_dir / "defect_entry.json").write_text(json.dumps(payload))
+    return root
+
+def _write_charge_specific_geometry_entries(tmp_path: Path) -> Path:
+    """Write identical entries with distinct relaxed charge structures."""
+    from pymatgen.core import Lattice, Structure
+
+    root = tmp_path / "charge_specific_geometry"
+    base = Structure(
+        Lattice.cubic(10.0),
+        ["O", "Si", "Si", "Si"],
+        [[0.0, 0.0, 0.0], [0.25, 0.0, 0.0],
+         [0.0, 0.35, 0.0], [0.2, 0.2, 0.0]],
+    )
+    entry_data = base.as_dict()
+    for index, site in enumerate(entry_data["sites"]):
+        site["label"] = f"{site['species'][0]['element']}_{index + 1}"
+    payload = {
+        "structure": entry_data,
+        "defect_center": [0.0, 0.0, 0.0],
+        "formula": "SiO",
+    }
+    for charge, first_neighbor_x in [(0, 0.25), (1, 0.30)]:
+        defect_dir = root / "defect" / f"Si_O1_{charge}"
+        defect_dir.mkdir(parents=True)
+        (defect_dir / "defect_entry.json").write_text(json.dumps(payload))
+        relaxed = base.copy()
+        relaxed.translate_sites(
+            [1], [first_neighbor_x - 0.25, 0.0, 0.0], frac_coords=True,
+        )
+        relaxed.to(fmt="poscar", filename=str(defect_dir / "CONTCAR"))
+    return root
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Defect local geometry
+# ═════════════════════════════════════════════════════════════════════
+
+
+class TestExtractDefectStructure:
+    def test_substitution_maps_center_site_and_deduplicates_images(self, tmp_path):
+        root = _write_geometry_entry(tmp_path, "Si_O1", 0, vacancy=False)
+
+        record = _extract_defect_structure(root, "Si_O1", 0)
+
+        assert record is not None
+        assert record["metadata"]["center_kind"] == "site"
+        assert record["center"]["element"] == "O"
+        assert len(record["neighbors"]) == 3
+        assert len({n["site_index"] for n in record["neighbors"]}) == 3
+        assert [n["distance"] for n in record["neighbors"]] == [3.0] * 3
+        assert len(record["angles"]) == 3
+        assert [a["angle"] for a in record["angles"]] == [90.0] * 3
+
+    def test_uses_charge_specific_relaxed_structure(self, tmp_path):
+        root = _write_charge_specific_geometry_entries(tmp_path)
+
+        neutral = _extract_defect_structure(root, "Si_O1", 0)
+        positive = _extract_defect_structure(root, "Si_O1", 1)
+
+        assert neutral is not None
+        assert positive is not None
+        assert neutral["metadata"]["structure_source"] == "CONTCAR"
+        assert positive["metadata"]["structure_source"] == "CONTCAR"
+        assert [n["distance"] for n in neutral["neighbors"]] != [
+            n["distance"] for n in positive["neighbors"]
+        ]
+        assert [a["angle"] for a in neutral["angles"]] != [
+            a["angle"] for a in positive["angles"]
+        ]
+
+
+    def test_angles_follow_neighbor_pair_order_not_magnitude(self, tmp_path):
+        root = _write_geometry_entry(
+            tmp_path, "Si_O1", 0, vacancy=False, asymmetric=True,
+        )
+
+        record = _extract_defect_structure(root, "Si_O1", 0)
+
+        assert record is not None
+        assert [
+            (angle["a"]["label"], angle["b"]["label"])
+            for angle in record["angles"]
+        ] == [
+            ("Si_2", "Si_3"), ("Si_2", "Si_5"), ("Si_2", "Si_4"),
+            ("Si_3", "Si_5"), ("Si_3", "Si_4"), ("Si_5", "Si_4"),
+        ]
+        assert [angle["angle"] for angle in record["angles"]] == [
+            90.0, 54.7, 90.0, 54.7, 90.0, 54.7,
+        ]
+
+
+    def test_vacancy_uses_virtual_center_and_reports_full_angle_table(self, tmp_path):
+        root = _write_geometry_entry(tmp_path, "Va_O1", 0, vacancy=True)
+
+        record = _extract_defect_structure(root, "Va_O1", 0)
+
+        assert record is not None
+        assert record["metadata"]["center_kind"] == "virtual"
+        assert record["center"]["label"] == "虚拟缺陷中心"
+        assert len(record["neighbors"]) == 3
+        assert len(record["angles"]) == 3
+        assert record["metadata"]["skipped_angles"] == 0
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -641,6 +787,22 @@ class TestGenerateInteractiveHtml:
         assert '"Va_Br1"' in content
         # Check BG is set to cbm
         assert "var BG = 2.4095" in content
+
+    def test_local_structure_panel_has_no_3dmol_or_cutoff_control(self, tmp_path):
+        root = _write_system(tmp_path)
+
+        out = generate_interactive_html(root)
+        content = out.read_text()
+
+        assert "3Dmol" not in content
+        assert "$3Dmol" not in content
+        assert "cutoff-slider" not in content
+        assert "var LOCAL_STRUCTURES" in content
+        assert "function renderGeometryTable" in content
+        assert "VoronoiNN(tol=0)" in content
+        assert "geometry-tables" in content
+        assert "geometry-table" in content
+        assert "按近邻组合顺序" in content
 
     def test_topological_map_functions_defined(self, tmp_path):
         root = _write_system(tmp_path)
