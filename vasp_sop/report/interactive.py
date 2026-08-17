@@ -2090,6 +2090,30 @@ function renderDefectStructure(data) {
     showAtomInfo(atom, data.atoms[atom.serial]);
   });
   
+  // Fix camera: the 3Dmol default camera sits at z=150 with far~78, but our
+  // atoms are centered at z~11 — they fall outside the far plane and render
+  // invisible. Reposition the camera onto the structure's bounding-box center
+  // at a distance proportional to its spread.
+  var atoms = viewer3d.models[0].atoms || [];
+  if (atoms.length > 0) {
+    var minX=1e9,minY=1e9,minZ=1e9,maxX=-1e9,maxY=-1e9,maxZ=-1e9;
+    atoms.forEach(function(a){
+      minX=Math.min(minX,a.x); minY=Math.min(minY,a.y); minZ=Math.min(minZ,a.z);
+      maxX=Math.max(maxX,a.x); maxY=Math.max(maxY,a.y); maxZ=Math.max(maxZ,a.z);
+    });
+    var cx=(minX+maxX)/2, cy=(minY+maxY)/2, cz=(minZ+maxZ)/2;
+    var spread = Math.max(maxX-minX, maxY-minY, maxZ-minZ);
+    var dist = spread * 3;
+    viewer3d.camera.position.x = cx;
+    viewer3d.camera.position.y = cy;
+    viewer3d.camera.position.z = cz + dist;
+    viewer3d.camera.far = dist * 2;
+    if (viewer3d.camera.target) {
+      viewer3d.camera.target.x = cx;
+      viewer3d.camera.target.y = cy;
+      viewer3d.camera.target.z = cz;
+    }
+  }
   viewer3d.zoomTo();
   viewer3d.render();
 }
